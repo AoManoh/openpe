@@ -5,6 +5,8 @@
 .augmentignore
 .codex/
 .windsurf/
+AGENTS.md
+/skills/
 
 # Dependency and build outputs
 node_modules/
