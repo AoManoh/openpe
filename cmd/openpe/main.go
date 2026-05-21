@@ -124,6 +124,9 @@ func runCodex(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 	if len(args) > 0 && args[0] == "hook" {
 		return runCodexHook(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	}
+	if len(args) > 0 && args[0] == "last" {
+		return runCodexHookLast(args[1:], stdout, stderr)
+	}
 	cfg := config.Load()
 	fs := flag.NewFlagSet("codex", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -212,6 +215,8 @@ func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Wr
 		return runCodexHookRun(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "install":
 		return runCodexHookInstall(args[1:], stdout, stderr, getwd)
+	case "last":
+		return runCodexHookLast(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printCodexHookUsage(stdout)
 		return 0
@@ -220,6 +225,31 @@ func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Wr
 		printCodexHookUsage(stderr)
 		return 2
 	}
+}
+
+func runCodexHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("codex hook last", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	pathOnly := fs.Bool("path", false, "print the cached preview path")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	path, err := codexadapter.LastPreviewPath()
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve preview path: %v\n", err)
+		return 1
+	}
+	if *pathOnly {
+		fmt.Fprintln(stdout, path)
+		return 0
+	}
+	content, err := codexadapter.ReadLastPreview()
+	if err != nil {
+		fmt.Fprintf(stderr, "read preview: %v\n", err)
+		return 1
+	}
+	fmt.Fprint(stdout, content)
+	return 0
 }
 
 func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
@@ -421,12 +451,14 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  openpe codex [--prompt text] [--dry-run] [--codex-arg arg]...")
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user]")
 	fmt.Fprintln(w, "  openpe codex hook run")
+	fmt.Fprintln(w, "  openpe codex last [--path]")
 }
 
 func printCodexHookUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user] [--path hooks.json] [--openpe-bin path]")
 	fmt.Fprintln(w, "  openpe codex hook run [--auto]")
+	fmt.Fprintln(w, "  openpe codex hook last [--path]")
 }
 
 func envOrDefault(name string, fallback string) string {

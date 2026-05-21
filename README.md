@@ -123,6 +123,18 @@ pe: 帮我检查测试失败
 
 默认行为是 preview：openPE 会拦截这条消息，不提交给模型，并在 Codex 中显示增强后的 prompt。你可以复制、修改后再正常发送。
 
+Codex TUI 会压缩 hook feedback 的换行，所以 openPE 还会把完整 Markdown 预览写入本地缓存。查看最近一次增强结果：
+
+```bash
+openpe codex hook last
+```
+
+只查看缓存路径：
+
+```bash
+openpe codex hook last --path
+```
+
 如果想跳过预览，直接把增强结果作为 `additionalContext` 注入当前 turn：
 
 ```text
