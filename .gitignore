@@ -4,6 +4,7 @@
 !.env.example
 .augmentignore
 .codex/
+.windsurf/
 
 # Dependency and build outputs
 node_modules/
