@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+.augmentignore
+.codex/
 
 # Dependency and build outputs
 node_modules/
@@ -22,14 +24,5 @@ pnpm-debug.log*
 # Reusable public automation should live under the owning skill directory.
 /scripts/
 
-# Private governance outputs.
-# Keep docs/ as a public template skeleton, but do not publish local reports,
-# work logs, references, PRDs, debug notes, or review artifacts by default.
-# To intentionally publish a docs artifact, add an explicit ! exception below.
-/docs/**
-!/docs/
-!/docs/**/
-!/docs/**/.gitkeep
-!/docs/_fragments/
-!/docs/_fragments/**
-!/docs/requirements/2026-05-21-project-kickoff.md
+# Private governance outputs and local knowledge assets.
+/docs/
