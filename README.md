@@ -75,6 +75,37 @@ openpe codex \
 
 `--codex-arg` 需要重复传递；如果参数本身以 `-` 开头，推荐使用 `--codex-arg=--flag` 形式。
 
+## Codex Slash Command
+
+如果已经在 Codex 交互式 CLI 内，不需要退出后再运行 `openpe codex`。安装本地 prompt command 后，可以在当前会话中使用：
+
+```text
+/prompts:pe 帮我检查这个 Go 项目的测试失败
+```
+
+如果通过 Codex plugin marketplace 安装，则使用插件命令：
+
+```text
+/openpe:pe 帮我检查这个 Go 项目的测试失败
+```
+
+本机快捷安装：
+
+```bash
+mkdir -p ~/.codex/prompts
+ln -sfn /home/oh/projects/openPE/plugins/openpe/commands/pe.md ~/.codex/prompts/pe.md
+ln -sfn /home/oh/projects/openPE/plugins/openpe/commands/pe.md ~/.codex/prompts/openpe.md
+```
+
+本地插件安装：
+
+```bash
+codex plugin marketplace add /home/oh/projects/openPE
+codex plugin add openpe@openpe-local
+```
+
+这类 slash command 的工作方式是：让当前 Codex 会话先调用 `openpe enhance` 生成增强 prompt，然后继续在同一会话执行增强后的任务。它不是 Codex 客户端层的“提交前输入框替换 hook”；如果未来 Codex 暴露原生 pre-submit hook，再把这一层下沉到真正的输入拦截。
+
 ## HTTP
 
 启动服务：
