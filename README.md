@@ -5,6 +5,7 @@
 ## MVP 范围
 
 - Go CLI：`openpe enhance`
+- Codex CLI adapter：`openpe codex`
 - Go HTTP server：`POST /v1/prompt-enhance`
 - 标准 OpenAI-compatible `/v1/chat/completions`
 - 非流式响应
@@ -27,6 +28,8 @@ export OPENPE_TIMEOUT="60s"
 
 ## CLI
 
+只增强 prompt：
+
 ```bash
 openpe enhance --prompt "帮我检查这个 Go 项目的测试失败"
 ```
@@ -42,6 +45,35 @@ printf '实现一个 prompt enhancer MVP' | openpe enhance
 ```bash
 openpe enhance --json --prompt "优化这个需求描述"
 ```
+
+直接进入 Codex CLI：
+
+```bash
+openpe codex --prompt "帮我检查这个 Go 项目的测试失败"
+```
+
+`openpe codex` 会先调用 prompt enhancer，然后把增强后的 prompt 通过 stdin 交给：
+
+```bash
+codex exec -C "$PWD" -
+```
+
+只查看增强结果、不启动 Codex：
+
+```bash
+openpe codex --dry-run --prompt "帮我检查这个 Go 项目的测试失败"
+```
+
+传递额外 Codex 参数：
+
+```bash
+openpe codex \
+  --codex-arg=--ephemeral \
+  --codex-arg=--search \
+  --prompt "先分析当前仓库结构，再补全 README 使用说明"
+```
+
+`--codex-arg` 需要重复传递；如果参数本身以 `-` 开头，推荐使用 `--codex-arg=--flag` 形式。
 
 ## HTTP
 
