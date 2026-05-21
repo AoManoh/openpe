@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	claudeadapter "github.com/AoManoh/openpe/internal/adapters/claude"
 	"github.com/AoManoh/openpe/internal/adapters/clipboard"
 	codexadapter "github.com/AoManoh/openpe/internal/adapters/codex"
 	"github.com/AoManoh/openpe/internal/config"
@@ -39,6 +40,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, new
 		return runEnhance(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "codex":
 		return runCodex(args[1:], stdin, stdout, stderr, newProvider, getwd, runCmd)
+	case "claude":
+		return runClaude(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -395,6 +398,156 @@ func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getw
 	return 0
 }
 
+func runClaude(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	if len(args) > 0 && args[0] == "hook" {
+		return runClaudeHook(args[1:], stdin, stdout, stderr, newProvider, getwd)
+	}
+	fmt.Fprintf(stderr, "unknown claude command\n")
+	printClaudeHookUsage(stderr)
+	return 2
+}
+
+func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	if len(args) == 0 {
+		printClaudeHookUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "run":
+		return runClaudeHookRun(args[1:], stdin, stderr, newProvider, getwd)
+	case "install":
+		return runClaudeHookInstall(args[1:], stdout, stderr, getwd)
+	case "-h", "--help", "help":
+		printClaudeHookUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown claude hook command: %s\n", args[0])
+		printClaudeHookUsage(stderr)
+		return 2
+	}
+}
+
+func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	cfg := config.Load()
+	fs := flag.NewFlagSet("claude hook run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	client := fs.String("client", "claude-code", "target client name")
+	mode := fs.String("mode", "agent", "prompt mode")
+	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
+	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
+	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	input, err := claudeadapter.DecodeHookInput(stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "openPE skipped prompt enhancement: invalid Claude hook input: %v\n", err)
+		return 0
+	}
+	if !claudeadapter.ShouldHandleHook(input) {
+		return 0
+	}
+	overrideCWD := ""
+	if strings.TrimSpace(input.CWD) == "" {
+		workingDir, err := getwd()
+		if err != nil {
+			fmt.Fprintf(stderr, "openPE prompt enhancement failed: get cwd: %v\n", err)
+			return 2
+		}
+		overrideCWD = workingDir
+	}
+	provider, err := newProvider(openai.Config{
+		BaseURL: strings.TrimSpace(*baseURL),
+		APIKey:  strings.TrimSpace(*apiKey),
+		Model:   strings.TrimSpace(*model),
+		Timeout: *timeout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "openPE prompt enhancement failed: configure provider: %v\n", err)
+		return 2
+	}
+	preview, err := claudeadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, claudeadapter.HookOptions{
+		Client:  *client,
+		Mode:    *mode,
+		CWD:     overrideCWD,
+		Timeout: timeoutOrDefault(*timeout),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "openPE prompt enhancement failed: %v\n", err)
+		return 2
+	}
+	if strings.TrimSpace(preview) == "" {
+		return 0
+	}
+	fmt.Fprintln(stderr, preview)
+	return 2
+}
+
+func runClaudeHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
+	fs := flag.NewFlagSet("claude hook install", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("path", "", "explicit Claude settings.json path")
+	openpeBin := fs.String("openpe-bin", "", "openpe executable path; defaults to PATH lookup")
+	envFile := fs.String("env-file", "", "dotenv file loaded by the hook; defaults to ~/.config/openpe/.env")
+	hookTimeout := fs.Int("hook-timeout", 120, "Claude hook timeout in seconds")
+	dryRun := fs.Bool("dry-run", false, "print settings.json without writing it")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *hookTimeout <= 0 {
+		fmt.Fprintln(stderr, "hook-timeout must be positive")
+		return 1
+	}
+	settingsPath, err := claudeSettingsPath(*target)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve Claude settings path: %v\n", err)
+		return 1
+	}
+	bin, err := resolveOpenPEBin(*openpeBin)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve openpe binary: %v\n", err)
+		return 1
+	}
+	hookEnvFile, err := claudeHookEnvFile(*envFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve hook env file: %v\n", err)
+		return 1
+	}
+	var existing []byte
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		existing = data
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "read Claude settings: %v\n", err)
+		return 1
+	}
+	command := claudeadapter.HookCommand(bin, hookEnvFile)
+	merged, err := claudeadapter.MergeSettings(existing, command, *hookTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "merge Claude settings: %v\n", err)
+		return 1
+	}
+	changed := !bytes.Equal(bytes.TrimSpace(existing), bytes.TrimSpace(merged))
+	if *dryRun {
+		_, _ = stdout.Write(merged)
+		return 0
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "create Claude settings directory: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(settingsPath, merged, 0o644); err != nil {
+		fmt.Fprintf(stderr, "write Claude settings: %v\n", err)
+		return 1
+	}
+	if changed {
+		fmt.Fprintf(stdout, "installed openPE Claude hook: %s\n", settingsPath)
+	} else {
+		fmt.Fprintf(stdout, "openPE Claude hook already installed: %s\n", settingsPath)
+	}
+	return 0
+}
+
 func codexHooksPath(scope string, target string, getwd func() (string, error)) (string, error) {
 	if strings.TrimSpace(target) != "" {
 		return filepath.Clean(target), nil
@@ -415,6 +568,17 @@ func codexHooksPath(scope string, target string, getwd func() (string, error)) (
 	default:
 		return "", fmt.Errorf("unsupported scope %q", scope)
 	}
+}
+
+func claudeSettingsPath(target string) (string, error) {
+	if strings.TrimSpace(target) != "" {
+		return filepath.Abs(target)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
 }
 
 func resolveOpenPEBin(value string) (string, error) {
@@ -456,6 +620,18 @@ func codexHookEnvFile(scope string, target string, value string, getwd func() (s
 	return filepath.Join(cwd, ".env"), nil
 }
 
+func claudeHookEnvFile(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return filepath.Abs(value)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "openpe", ".env"), nil
+}
+
 func runCommand(ctx context.Context, name string, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = stdin
@@ -478,6 +654,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user]")
 	fmt.Fprintln(w, "  openpe codex hook run")
 	fmt.Fprintln(w, "  openpe codex last [--path]")
+	fmt.Fprintln(w, "  openpe claude hook install")
+	fmt.Fprintln(w, "  openpe claude hook run")
 }
 
 func printCodexHookUsage(w io.Writer) {
@@ -485,6 +663,12 @@ func printCodexHookUsage(w io.Writer) {
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user] [--path hooks.json] [--openpe-bin path]")
 	fmt.Fprintln(w, "  openpe codex hook run [--auto] [--block-output json|stderr] [--copy-preview] [--terminal-preview=false] [--hook-scope user|project]")
 	fmt.Fprintln(w, "  openpe codex hook last [--path]")
+}
+
+func printClaudeHookUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  openpe claude hook install [--path settings.json] [--openpe-bin path]")
+	fmt.Fprintln(w, "  openpe claude hook run")
 }
 
 func envOrDefault(name string, fallback string) string {
