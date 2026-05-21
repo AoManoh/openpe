@@ -412,11 +412,23 @@ func parseCodexManualEnhance(prompt string) (string, string, bool) {
 		mode   string
 	}{
 		{prefix: "pe!:", mode: "inject"},
+		{prefix: "pe！：", mode: "inject"},
+		{prefix: "pe!：", mode: "inject"},
+		{prefix: "pe！:", mode: "inject"},
 		{prefix: "openpe!:", mode: "inject"},
+		{prefix: "openpe！：", mode: "inject"},
+		{prefix: "openpe!：", mode: "inject"},
+		{prefix: "openpe！:", mode: "inject"},
 		{prefix: "增强!:", mode: "inject"},
+		{prefix: "增强！：", mode: "inject"},
+		{prefix: "增强!：", mode: "inject"},
+		{prefix: "增强！:", mode: "inject"},
 		{prefix: "pe:", mode: "preview"},
+		{prefix: "pe：", mode: "preview"},
 		{prefix: "openpe:", mode: "preview"},
+		{prefix: "openpe：", mode: "preview"},
 		{prefix: "增强:", mode: "preview"},
+		{prefix: "增强：", mode: "preview"},
 	} {
 		if strings.HasPrefix(prompt, trigger.prefix) {
 			return strings.TrimSpace(strings.TrimPrefix(prompt, trigger.prefix)), trigger.mode, true
