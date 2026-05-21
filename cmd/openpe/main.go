@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	codexadapter "github.com/AoManoh/openpe/internal/adapters/codex"
 	"github.com/AoManoh/openpe/internal/config"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers/openai"
@@ -235,34 +236,21 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	var input codexHookInput
-	if err := json.NewDecoder(stdin).Decode(&input); err != nil {
-		return writeCodexHookSkip(stdout, fmt.Sprintf("openPE skipped prompt enhancement: invalid hook input: %v", err))
+	input, err := codexadapter.DecodeHookInput(stdin)
+	if err != nil {
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.Skip(fmt.Sprintf("openPE skipped prompt enhancement: invalid hook input: %v", err)))
 	}
-	if input.HookEventName != "" && input.HookEventName != "UserPromptSubmit" {
+	manual, shouldHandle := codexadapter.ShouldHandleHook(input, *auto)
+	if !shouldHandle {
 		return 0
 	}
-	rawPrompt := strings.TrimSpace(input.Prompt)
-	if rawPrompt == "" {
-		return 0
-	}
-	manualPrompt, manualMode, manual := parseCodexManualEnhance(rawPrompt)
-	if !*auto && !manual {
-		return 0
-	}
-	if manual {
-		rawPrompt = manualPrompt
-	}
-	if rawPrompt == "" {
-		return writeCodexHookBlock(stdout, "openPE trigger found, but prompt is empty.")
-	}
-	cwd := strings.TrimSpace(input.CWD)
-	if cwd == "" {
+	overrideCWD := ""
+	if strings.TrimSpace(input.CWD) == "" {
 		workingDir, err := getwd()
 		if err != nil {
-			return writeCodexHookError(stdout, manual, fmt.Sprintf("get cwd: %v", err))
+			return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("get cwd: %v", err)))
 		}
-		cwd = workingDir
+		overrideCWD = workingDir
 	}
 	provider, err := newProvider(openai.Config{
 		BaseURL: strings.TrimSpace(*baseURL),
@@ -271,36 +259,25 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		Timeout: *timeout,
 	})
 	if err != nil {
-		return writeCodexHookError(stdout, manual, fmt.Sprintf("configure provider: %v", err))
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure provider: %v", err)))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeoutOrDefault(*timeout))
-	defer cancel()
-	resp, err := enhancer.NewService(provider).Enhance(ctx, enhancer.Request{
-		Prompt: rawPrompt,
-		Client: *client,
-		CWD:    cwd,
-		Mode:   *mode,
+	output, err := codexadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, codexadapter.HookOptions{
+		Client:  *client,
+		Mode:    *mode,
+		Auto:    *auto,
+		CWD:     overrideCWD,
+		Timeout: timeoutOrDefault(*timeout),
 	})
 	if err != nil {
-		return writeCodexHookError(stdout, manual, err.Error())
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error()))
 	}
-	if manual && manualMode == "preview" {
-		return writeCodexHookBlock(stdout, codexPreviewReason(resp.EnhancedPrompt))
-	}
-	output := codexHookOutput{
-		SystemMessage: "openPE enhanced prompt injected as additional context.",
-		HookSpecificOutput: &codexHookSpecificOutput{
-			HookEventName:     "UserPromptSubmit",
-			AdditionalContext: codexAdditionalContext(resp.EnhancedPrompt),
-		},
-	}
-	return writeCodexHookOutput(stdout, output)
+	return codexadapter.EncodeHookOutputOrFallback(stdout, output)
 }
 
 func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
 	fs := flag.NewFlagSet("codex hook install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	scope := fs.String("scope", "project", "hook scope: project or user")
+	scope := fs.String("scope", "user", "hook scope: user or project")
 	target := fs.String("path", "", "explicit hooks.json path")
 	openpeBin := fs.String("openpe-bin", "", "openpe executable path; defaults to PATH lookup")
 	envFile := fs.String("env-file", "", "dotenv file loaded by the hook; defaults to project .env")
@@ -335,8 +312,8 @@ func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getw
 		fmt.Fprintf(stderr, "read hooks config: %v\n", err)
 		return 1
 	}
-	command := codexHookCommand(bin, hookEnvFile)
-	merged, _, err := mergeCodexHooksConfig(existing, command, *hookTimeout)
+	command := codexadapter.HookCommand(bin, hookEnvFile)
+	merged, err := codexadapter.MergeHooksConfig(existing, command, *hookTimeout)
 	if err != nil {
 		fmt.Fprintf(stderr, "merge hooks config: %v\n", err)
 		return 1
@@ -360,99 +337,6 @@ func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getw
 		fmt.Fprintf(stdout, "openPE Codex hook already installed: %s\n", hooksPath)
 	}
 	return 0
-}
-
-type codexHookInput struct {
-	HookEventName string `json:"hook_event_name"`
-	Prompt        string `json:"prompt"`
-	CWD           string `json:"cwd"`
-}
-
-type codexHookOutput struct {
-	Continue           bool                     `json:"continue,omitempty"`
-	Decision           string                   `json:"decision,omitempty"`
-	Reason             string                   `json:"reason,omitempty"`
-	SystemMessage      string                   `json:"systemMessage,omitempty"`
-	HookSpecificOutput *codexHookSpecificOutput `json:"hookSpecificOutput,omitempty"`
-}
-
-type codexHookSpecificOutput struct {
-	HookEventName     string `json:"hookEventName"`
-	AdditionalContext string `json:"additionalContext,omitempty"`
-}
-
-func writeCodexHookSkip(w io.Writer, message string) int {
-	return writeCodexHookOutput(w, codexHookOutput{Continue: true, SystemMessage: message})
-}
-
-func writeCodexHookBlock(w io.Writer, reason string) int {
-	return writeCodexHookOutput(w, codexHookOutput{Decision: "block", Reason: reason})
-}
-
-func writeCodexHookError(w io.Writer, manual bool, message string) int {
-	message = "openPE prompt enhancement failed: " + message
-	if manual {
-		return writeCodexHookBlock(w, message)
-	}
-	return writeCodexHookSkip(w, message)
-}
-
-func writeCodexHookOutput(w io.Writer, output codexHookOutput) int {
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(output); err != nil {
-		return 1
-	}
-	return 0
-}
-
-func parseCodexManualEnhance(prompt string) (string, string, bool) {
-	prompt = strings.TrimSpace(prompt)
-	for _, trigger := range []struct {
-		prefix string
-		mode   string
-	}{
-		{prefix: "pe!:", mode: "inject"},
-		{prefix: "pe！：", mode: "inject"},
-		{prefix: "pe!：", mode: "inject"},
-		{prefix: "pe！:", mode: "inject"},
-		{prefix: "openpe!:", mode: "inject"},
-		{prefix: "openpe！：", mode: "inject"},
-		{prefix: "openpe!：", mode: "inject"},
-		{prefix: "openpe！:", mode: "inject"},
-		{prefix: "增强!:", mode: "inject"},
-		{prefix: "增强！：", mode: "inject"},
-		{prefix: "增强!：", mode: "inject"},
-		{prefix: "增强！:", mode: "inject"},
-		{prefix: "pe:", mode: "preview"},
-		{prefix: "pe：", mode: "preview"},
-		{prefix: "openpe:", mode: "preview"},
-		{prefix: "openpe：", mode: "preview"},
-		{prefix: "增强:", mode: "preview"},
-		{prefix: "增强：", mode: "preview"},
-	} {
-		if strings.HasPrefix(prompt, trigger.prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(prompt, trigger.prefix)), trigger.mode, true
-		}
-	}
-	return prompt, "", false
-}
-
-func codexPreviewReason(enhanced string) string {
-	return strings.TrimSpace(`openPE enhanced prompt generated. This prompt was not submitted.
-
-Copy, edit, and send the prompt below when you are ready:
-
-` + strings.TrimSpace(enhanced))
-}
-
-func codexAdditionalContext(enhanced string) string {
-	return strings.TrimSpace(`openPE generated an enhanced version of the user's prompt.
-
-Use this enhanced prompt as the preferred interpretation of the user's request while preserving any explicit user constraints and safety boundaries.
-
-<openpe_enhanced_prompt>
-` + strings.TrimSpace(enhanced) + `
-</openpe_enhanced_prompt>`)
 }
 
 func codexHooksPath(scope string, target string, getwd func() (string, error)) (string, error) {
@@ -499,7 +383,14 @@ func codexHookEnvFile(scope string, target string, value string, getwd func() (s
 	if value != "" {
 		return filepath.Abs(value)
 	}
-	if scope != "project" || strings.TrimSpace(target) != "" {
+	if scope == "user" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".config", "openpe", ".env"), nil
+	}
+	if strings.TrimSpace(target) != "" {
 		return "", nil
 	}
 	cwd, err := getwd()
@@ -507,77 +398,6 @@ func codexHookEnvFile(scope string, target string, value string, getwd func() (s
 		return "", err
 	}
 	return filepath.Join(cwd, ".env"), nil
-}
-
-func codexHookCommand(bin string, envFile string) string {
-	command := shellQuote(bin) + " codex hook run"
-	if strings.TrimSpace(envFile) == "" {
-		return command
-	}
-	return "OPENPE_ENV_FILE=" + shellQuote(envFile) + " " + command
-}
-
-func mergeCodexHooksConfig(existing []byte, command string, timeout int) ([]byte, bool, error) {
-	root := map[string]any{}
-	if len(strings.TrimSpace(string(existing))) > 0 {
-		if err := json.Unmarshal(existing, &root); err != nil {
-			return nil, false, err
-		}
-	}
-	hooks, _ := root["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-		root["hooks"] = hooks
-	}
-	entries, _ := hooks["UserPromptSubmit"].([]any)
-	handler := map[string]any{
-		"type":          "command",
-		"command":       command,
-		"timeout":       timeout,
-		"statusMessage": "Enhancing prompt with openPE",
-	}
-	for _, entry := range entries {
-		group, _ := entry.(map[string]any)
-		if group == nil {
-			continue
-		}
-		groupHooks, _ := group["hooks"].([]any)
-		for _, item := range groupHooks {
-			hook, _ := item.(map[string]any)
-			if hook == nil {
-				continue
-			}
-			existingCommand, _ := hook["command"].(string)
-			if isOpenPECodexHookCommand(existingCommand) {
-				hook["type"] = "command"
-				hook["command"] = command
-				hook["timeout"] = timeout
-				hook["statusMessage"] = "Enhancing prompt with openPE"
-				return marshalHooksConfig(root)
-			}
-		}
-	}
-	entries = append(entries, map[string]any{
-		"hooks": []any{handler},
-	})
-	hooks["UserPromptSubmit"] = entries
-	return marshalHooksConfig(root)
-}
-
-func marshalHooksConfig(root map[string]any) ([]byte, bool, error) {
-	data, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		return nil, false, err
-	}
-	return append(data, '\n'), true, nil
-}
-
-func isOpenPECodexHookCommand(command string) bool {
-	return strings.Contains(command, "openpe") && strings.Contains(command, "codex hook run")
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func runCommand(ctx context.Context, name string, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {

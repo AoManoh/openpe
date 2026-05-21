@@ -80,21 +80,27 @@ openpe codex \
 
 ## Codex hook
 
-Codex CLI `0.132.0` 支持 `UserPromptSubmit` hook。openPE 可以安装项目级 hook，在 Codex 接收用户 prompt 时按需调用 enhancer。
+Codex CLI `0.132.0` 支持 `UserPromptSubmit` hook。openPE 默认安装用户级 hook，在任意 Codex 项目中接收用户 prompt 时按需调用 enhancer。
 
-安装到当前项目：
+安装到全局 Codex 用户配置：
 
 ```bash
 openpe codex hook install
 ```
 
-默认写入当前工作目录的 `.codex/hooks.json`。本仓库将 `.codex/` 视为本地私有配置并默认忽略。
+默认写入 `~/.codex/hooks.json`。本地项目级 hook 仅用于调试或项目限定场景：
 
-项目级安装会把当前项目 `.env` 的绝对路径写入 hook 命令，避免 Codex hook 进程工作目录变化导致配置读取失败。也可以显式指定：
+```bash
+openpe codex hook install --scope project
+```
+
+默认用户级安装会读取 `~/.config/openpe/.env`。也可以显式指定：
 
 ```bash
 openpe codex hook install --env-file /absolute/path/to/.env
 ```
+
+安装或修改 hook 后，在 Codex TUI 中执行 `/hooks`，review 并 trust 这个用户级 hook；否则 Codex 会忽略未信任的 hook。
 
 只预览 hook 配置：
 
