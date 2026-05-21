@@ -7,7 +7,7 @@ import (
 )
 
 func HookCommand(bin string, envFile string) string {
-	command := shellQuote(bin) + " codex hook run"
+	command := shellQuote(bin) + " codex hook run --block-output=stderr"
 	if strings.TrimSpace(envFile) == "" {
 		return command
 	}

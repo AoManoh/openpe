@@ -102,6 +102,8 @@ openpe codex hook install --env-file /absolute/path/to/.env
 
 安装或修改 hook 后，在 Codex TUI 中执行 `/hooks`，review 并 trust 这个用户级 hook；否则 Codex 会忽略未信任的 hook。
 
+安装器默认使用 Codex 官方支持的 `stderr + exit 2` block 模式，尽量让预览内容直接显示在当前 TUI；如果当前 Codex TUI 仍压缩换行，则说明 hook feedback 渲染层不支持富文本显示。
+
 只预览 hook 配置：
 
 ```bash

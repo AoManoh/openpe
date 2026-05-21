@@ -259,6 +259,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	client := fs.String("client", "codex", "target client name")
 	mode := fs.String("mode", "agent", "prompt mode")
 	auto := fs.Bool("auto", false, "enhance every prompt and inject it as additional context")
+	blockOutput := fs.String("block-output", "json", "preview block output: json or stderr")
 	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
 	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
 	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
@@ -300,6 +301,13 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	})
 	if err != nil {
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error()))
+	}
+	if output.Decision == "block" && *blockOutput == "stderr" {
+		fmt.Fprintln(stderr, output.Reason)
+		return 2
+	}
+	if output.Decision == "block" && *blockOutput != "json" {
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(true, fmt.Sprintf("unsupported block-output %q", *blockOutput)))
 	}
 	return codexadapter.EncodeHookOutputOrFallback(stdout, output)
 }
@@ -457,7 +465,7 @@ func printUsage(w io.Writer) {
 func printCodexHookUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user] [--path hooks.json] [--openpe-bin path]")
-	fmt.Fprintln(w, "  openpe codex hook run [--auto]")
+	fmt.Fprintln(w, "  openpe codex hook run [--auto] [--block-output json|stderr]")
 	fmt.Fprintln(w, "  openpe codex hook last [--path]")
 }
 
