@@ -10,16 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AoManoh/openpe/internal/adapters/manual"
+	"github.com/AoManoh/openpe/internal/adapters/preview"
 	"github.com/AoManoh/openpe/internal/enhancer"
 )
 
 const UserPromptSubmit = "UserPromptSubmit"
 
-type Mode string
+type Mode = manual.Mode
 
 const (
-	ModePreview Mode = "preview"
-	ModeInject  Mode = "inject"
+	ModePreview = manual.ModePreview
+	ModeInject  = manual.ModeInject
 )
 
 type HookInput struct {
@@ -34,6 +36,8 @@ type HookOutput struct {
 	Reason             string              `json:"reason,omitempty"`
 	SystemMessage      string              `json:"systemMessage,omitempty"`
 	HookSpecificOutput *HookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+	TerminalPreview    string              `json:"-"`
+	PreviewPrompt      string              `json:"-"`
 }
 
 type HookSpecificOutput struct {
@@ -116,7 +120,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	}
 	if manual && manualMode == ModePreview {
 		cachePath, _ := SavePreview(resp.EnhancedPrompt)
-		return Block(PreviewReason(resp.EnhancedPrompt, cachePath)), nil
+		return BlockPreview(PreviewReason(cachePath), MarkdownPreview(resp.EnhancedPrompt), resp.EnhancedPrompt), nil
 	}
 	return HookOutput{
 		SystemMessage: "openPE enhanced prompt injected as additional context.",
@@ -128,39 +132,20 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 }
 
 func ParseManualEnhance(prompt string) (string, Mode, bool) {
-	prompt = strings.TrimSpace(prompt)
-	for _, trigger := range []struct {
-		prefix string
-		mode   Mode
-	}{
-		{prefix: "pe!:", mode: ModeInject},
-		{prefix: "pe！：", mode: ModeInject},
-		{prefix: "pe!：", mode: ModeInject},
-		{prefix: "pe！:", mode: ModeInject},
-		{prefix: "openpe!:", mode: ModeInject},
-		{prefix: "openpe！：", mode: ModeInject},
-		{prefix: "openpe!：", mode: ModeInject},
-		{prefix: "openpe！:", mode: ModeInject},
-		{prefix: "增强!:", mode: ModeInject},
-		{prefix: "增强！：", mode: ModeInject},
-		{prefix: "增强!：", mode: ModeInject},
-		{prefix: "增强！:", mode: ModeInject},
-		{prefix: "pe:", mode: ModePreview},
-		{prefix: "pe：", mode: ModePreview},
-		{prefix: "openpe:", mode: ModePreview},
-		{prefix: "openpe：", mode: ModePreview},
-		{prefix: "增强:", mode: ModePreview},
-		{prefix: "增强：", mode: ModePreview},
-	} {
-		if strings.HasPrefix(prompt, trigger.prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(prompt, trigger.prefix)), trigger.mode, true
-		}
-	}
-	return prompt, "", false
+	return manual.Parse(prompt)
 }
 
 func Block(reason string) HookOutput {
 	return HookOutput{Decision: "block", Reason: reason}
+}
+
+func BlockPreview(reason string, terminalPreview string, previewPrompt string) HookOutput {
+	return HookOutput{
+		Decision:        "block",
+		Reason:          strings.TrimSpace(reason),
+		TerminalPreview: strings.TrimSpace(terminalPreview),
+		PreviewPrompt:   strings.TrimSpace(previewPrompt),
+	}
 }
 
 func Skip(message string) HookOutput {
@@ -175,27 +160,31 @@ func HookError(manual bool, message string) HookOutput {
 	return Skip(message)
 }
 
-func PreviewReason(enhanced string, cachePath string) string {
-	enhanced = strings.TrimSpace(enhanced)
-	summary := compactPreview(enhanced, 900)
+func PreviewReason(cachePath string) string {
 	var b strings.Builder
 	b.WriteString("openPE preview generated; original prompt was NOT submitted. ")
 	if strings.TrimSpace(cachePath) != "" {
-		b.WriteString("Run `openpe codex last` to view the full Markdown preview. ")
+		b.WriteString("Run `openpe codex hook last` to view the full Markdown preview. ")
 	}
-	b.WriteString("COPY BELOW >>> ")
-	b.WriteString(summary)
-	b.WriteString(" <<< COPY ABOVE")
 	return b.String()
 }
 
+func AppendClipboardStatus(reason string, method string, err error) string {
+	reason = strings.TrimSpace(reason)
+	if err == nil && strings.TrimSpace(method) != "" {
+		if strings.EqualFold(strings.TrimSpace(method), "OSC52") {
+			return reason + " OSC52 clipboard sequence sent; if your terminal supports it, paste the enhanced prompt into the input box to edit and send."
+		}
+		return reason + " Enhanced prompt copied to clipboard; paste it into the input box to edit and send."
+	}
+	if err != nil {
+		return reason + " Clipboard copy unavailable; use `openpe codex hook last` as fallback."
+	}
+	return reason
+}
+
 func MarkdownPreview(enhanced string) string {
-	enhanced = strings.TrimSpace(enhanced)
-	return strings.TrimSpace(`# openPE Enhanced Prompt
-
-> This preview was not submitted to the model. Copy, edit, and send it manually when ready.
-
-` + "```markdown\n" + enhanced + "\n```")
+	return preview.Markdown(enhanced)
 }
 
 func SavePreview(enhanced string) (string, error) {
@@ -225,6 +214,25 @@ func ReadLastPreview() (string, error) {
 	return string(data), nil
 }
 
+func WriteTerminalPreview(content string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer tty.Close()
+	_, err = fmt.Fprint(tty, "\r\n"+toCRLF(content)+"\r\n\r\n")
+	return err
+}
+
+func toCRLF(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.ReplaceAll(value, "\n", "\r\n")
+}
+
 func LastPreviewPath() (string, error) {
 	dir, err := previewDir()
 	if err != nil {
@@ -246,8 +254,8 @@ func previewDir() (string, error) {
 
 func compactPreview(value string, limit int) string {
 	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
-	if limit > 0 && len(value) > limit {
-		return value[:limit] + "..."
+	if limit > 0 && len([]rune(value)) > limit {
+		return string([]rune(value)[:limit]) + "..."
 	}
 	return value
 }

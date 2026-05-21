@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AoManoh/openpe/internal/adapters/clipboard"
 	codexadapter "github.com/AoManoh/openpe/internal/adapters/codex"
 	"github.com/AoManoh/openpe/internal/config"
 	"github.com/AoManoh/openpe/internal/enhancer"
@@ -260,6 +261,9 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	mode := fs.String("mode", "agent", "prompt mode")
 	auto := fs.Bool("auto", false, "enhance every prompt and inject it as additional context")
 	blockOutput := fs.String("block-output", "json", "preview block output: json or stderr")
+	terminalPreview := fs.Bool("terminal-preview", envBoolOrDefault("OPENPE_CODEX_TERMINAL_PREVIEW", false), "experimental: write full Markdown preview directly to /dev/tty when blocking")
+	copyPreview := fs.Bool("copy-preview", envBoolOrDefault("OPENPE_CODEX_COPY_PREVIEW", false), "copy enhanced prompt to the system clipboard when blocking")
+	hookScope := fs.String("hook-scope", envOrDefault("OPENPE_HOOK_SCOPE", ""), "hook scope for duplicate suppression: user or project")
 	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
 	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
 	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
@@ -283,6 +287,13 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		}
 		overrideCWD = workingDir
 	}
+	effectiveCWD := strings.TrimSpace(input.CWD)
+	if overrideCWD != "" {
+		effectiveCWD = overrideCWD
+	}
+	if codexadapter.ShouldSkipDuplicateHook(*hookScope, os.Getenv("OPENPE_ENV_FILE"), effectiveCWD) {
+		return 0
+	}
 	provider, err := newProvider(openai.Config{
 		BaseURL: strings.TrimSpace(*baseURL),
 		APIKey:  strings.TrimSpace(*apiKey),
@@ -302,7 +313,14 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if err != nil {
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error()))
 	}
+	if output.Decision == "block" && *copyPreview && output.PreviewPrompt != "" {
+		method, copyErr := clipboard.Copy(context.Background(), output.PreviewPrompt)
+		output.Reason = codexadapter.AppendClipboardStatus(output.Reason, method, copyErr)
+	}
 	if output.Decision == "block" && *blockOutput == "stderr" {
+		if *terminalPreview {
+			_ = codexadapter.WriteTerminalPreview(output.TerminalPreview)
+		}
 		fmt.Fprintln(stderr, output.Reason)
 		return 2
 	}
@@ -350,7 +368,7 @@ func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getw
 		fmt.Fprintf(stderr, "read hooks config: %v\n", err)
 		return 1
 	}
-	command := codexadapter.HookCommand(bin, hookEnvFile)
+	command := codexadapter.HookCommandForScope(bin, hookEnvFile, *scope)
 	merged, err := codexadapter.MergeHooksConfig(existing, command, *hookTimeout)
 	if err != nil {
 		fmt.Fprintf(stderr, "merge hooks config: %v\n", err)
@@ -465,7 +483,7 @@ func printUsage(w io.Writer) {
 func printCodexHookUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user] [--path hooks.json] [--openpe-bin path]")
-	fmt.Fprintln(w, "  openpe codex hook run [--auto] [--block-output json|stderr]")
+	fmt.Fprintln(w, "  openpe codex hook run [--auto] [--block-output json|stderr] [--copy-preview] [--terminal-preview=false] [--hook-scope user|project]")
 	fmt.Fprintln(w, "  openpe codex hook last [--path]")
 }
 
@@ -475,6 +493,17 @@ func envOrDefault(name string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func envBoolOrDefault(name string, fallback bool) bool {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 type repeatedFlag []string
