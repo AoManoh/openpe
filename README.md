@@ -6,6 +6,7 @@
 
 - Go CLI：`openpe enhance`
 - Codex CLI adapter：`openpe codex`
+- Codex UserPromptSubmit hook：`openpe codex hook install`
 - Go HTTP server：`POST /v1/prompt-enhance`
 - 标准 OpenAI-compatible `/v1/chat/completions`
 - 非流式响应
@@ -25,6 +26,8 @@ export OPENPE_TIMEOUT="60s"
 ```
 
 `OPENPE_BASE_URL` 可以是不带 `/v1` 的 host，也可以是以 `/v1` 结尾的 OpenAI-compatible base URL。
+
+openPE 会读取当前工作目录下的 `.env`，但 shell 环境变量优先级更高。
 
 ## CLI
 
@@ -75,17 +78,44 @@ openpe codex \
 
 `--codex-arg` 需要重复传递；如果参数本身以 `-` 开头，推荐使用 `--codex-arg=--flag` 形式。
 
+## Codex hook
+
+Codex CLI `0.132.0` 支持 `UserPromptSubmit` hook。openPE 可以安装项目级 hook，在 Codex 接收用户 prompt 时调用一次 enhancer，并通过 `additionalContext` 把增强后的 prompt 注入当前 turn。
+
+安装到当前项目：
+
+```bash
+openpe codex hook install
+```
+
+默认写入当前工作目录的 `.codex/hooks.json`。本仓库将 `.codex/` 视为本地私有配置并默认忽略。
+
+项目级安装会把当前项目 `.env` 的绝对路径写入 hook 命令，避免 Codex hook 进程工作目录变化导致配置读取失败。也可以显式指定：
+
+```bash
+openpe codex hook install --env-file /absolute/path/to/.env
+```
+
+只预览 hook 配置：
+
+```bash
+openpe codex hook install --dry-run
+```
+
+直接模拟 hook 输入：
+
+```bash
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"帮我检查测试失败","cwd":"%s"}' "$PWD" \
+  | openpe codex hook run
+```
+
+限制：Codex hook 当前不能直接替换原始输入框内容；openPE 通过 `additionalContext` 提供增强 prompt，让 Codex 在同一 turn 中优先参考增强版本。
+
 ## Codex 交互限制
 
 Codex CLI `0.132.0` 的交互式 `/` 菜单当前只枚举内置命令，不会显示 `~/.codex/prompts/*.md`、`~/.codex/commands/*.md` 或本地插件 `commands/` 中的自定义命令。因此 openPE 当前不能通过 `/pe`、`/prompts:pe` 或 `/openpe:pe` 直接注入已打开的 Codex TUI。
 
-现阶段可用入口仍是外部 CLI adapter：
-
-```bash
-openpe codex --prompt "帮我检查这个 Go 项目的测试失败"
-```
-
-如果要实现“进入一次 Codex 后反复输入 `/pe ...`”的体验，下一步需要做一个 PTY 代理：由 `openpe codex-tui` 启动真实 `codex`，拦截用户输入行中的 `/pe ...`，调用 `openpe enhance` 后把增强 prompt 写回 Codex TUI。这个方案不修改 Codex 本体，但需要处理终端 raw mode、粘贴、快捷键和异常退出。
+如果后续仍要实现“进入一次 Codex 后反复输入 `/pe ...`”的体验，PTY 代理是兜底方案：由 `openpe codex-tui` 启动真实 `codex`，拦截用户输入行中的 `/pe ...`，调用 `openpe enhance` 后把增强 prompt 写回 Codex TUI。该方案不修改 Codex 本体，但需要处理终端 raw mode、粘贴、快捷键和异常退出。
 
 ## HTTP
 
