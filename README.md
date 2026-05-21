@@ -75,36 +75,17 @@ openpe codex \
 
 `--codex-arg` 需要重复传递；如果参数本身以 `-` 开头，推荐使用 `--codex-arg=--flag` 形式。
 
-## Codex Slash Command
+## Codex 交互限制
 
-如果已经在 Codex 交互式 CLI 内，不需要退出后再运行 `openpe codex`。安装本地 prompt command 后，可以在当前会话中使用：
+Codex CLI `0.132.0` 的交互式 `/` 菜单当前只枚举内置命令，不会显示 `~/.codex/prompts/*.md`、`~/.codex/commands/*.md` 或本地插件 `commands/` 中的自定义命令。因此 openPE 当前不能通过 `/pe`、`/prompts:pe` 或 `/openpe:pe` 直接注入已打开的 Codex TUI。
 
-```text
-/prompts:pe 帮我检查这个 Go 项目的测试失败
-```
-
-如果通过 Codex plugin marketplace 安装，则使用插件命令：
-
-```text
-/openpe:pe 帮我检查这个 Go 项目的测试失败
-```
-
-本机快捷安装：
+现阶段可用入口仍是外部 CLI adapter：
 
 ```bash
-mkdir -p ~/.codex/prompts
-ln -sfn /home/oh/projects/openPE/plugins/openpe/commands/pe.md ~/.codex/prompts/pe.md
-ln -sfn /home/oh/projects/openPE/plugins/openpe/commands/pe.md ~/.codex/prompts/openpe.md
+openpe codex --prompt "帮我检查这个 Go 项目的测试失败"
 ```
 
-本地插件安装：
-
-```bash
-codex plugin marketplace add /home/oh/projects/openPE
-codex plugin add openpe@openpe-local
-```
-
-这类 slash command 的工作方式是：让当前 Codex 会话先调用 `openpe enhance` 生成增强 prompt，然后继续在同一会话执行增强后的任务。它不是 Codex 客户端层的“提交前输入框替换 hook”；如果未来 Codex 暴露原生 pre-submit hook，再把这一层下沉到真正的输入拦截。
+如果要实现“进入一次 Codex 后反复输入 `/pe ...`”的体验，下一步需要做一个 PTY 代理：由 `openpe codex-tui` 启动真实 `codex`，拦截用户输入行中的 `/pe ...`，调用 `openpe enhance` 后把增强 prompt 写回 Codex TUI。这个方案不修改 Codex 本体，但需要处理终端 raw mode、粘贴、快捷键和异常退出。
 
 ## HTTP
 
