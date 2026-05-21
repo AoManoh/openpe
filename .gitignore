@@ -32,3 +32,4 @@ pnpm-debug.log*
 !/docs/**/.gitkeep
 !/docs/_fragments/
 !/docs/_fragments/**
+!/docs/requirements/2026-05-21-project-kickoff.md
