@@ -129,14 +129,15 @@ func failureStatus(result Result, language string, fallbackCommand string) strin
 	if isEnglish(language) {
 		var b strings.Builder
 		b.WriteString("openPE blocked the original prompt, but clipboard was NOT updated; do not paste existing clipboard content.")
+		if result.Cache.PromptPath != "" && result.CacheError == nil {
+			b.WriteString(" Open this file for paste-ready text: ")
+			b.WriteString(result.Cache.PromptPath)
+			b.WriteString(".")
+		}
 		if strings.TrimSpace(fallbackCommand) != "" && result.CacheError == nil {
 			b.WriteString(" Enhanced prompt is cached; run `")
 			b.WriteString(fallbackCommand)
 			b.WriteString("` to print paste-ready text.")
-		} else if result.Cache.PromptPath != "" && result.CacheError == nil {
-			b.WriteString(" Enhanced prompt is cached at ")
-			b.WriteString(result.Cache.PromptPath)
-			b.WriteString(".")
 		} else if cacheDetail != "" {
 			b.WriteString(" Enhanced prompt cache failed: ")
 			b.WriteString(cacheDetail)
@@ -148,14 +149,15 @@ func failureStatus(result Result, language string, fallbackCommand string) strin
 	}
 	var b strings.Builder
 	b.WriteString("openPE 已拦截原始消息；剪贴板未更新，请勿直接粘贴旧内容。")
+	if result.Cache.PromptPath != "" && result.CacheError == nil {
+		b.WriteString("可直接打开文件获取可粘贴文本：")
+		b.WriteString(result.Cache.PromptPath)
+		b.WriteString("。")
+	}
 	if strings.TrimSpace(fallbackCommand) != "" && result.CacheError == nil {
 		b.WriteString("增强结果已缓存，可运行 `")
 		b.WriteString(fallbackCommand)
 		b.WriteString("` 查看可粘贴文本。")
-	} else if result.Cache.PromptPath != "" && result.CacheError == nil {
-		b.WriteString("增强结果已缓存：")
-		b.WriteString(result.Cache.PromptPath)
-		b.WriteString("。")
 	} else if cacheDetail != "" {
 		b.WriteString("增强结果缓存失败：")
 		b.WriteString(cacheDetail)

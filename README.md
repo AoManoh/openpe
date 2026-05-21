@@ -263,7 +263,7 @@ openpe windsurf hook install --scope project
 pe 帮我梳理这个项目下一阶段开发计划
 ```
 
-默认行为：openPE 会阻断这条 `pe` 消息，不提交给 Cascade，并把增强后的 prompt 复制到系统剪贴板。复制成功后，你可以在 Cascade 输入框粘贴、修改后再正常发送；复制失败时请按提示运行 `openpe windsurf hook last --prompt`，不要直接粘贴旧剪贴板内容。
+默认行为：openPE 会阻断这条 `pe` 消息，不提交给 Cascade，并把增强后的 prompt 复制到系统剪贴板。复制成功后，你可以在 Cascade 输入框粘贴、修改后再正常发送；复制失败时不要直接粘贴旧剪贴板内容，hook feedback 会给出 `last-prompt.txt` 的绝对路径，你可以直接打开该文件获取本次增强 prompt，也可以运行 `openpe windsurf hook last --prompt` 打印纯文本。
 
 测试/调试 hook 输入：
 
@@ -282,6 +282,12 @@ openpe windsurf hook last
 
 ```bash
 openpe windsurf hook last --prompt
+```
+
+只查看纯 prompt 缓存文件路径：
+
+```bash
+openpe windsurf hook last --path --prompt
 ```
 
 只查看缓存路径：
