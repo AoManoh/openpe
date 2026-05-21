@@ -92,6 +92,18 @@ client / hook / HTTP
 - Provider 只承接 OpenAI-compatible 调用，避免在核心层绑定具体云厂商 SDK。
 - Context pipeline 后续应作为可选扩展点，不应成为默认必选链路。
 
+## 增强契约
+
+openPE 的核心增强逻辑通过 canonical request 接收 `prompt`、`client`、`mode`、`cwd`、rules、history 和 context。`client` / `mode` 只用于给模型说明目标运行环境，不把某个宿主的私有能力当作核心依赖。
+
+增强结果必须满足：
+
+- 保留用户原始意图、语言、显式约束和安全边界。
+- 输出自包含、可粘贴、适合编码代理执行的 prompt。
+- 不依赖宿主一定能替换输入框、追加隐藏上下文、保持剪贴板成功，或识别某个客户端专有 slash command。
+- 对 Windsurf、Cursor、VS Code、Composer、Cascade 等 IDE 类环境，默认按“可粘贴到聊天输入框或通过缓存回退取回”的方式生成结果。
+- 对 `client=codex` 且 `mode=agent`，仍保持适合终端 coding agent 的清晰任务范围、执行步骤和验证期望。
+
 ## 安装 hook
 
 ### Codex

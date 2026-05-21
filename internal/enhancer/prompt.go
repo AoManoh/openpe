@@ -22,6 +22,7 @@ func buildUserPrompt(req Request) (string, []string, []string) {
 	if value := strings.TrimSpace(req.CWD); value != "" {
 		writeSection(&b, "Workspace", value)
 	}
+	writeList(&b, "Enhancement contract", compatibilityGuidance(req))
 	if len(req.Rules) > 0 {
 		used = append(used, "rules")
 		writeList(&b, "Rules", req.Rules)
@@ -54,6 +55,49 @@ func buildUserPrompt(req Request) (string, []string, []string) {
 		}
 	}
 	return user, used, warnings
+}
+
+func compatibilityGuidance(req Request) []string {
+	client := normalizeLabel(req.Client)
+	mode := normalizeLabel(req.Mode)
+	lines := []string{
+		"Preserve the user's original intent, language, explicit constraints, and safety boundaries.",
+		"Return a self-contained prompt that can be pasted into a coding-agent chat or passed through a CLI adapter without relying on hidden context.",
+		"Do not assume the host can replace the user's input, append private context, keep clipboard state fresh, or interpret client-specific slash commands.",
+		"Make the output actionable for an agent: clarify scope, expected investigation or implementation steps, and reasonable verification when those are relevant.",
+	}
+	if isIDEClient(client) || isIDEMode(mode) {
+		lines = append(lines, "For IDE coding-agent environments such as Windsurf, Cursor, VS Code, Composer, or Cascade, make the enhanced prompt paste-ready and robust when delivered through clipboard or cache fallback.")
+	}
+	if client == "codex" && mode == "agent" {
+		lines = append(lines, "For Codex agent mode, keep the prompt suitable for a terminal coding agent while preserving workspace scope and validation expectations.")
+	}
+	return lines
+}
+
+func normalizeLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "_", "-")
+	value = strings.ReplaceAll(value, " ", "-")
+	return value
+}
+
+func isIDEClient(client string) bool {
+	switch client {
+	case "windsurf", "cursor", "vscode", "vs-code", "visual-studio-code", "composer", "cascade":
+		return true
+	default:
+		return false
+	}
+}
+
+func isIDEMode(mode string) bool {
+	switch mode {
+	case "ide", "chat", "composer", "cascade":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeSection(b *strings.Builder, title string, value string) {
