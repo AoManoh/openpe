@@ -80,7 +80,7 @@ openpe codex \
 
 ## Codex hook
 
-Codex CLI `0.132.0` 支持 `UserPromptSubmit` hook。openPE 可以安装项目级 hook，在 Codex 接收用户 prompt 时调用一次 enhancer，并通过 `additionalContext` 把增强后的 prompt 注入当前 turn。
+Codex CLI `0.132.0` 支持 `UserPromptSubmit` hook。openPE 可以安装项目级 hook，在 Codex 接收用户 prompt 时按需调用 enhancer。
 
 安装到当前项目：
 
@@ -105,11 +105,27 @@ openpe codex hook install --dry-run
 直接模拟 hook 输入：
 
 ```bash
-printf '{"hook_event_name":"UserPromptSubmit","prompt":"帮我检查测试失败","cwd":"%s"}' "$PWD" \
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"pe: 帮我检查测试失败","cwd":"%s"}' "$PWD" \
   | openpe codex hook run
 ```
 
-限制：Codex hook 当前不能直接替换原始输入框内容；openPE 通过 `additionalContext` 提供增强 prompt，让 Codex 在同一 turn 中优先参考增强版本。
+在 Codex TUI 中主动触发增强：
+
+```text
+pe: 帮我检查测试失败
+```
+
+默认行为是 preview：openPE 会拦截这条消息，不提交给模型，并在 Codex 中显示增强后的 prompt。你可以复制、修改后再正常发送。
+
+如果想跳过预览，直接把增强结果作为 `additionalContext` 注入当前 turn：
+
+```text
+pe!: 帮我检查测试失败
+```
+
+可用触发前缀：`pe:`、`openpe:`、`增强:`。对应的直接注入前缀是 `pe!:`、`openpe!:`、`增强!:`。
+
+限制：Codex hook 当前不能直接替换原始输入框内容；preview 模式采用“阻断原 prompt + 显示增强 prompt”的方式实现可见、可控、可编辑。
 
 ## Codex 交互限制
 
