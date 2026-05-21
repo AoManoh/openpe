@@ -14,16 +14,16 @@ openPE 的正式使用方式只有一种：先安装目标工具的 hook，然�
 
 增强完成后，openPE 默认只输出简短状态，不在终端打印完整 prompt。用户直接粘贴剪贴板中的增强结果，编辑后再发送。
 
-`openpe enhance`、`openpe codex`、`openpe-server` 和脚本入口仅用于测试、调试或自动化集成，不是面向日常使用的正式交互方式。
+`openpe enhance`、`openpe codex`、`openpe claude`、`openpe windsurf`、`openpe-server` 和脚本入口仅用于测试、调试或自动化集成，不是面向日常使用的正式交互方式。
 
 ## 当前状态
 
-openPE 当前处于本地优先的早期可用阶段，已完成 Go CLI、HTTP API、OpenAI-compatible provider、Codex hook、Claude Code hook、Windsurf Cascade hook 以及基础测试。项目重点不是替代 Codex、Claude Code、Cursor 或 Windsurf，而是在这些编码代理接收任务前提供一个可控的 prompt enhancement layer。
+openPE 当前处于本地优先的早期可用阶段，已完成 Go CLI、HTTP API、OpenAI-compatible provider、Codex / Claude Code / Windsurf Cascade 三方 hook、统一的剪贴板交付层（delivery）、客户端兼容性契约（详见下方“增强契约”段）以及基础测试。项目重点不是替代 Codex、Claude Code、Cursor 或 Windsurf，而是在这些编码代理接收任务前提供一个可控的 prompt enhancement layer。
 
 当前推荐的使用方式：
 
 - 在 Codex CLI 中输入 `pe <内容>`，openPE 阻断原始消息，将增强结果复制到剪贴板，并缓存完整预览。
-- 在 Claude Code 中输入 `pe <内容>`，openPE 阻断原始消息，将增强结果复制到剪贴板。
+- 在 Claude Code 中输入 `pe <内容>`，openPE 阻断原始消息，将增强结果复制到剪贴板，并缓存完整预览和纯文本。
 - 在 Windsurf Cascade 中输入 `pe <内容>`，openPE 通过 `pre_user_prompt` 阻断原始消息，将增强结果复制到剪贴板，并缓存完整预览。
 - 不需要增强时，不输入 `pe` 即可，原始消息按宿主工具正常处理。
 
@@ -80,6 +80,7 @@ client / hook / HTTP
 | `internal/adapters/clipboard` | hook 预览的剪贴板与 OSC52 交付兜底 |
 | `internal/adapters/manual` | `pe` 手动触发关键字解析 |
 | `internal/adapters/preview` | hook preview Markdown 包装 |
+| `internal/adapters/delivery` | 剪贴板复制、双缓存（Markdown 预览 + 纯文本）与失败 UX 文案的统一交付层，被三方 hook 共用 |
 | `internal/config` | `.env`、环境变量和默认配置读取 |
 | `internal/server` | `POST /v1/prompt-enhance` 与健康检查 |
 | `skills/` | 项目治理 skill 定义，不存放运行产物 |
@@ -223,6 +224,18 @@ pe 帮我检查当前项目下一步怎么做
 openpe claude hook last --prompt
 ```
 
+只查看缓存路径：
+
+```bash
+openpe claude hook last --path
+```
+
+只查看纯 prompt 缓存文件路径：
+
+```bash
+openpe claude hook last --path --prompt
+```
+
 注意：Claude Code 的 `--print` headless 模式会执行 hook，但不会像交互式 TUI 一样稳定展示被阻断 hook 的 feedback；测试预览效果时请使用交互式 Claude Code。
 
 Claude Code 自身调用哪个模型不由 openPE hook 决定，需要按 Claude Code 支持的方式配置。若使用 Anthropic-compatible 第三方网关，可以在启动 Claude Code 前注入：
@@ -297,6 +310,29 @@ openpe windsurf hook last --path
 ```
 
 限制：Windsurf `pre_user_prompt` 当前公开契约只证明可阻断原始输入，未证明可替换 prompt 或追加上下文后继续提交。openPE 因此采用“阻断原 prompt + 复制增强 prompt + 缓存完整预览和纯文本”的方式实现可控、可编辑。
+
+## 已知限制 / IDE 当前问题
+
+openPE 当前明确的能力边界，使用前请知悉。三方 hook 都已跑通日常路径，但在 Linux 远程开发、IDE 子进程、无控制 PTY 等环境下，剪贴板交付存在物理无法绕开的失败路径，使用 `hook last --prompt` 或直接打开 `last-prompt.txt` 缓存文件作为兜底。
+
+### 剪贴板交付
+
+- **OSC52 在 IDE 子进程必然失败**：Windsurf Cascade、Cursor、VS Code 等 IDE 拉起 hook 子进程时不分配控制 TTY，openPE 的 OSC52 兜底会以 `open /dev/tty: no such device or address` 失败（已实测）。这是协议与进程模型的硬限制，无法在 openPE 侧修复。
+- **Linux 远程 / 纯 TTY 下系统剪贴板工具不可用**：`XDG_SESSION_TYPE=tty` 或 X server 不可达时 `xclip` / `xsel` 报 `Can't open display`；缺少 `WAYLAND_DISPLAY` 时 `wl-copy` 不可用。复制会失败，hook stderr 会同时给出 `last-prompt.txt` 绝对路径与 `hook last --prompt` 命令两条兜底通道，并以强警告文案防止误粘旧剪贴板内容。
+- **macOS / Windows / 桌面 Linux 完整 X11 或 Wayland 会话**：`pbcopy` / `clip.exe` / `wl-copy` / `xclip` 默认可用，复制路径稳定。
+
+### Hook 阻断模型
+
+- **hook 仅能阻断、缓存、复制，不能替换 IDE 输入框内容**：Codex、Claude Code、Windsurf Cascade 当前公开的 hook 协议均未承诺 prompt 替换或自动提交。openPE 因此采用“阻断原消息 + 缓存完整预览与纯文本 + 复制到剪贴板”的方式，让用户手动粘贴 + 编辑 + 再发送。
+- **多客户端 feedback 压平规则不同**：Codex TUI 和 Windsurf Cascade 都会把 hook stderr 压成单行；openPE 的失败状态文案首句已统一为强警告“剪贴板未更新，请勿直接粘贴旧内容”，被压平后仍能优先看到关键信息。
+- **Claude Code `--print` headless 模式**：会执行 hook 但不像交互式 TUI 一样稳定展示被阻断 feedback；测试预览效果请使用交互式 Claude Code。
+
+### IDE 当前使用建议
+
+1. 看到 stderr 出现“剪贴板未更新，请勿直接粘贴旧内容”——**不要按 Ctrl+V**。
+2. 直接打开 stderr 给出的 `last-prompt.txt` 绝对路径，或在终端跑对应 `openpe <client> hook last --prompt` 取本次增强 prompt。
+3. 复制到 IDE 输入框，按需编辑，再正常发送。
+4. 如果 stderr 显示复制成功（macOS、Windows 或本地完整桌面 Linux 会话常见），可以按常规 Ctrl+V 粘贴。
 
 ## 测试与调试命令
 
