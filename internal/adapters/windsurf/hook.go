@@ -1,4 +1,4 @@
-package claude
+package windsurf
 
 import (
 	"context"
@@ -8,18 +8,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	"github.com/AoManoh/openpe/internal/adapters/manual"
 	"github.com/AoManoh/openpe/internal/adapters/preview"
 	"github.com/AoManoh/openpe/internal/enhancer"
 )
 
-const UserPromptSubmit = "UserPromptSubmit"
+const PreUserPrompt = "pre_user_prompt"
+
+type ToolInfo struct {
+	UserPrompt string `json:"user_prompt"`
+}
 
 type HookInput struct {
-	HookEventName  string `json:"hook_event_name"`
-	Prompt         string `json:"prompt"`
-	CWD            string `json:"cwd"`
-	TranscriptPath string `json:"transcript_path"`
+	AgentActionName string   `json:"agent_action_name"`
+	CWD             string   `json:"cwd"`
+	ToolInfo        ToolInfo `json:"tool_info"`
 }
 
 type HookOptions struct {
@@ -33,6 +37,7 @@ type HookOptions struct {
 type HookOutput struct {
 	TerminalPreview string
 	PreviewPrompt   string
+	CachePath       string
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -44,18 +49,18 @@ func DecodeHookInput(r io.Reader) (HookInput, error) {
 }
 
 func ShouldHandleHook(input HookInput) bool {
-	if input.HookEventName != "" && input.HookEventName != UserPromptSubmit {
+	if input.AgentActionName != "" && input.AgentActionName != PreUserPrompt {
 		return false
 	}
-	_, _, ok := manual.Parse(input.Prompt)
+	_, _, ok := manual.Parse(input.ToolInfo.UserPrompt)
 	return ok
 }
 
 func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput, opts HookOptions) (HookOutput, error) {
-	if input.HookEventName != "" && input.HookEventName != UserPromptSubmit {
+	if input.AgentActionName != "" && input.AgentActionName != PreUserPrompt {
 		return HookOutput{}, nil
 	}
-	rawPrompt, _, manualTrigger := manual.Parse(input.Prompt)
+	rawPrompt, _, manualTrigger := manual.Parse(input.ToolInfo.UserPrompt)
 	if !manualTrigger {
 		return HookOutput{}, nil
 	}
@@ -73,17 +78,43 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	}
 	resp, err := service.Enhance(ctx, enhancer.Request{
 		Prompt: rawPrompt,
-		Client: valueOrDefault(opts.Client, "claude-code"),
+		Client: valueOrDefault(opts.Client, "windsurf"),
 		CWD:    cwd,
-		Mode:   valueOrDefault(opts.Mode, "agent"),
+		Mode:   valueOrDefault(opts.Mode, "cascade"),
 	})
 	if err != nil {
 		return HookOutput{}, err
 	}
+	cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
 	return HookOutput{
 		TerminalPreview: preview.Markdown(resp.EnhancedPrompt, opts.Language),
 		PreviewPrompt:   strings.TrimSpace(resp.EnhancedPrompt),
+		CachePath:       cachePath,
 	}, nil
+}
+
+func SavePreview(enhanced string, language string) (string, error) {
+	cache, err := delivery.Save("windsurf", enhanced, language)
+	if err != nil {
+		return "", err
+	}
+	return cache.PreviewPath, nil
+}
+
+func ReadLastPreview() (string, error) {
+	return delivery.ReadLastPreview("windsurf")
+}
+
+func ReadLastPrompt() (string, error) {
+	return delivery.ReadLastPrompt("windsurf")
+}
+
+func LastPreviewPath() (string, error) {
+	return delivery.LastPreviewPath("windsurf")
+}
+
+func LastPromptPath() (string, error) {
+	return delivery.LastPromptPath("windsurf")
 }
 
 func valueOrDefault(value string, fallback string) string {

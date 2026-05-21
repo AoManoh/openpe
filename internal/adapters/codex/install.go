@@ -39,7 +39,7 @@ func MergeHooksConfig(existing []byte, command string, timeout int) ([]byte, err
 		"type":          "command",
 		"command":       command,
 		"timeout":       timeout,
-		"statusMessage": "Enhancing prompt with openPE",
+		"statusMessage": "openPE 正在增强提示词",
 	}
 	updated := false
 	normalizedEntries := make([]any, 0, len(entries)+1)
@@ -65,7 +65,7 @@ func MergeHooksConfig(existing []byte, command string, timeout int) ([]byte, err
 				hook["type"] = "command"
 				hook["command"] = command
 				hook["timeout"] = timeout
-				hook["statusMessage"] = "Enhancing prompt with openPE"
+				hook["statusMessage"] = "openPE 正在增强提示词"
 				updated = true
 			}
 			normalizedHooks = append(normalizedHooks, item)

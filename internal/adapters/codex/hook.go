@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	"github.com/AoManoh/openpe/internal/adapters/manual"
 	"github.com/AoManoh/openpe/internal/adapters/preview"
 	"github.com/AoManoh/openpe/internal/enhancer"
@@ -21,7 +21,6 @@ type Mode = manual.Mode
 
 const (
 	ModePreview = manual.ModePreview
-	ModeInject  = manual.ModeInject
 )
 
 type HookInput struct {
@@ -46,12 +45,13 @@ type HookSpecificOutput struct {
 }
 
 type HookOptions struct {
-	Client  string
-	Mode    string
-	Auto    bool
-	CWD     string
-	Prompt  string
-	Timeout time.Duration
+	Client   string
+	Mode     string
+	Auto     bool
+	CWD      string
+	Prompt   string
+	Language string
+	Timeout  time.Duration
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -97,7 +97,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		rawPrompt = manualPrompt
 	}
 	if rawPrompt == "" {
-		return Block("openPE trigger found, but prompt is empty."), nil
+		return Block(emptyPromptMessage(opts.Language)), nil
 	}
 	cwd := strings.TrimSpace(input.CWD)
 	if opts.CWD != "" {
@@ -116,14 +116,14 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	}
 	resp, err := service.Enhance(ctx, req)
 	if err != nil {
-		return HookError(manual, err.Error()), nil
+		return HookError(manual, err.Error(), opts.Language), nil
 	}
 	if manual && manualMode == ModePreview {
-		cachePath, _ := SavePreview(resp.EnhancedPrompt)
-		return BlockPreview(PreviewReason(cachePath), MarkdownPreview(resp.EnhancedPrompt), resp.EnhancedPrompt), nil
+		cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
+		return BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt), nil
 	}
 	return HookOutput{
-		SystemMessage: "openPE enhanced prompt injected as additional context.",
+		SystemMessage: injectedMessage(opts.Language),
 		HookSpecificOutput: &HookSpecificOutput{
 			HookEventName:     UserPromptSubmit,
 			AdditionalContext: AdditionalContext(resp.EnhancedPrompt),
@@ -152,66 +152,47 @@ func Skip(message string) HookOutput {
 	return HookOutput{Continue: true, SystemMessage: message}
 }
 
-func HookError(manual bool, message string) HookOutput {
-	message = "openPE prompt enhancement failed: " + message
+func HookError(manual bool, message string, language string) HookOutput {
+	message = failureMessage(message, language)
 	if manual {
 		return Block(message)
 	}
 	return Skip(message)
 }
 
-func PreviewReason(cachePath string) string {
-	var b strings.Builder
-	b.WriteString("openPE preview generated; original prompt was NOT submitted. ")
-	if strings.TrimSpace(cachePath) != "" {
-		b.WriteString("Run `openpe codex hook last` to view the full Markdown preview. ")
-	}
-	return b.String()
-}
-
-func AppendClipboardStatus(reason string, method string, err error) string {
-	reason = strings.TrimSpace(reason)
-	if err == nil && strings.TrimSpace(method) != "" {
-		if strings.EqualFold(strings.TrimSpace(method), "OSC52") {
-			return reason + " OSC52 clipboard sequence sent; if your terminal supports it, paste the enhanced prompt into the input box to edit and send."
+func PreviewReason(cachePath string, language string) string {
+	if isEnglish(language) {
+		var b strings.Builder
+		b.WriteString("openPE preview generated; original prompt was NOT submitted. ")
+		if strings.TrimSpace(cachePath) != "" {
+			b.WriteString("Run `openpe codex hook last` to view the full Markdown preview. ")
 		}
-		return reason + " Enhanced prompt copied to clipboard; paste it into the input box to edit and send."
+		return b.String()
 	}
-	if err != nil {
-		return reason + " Clipboard copy unavailable; use `openpe codex hook last` as fallback."
+	if strings.TrimSpace(cachePath) != "" {
+		return "openPE 已生成增强提示词，原始消息未提交。完整预览：openpe codex hook last。"
 	}
-	return reason
+	return "openPE 已生成增强提示词，原始消息未提交。"
 }
 
-func MarkdownPreview(enhanced string) string {
-	return preview.Markdown(enhanced)
+func MarkdownPreview(enhanced string, language string) string {
+	return preview.Markdown(enhanced, language)
 }
 
-func SavePreview(enhanced string) (string, error) {
-	dir, err := previewDir()
+func SavePreview(enhanced string, language string) (string, error) {
+	cache, err := delivery.Save("codex", enhanced, language)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "last.md")
-	if err := os.WriteFile(path, []byte(MarkdownPreview(enhanced)+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	return path, nil
+	return cache.PreviewPath, nil
 }
 
 func ReadLastPreview() (string, error) {
-	path, err := LastPreviewPath()
-	if err != nil {
-		return "", err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
+	return delivery.ReadLastPreview("codex")
+}
+
+func ReadLastPrompt() (string, error) {
+	return delivery.ReadLastPrompt("codex")
 }
 
 func WriteTerminalPreview(content string) error {
@@ -234,22 +215,11 @@ func toCRLF(value string) string {
 }
 
 func LastPreviewPath() (string, error) {
-	dir, err := previewDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "last.md"), nil
+	return delivery.LastPreviewPath("codex")
 }
 
-func previewDir() (string, error) {
-	if value := strings.TrimSpace(os.Getenv("OPENPE_CACHE_DIR")); value != "" {
-		return value, nil
-	}
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "openpe", "codex"), nil
+func LastPromptPath() (string, error) {
+	return delivery.LastPromptPath("codex")
 }
 
 func compactPreview(value string, limit int) string {
@@ -268,6 +238,36 @@ Use this enhanced prompt as the preferred interpretation of the user's request w
 <openpe_enhanced_prompt>
 ` + strings.TrimSpace(enhanced) + `
 </openpe_enhanced_prompt>`)
+}
+
+func isEnglish(language string) bool {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "en", "en-us", "english":
+		return true
+	default:
+		return false
+	}
+}
+
+func emptyPromptMessage(language string) string {
+	if isEnglish(language) {
+		return "openPE trigger found, but prompt is empty."
+	}
+	return "openPE 触发词后缺少要增强的内容。"
+}
+
+func failureMessage(message string, language string) string {
+	if isEnglish(language) {
+		return "openPE prompt enhancement failed: " + message
+	}
+	return "openPE 增强失败：" + message
+}
+
+func injectedMessage(language string) string {
+	if isEnglish(language) {
+		return "openPE enhanced prompt injected as additional context."
+	}
+	return "openPE 已将增强提示词注入为附加上下文。"
 }
 
 func valueOrDefault(value string, fallback string) string {

@@ -14,8 +14,9 @@ import (
 	"time"
 
 	claudeadapter "github.com/AoManoh/openpe/internal/adapters/claude"
-	"github.com/AoManoh/openpe/internal/adapters/clipboard"
 	codexadapter "github.com/AoManoh/openpe/internal/adapters/codex"
+	"github.com/AoManoh/openpe/internal/adapters/delivery"
+	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
 	"github.com/AoManoh/openpe/internal/config"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers/openai"
@@ -42,6 +43,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, new
 		return runCodex(args[1:], stdin, stdout, stderr, newProvider, getwd, runCmd)
 	case "claude":
 		return runClaude(args[1:], stdin, stdout, stderr, newProvider, getwd)
+	case "windsurf":
+		return runWindsurf(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -232,24 +235,37 @@ func runCodexHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Wr
 }
 
 func runCodexHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
-	fs := flag.NewFlagSet("codex hook last", flag.ContinueOnError)
+	return runDeliveryLast("codex hook last", "codex", args, stdout, stderr)
+}
+
+func runDeliveryLast(commandName string, client string, args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	pathOnly := fs.Bool("path", false, "print the cached preview path")
+	pathOnly := fs.Bool("path", false, "print the cached content path")
+	promptOnly := fs.Bool("prompt", false, "print the paste-ready enhanced prompt instead of Markdown preview")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	path, err := codexadapter.LastPreviewPath()
-	if err != nil {
-		fmt.Fprintf(stderr, "resolve preview path: %v\n", err)
-		return 1
-	}
 	if *pathOnly {
+		pathFn := delivery.LastPreviewPath
+		if *promptOnly {
+			pathFn = delivery.LastPromptPath
+		}
+		path, err := pathFn(client)
+		if err != nil {
+			fmt.Fprintf(stderr, "resolve cache path: %v\n", err)
+			return 1
+		}
 		fmt.Fprintln(stdout, path)
 		return 0
 	}
-	content, err := codexadapter.ReadLastPreview()
+	readFn := delivery.ReadLastPreview
+	if *promptOnly {
+		readFn = delivery.ReadLastPrompt
+	}
+	content, err := readFn(client)
 	if err != nil {
-		fmt.Fprintf(stderr, "read preview: %v\n", err)
+		fmt.Fprintf(stderr, "read cached content: %v\n", err)
 		return 1
 	}
 	fmt.Fprint(stdout, content)
@@ -276,7 +292,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	}
 	input, err := codexadapter.DecodeHookInput(stdin)
 	if err != nil {
-		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.Skip(fmt.Sprintf("openPE skipped prompt enhancement: invalid hook input: %v", err)))
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.Skip(localizedInvalidCodexHookInput(err, cfg.Language)))
 	}
 	manual, shouldHandle := codexadapter.ShouldHandleHook(input, *auto)
 	if !shouldHandle {
@@ -286,7 +302,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if strings.TrimSpace(input.CWD) == "" {
 		workingDir, err := getwd()
 		if err != nil {
-			return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("get cwd: %v", err)))
+			return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("get cwd: %v", err), cfg.Language))
 		}
 		overrideCWD = workingDir
 	}
@@ -304,21 +320,25 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		Timeout: *timeout,
 	})
 	if err != nil {
-		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure provider: %v", err)))
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure provider: %v", err), cfg.Language))
 	}
 	output, err := codexadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, codexadapter.HookOptions{
-		Client:  *client,
-		Mode:    *mode,
-		Auto:    *auto,
-		CWD:     overrideCWD,
-		Timeout: timeoutOrDefault(*timeout),
+		Client:   *client,
+		Mode:     *mode,
+		Auto:     *auto,
+		CWD:      overrideCWD,
+		Language: cfg.Language,
+		Timeout:  timeoutOrDefault(*timeout),
 	})
 	if err != nil {
-		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error()))
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error(), cfg.Language))
 	}
 	if output.Decision == "block" && *copyPreview && output.PreviewPrompt != "" {
-		method, copyErr := clipboard.Copy(context.Background(), output.PreviewPrompt)
-		output.Reason = codexadapter.AppendClipboardStatus(output.Reason, method, copyErr)
+		result := delivery.Deliver(context.Background(), output.PreviewPrompt, delivery.Options{
+			Client:   "codex",
+			Language: cfg.Language,
+		})
+		output.Reason = delivery.HookStatus(result, cfg.Language, "openpe codex hook last --prompt")
 	}
 	if output.Decision == "block" && *blockOutput == "stderr" {
 		if *terminalPreview {
@@ -328,7 +348,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return 2
 	}
 	if output.Decision == "block" && *blockOutput != "json" {
-		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(true, fmt.Sprintf("unsupported block-output %q", *blockOutput)))
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(true, fmt.Sprintf("unsupported block-output %q", *blockOutput), cfg.Language))
 	}
 	return codexadapter.EncodeHookOutputOrFallback(stdout, output)
 }
@@ -417,6 +437,8 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 		return runClaudeHookRun(args[1:], stdin, stderr, newProvider, getwd)
 	case "install":
 		return runClaudeHookInstall(args[1:], stdout, stderr, getwd)
+	case "last":
+		return runClaudeHookLast(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printClaudeHookUsage(stdout)
 		return 0
@@ -425,6 +447,10 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 		printClaudeHookUsage(stderr)
 		return 2
 	}
+}
+
+func runClaudeHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
+	return runDeliveryLast("claude hook last", "claude", args, stdout, stderr)
 }
 
 func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
@@ -442,7 +468,7 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 	}
 	input, err := claudeadapter.DecodeHookInput(stdin)
 	if err != nil {
-		fmt.Fprintf(stderr, "openPE skipped prompt enhancement: invalid Claude hook input: %v\n", err)
+		fmt.Fprintf(stderr, "%s\n", localizedInvalidClaudeHookInput(err, cfg.Language))
 		return 0
 	}
 	if !claudeadapter.ShouldHandleHook(input) {
@@ -452,7 +478,7 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 	if strings.TrimSpace(input.CWD) == "" {
 		workingDir, err := getwd()
 		if err != nil {
-			fmt.Fprintf(stderr, "openPE prompt enhancement failed: get cwd: %v\n", err)
+			fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("get cwd: %v", err), cfg.Language))
 			return 2
 		}
 		overrideCWD = workingDir
@@ -464,23 +490,28 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 		Timeout: *timeout,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "openPE prompt enhancement failed: configure provider: %v\n", err)
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure provider: %v", err), cfg.Language))
 		return 2
 	}
-	preview, err := claudeadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, claudeadapter.HookOptions{
-		Client:  *client,
-		Mode:    *mode,
-		CWD:     overrideCWD,
-		Timeout: timeoutOrDefault(*timeout),
+	output, err := claudeadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, claudeadapter.HookOptions{
+		Client:   *client,
+		Mode:     *mode,
+		CWD:      overrideCWD,
+		Language: cfg.Language,
+		Timeout:  timeoutOrDefault(*timeout),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "openPE prompt enhancement failed: %v\n", err)
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
 		return 2
 	}
-	if strings.TrimSpace(preview) == "" {
+	if strings.TrimSpace(output.PreviewPrompt) == "" {
 		return 0
 	}
-	fmt.Fprintln(stderr, preview)
+	result := delivery.Deliver(context.Background(), output.PreviewPrompt, delivery.Options{
+		Client:   "claude",
+		Language: cfg.Language,
+	})
+	fmt.Fprintln(stderr, delivery.HookStatus(result, cfg.Language, "openpe claude hook last --prompt"))
 	return 2
 }
 
@@ -548,6 +579,164 @@ func runClaudeHookInstall(args []string, stdout io.Writer, stderr io.Writer, get
 	return 0
 }
 
+func runWindsurf(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	if len(args) > 0 && args[0] == "hook" {
+		return runWindsurfHook(args[1:], stdin, stdout, stderr, newProvider, getwd)
+	}
+	fmt.Fprintf(stderr, "unknown windsurf command\n")
+	printWindsurfHookUsage(stderr)
+	return 2
+}
+
+func runWindsurfHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	if len(args) == 0 {
+		printWindsurfHookUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "run":
+		return runWindsurfHookRun(args[1:], stdin, stderr, newProvider, getwd)
+	case "install":
+		return runWindsurfHookInstall(args[1:], stdout, stderr, getwd)
+	case "last":
+		return runWindsurfHookLast(args[1:], stdout, stderr)
+	case "-h", "--help", "help":
+		printWindsurfHookUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown windsurf hook command: %s\n", args[0])
+		printWindsurfHookUsage(stderr)
+		return 2
+	}
+}
+
+func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	cfg := config.Load()
+	fs := flag.NewFlagSet("windsurf hook run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	client := fs.String("client", "windsurf", "target client name")
+	mode := fs.String("mode", "cascade", "prompt mode")
+	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
+	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
+	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	input, err := windsurfadapter.DecodeHookInput(stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s\n", localizedInvalidWindsurfHookInput(err, cfg.Language))
+		return 0
+	}
+	if !windsurfadapter.ShouldHandleHook(input) {
+		return 0
+	}
+	overrideCWD := ""
+	if strings.TrimSpace(input.CWD) == "" {
+		workingDir, err := getwd()
+		if err != nil {
+			fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("get cwd: %v", err), cfg.Language))
+			return 2
+		}
+		overrideCWD = workingDir
+	}
+	provider, err := newProvider(openai.Config{
+		BaseURL: strings.TrimSpace(*baseURL),
+		APIKey:  strings.TrimSpace(*apiKey),
+		Model:   strings.TrimSpace(*model),
+		Timeout: *timeout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure provider: %v", err), cfg.Language))
+		return 2
+	}
+	output, err := windsurfadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, windsurfadapter.HookOptions{
+		Client:   *client,
+		Mode:     *mode,
+		CWD:      overrideCWD,
+		Language: cfg.Language,
+		Timeout:  timeoutOrDefault(*timeout),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
+		return 2
+	}
+	if strings.TrimSpace(output.PreviewPrompt) == "" {
+		return 0
+	}
+	result := delivery.Deliver(context.Background(), output.PreviewPrompt, delivery.Options{
+		Client:   "windsurf",
+		Language: cfg.Language,
+	})
+	fmt.Fprintln(stderr, delivery.HookStatus(result, cfg.Language, "openpe windsurf hook last --prompt"))
+	return 2
+}
+
+func runWindsurfHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
+	return runDeliveryLast("windsurf hook last", "windsurf", args, stdout, stderr)
+}
+
+func runWindsurfHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
+	fs := flag.NewFlagSet("windsurf hook install", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	scope := fs.String("scope", "user", "hook scope: user or project")
+	target := fs.String("path", "", "explicit Windsurf hooks.json path")
+	openpeBin := fs.String("openpe-bin", "", "openpe executable path; defaults to PATH lookup")
+	envFile := fs.String("env-file", "", "dotenv file loaded by the hook; defaults to ~/.config/openpe/.env for user hooks or project .env for project hooks")
+	dryRun := fs.Bool("dry-run", false, "print hooks.json without writing it")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	hooksPath, err := windsurfHooksPath(*scope, *target, getwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve Windsurf hooks path: %v\n", err)
+		return 1
+	}
+	bin, err := resolveOpenPEBin(*openpeBin)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve openpe binary: %v\n", err)
+		return 1
+	}
+	hookEnvFile, err := windsurfHookEnvFile(*scope, *target, *envFile, getwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve hook env file: %v\n", err)
+		return 1
+	}
+	var existing []byte
+	if data, err := os.ReadFile(hooksPath); err == nil {
+		existing = data
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "read Windsurf hooks config: %v\n", err)
+		return 1
+	}
+	command := windsurfadapter.HookCommand(bin, hookEnvFile)
+	powershell := windsurfadapter.PowerShellHookCommand(bin, hookEnvFile)
+	merged, err := windsurfadapter.MergeHooksConfig(existing, command, powershell)
+	if err != nil {
+		fmt.Fprintf(stderr, "merge Windsurf hooks config: %v\n", err)
+		return 1
+	}
+	changed := !bytes.Equal(bytes.TrimSpace(existing), bytes.TrimSpace(merged))
+	if *dryRun {
+		_, _ = stdout.Write(merged)
+		return 0
+	}
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "create Windsurf hooks directory: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(hooksPath, merged, 0o644); err != nil {
+		fmt.Fprintf(stderr, "write Windsurf hooks config: %v\n", err)
+		return 1
+	}
+	if changed {
+		fmt.Fprintf(stdout, "installed openPE Windsurf hook: %s\n", hooksPath)
+	} else {
+		fmt.Fprintf(stdout, "openPE Windsurf hook already installed: %s\n", hooksPath)
+	}
+	return 0
+}
+
 func codexHooksPath(scope string, target string, getwd func() (string, error)) (string, error) {
 	if strings.TrimSpace(target) != "" {
 		return filepath.Clean(target), nil
@@ -579,6 +768,28 @@ func claudeSettingsPath(target string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
+func windsurfHooksPath(scope string, target string, getwd func() (string, error)) (string, error) {
+	if strings.TrimSpace(target) != "" {
+		return filepath.Clean(target), nil
+	}
+	switch scope {
+	case "project":
+		cwd, err := getwd()
+		if err != nil {
+			return "", err
+		}
+		return windsurfadapter.ProjectHooksPath(cwd), nil
+	case "user":
+		path := windsurfadapter.UserHooksPath()
+		if path == "" {
+			return "", fmt.Errorf("resolve user home directory")
+		}
+		return path, nil
+	default:
+		return "", fmt.Errorf("unsupported scope %q", scope)
+	}
 }
 
 func resolveOpenPEBin(value string) (string, error) {
@@ -632,6 +843,28 @@ func claudeHookEnvFile(value string) (string, error) {
 	return filepath.Join(home, ".config", "openpe", ".env"), nil
 }
 
+func windsurfHookEnvFile(scope string, target string, value string, getwd func() (string, error)) (string, error) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return filepath.Abs(value)
+	}
+	if scope == "user" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".config", "openpe", ".env"), nil
+	}
+	if strings.TrimSpace(target) != "" {
+		return "", nil
+	}
+	cwd, err := getwd()
+	if err != nil {
+		return "", err
+	}
+	return windsurfadapter.ProjectEnvFile(cwd), nil
+}
+
 func runCommand(ctx context.Context, name string, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = stdin
@@ -648,27 +881,43 @@ func timeoutOrDefault(value time.Duration) time.Duration {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "正式使用：安装 hook 后，在 Codex、Claude Code 或 Windsurf Cascade 对话终端输入 `pe <内容>`。")
+	fmt.Fprintln(w, "测试/调试命令：")
+	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user]")
+	fmt.Fprintln(w, "  openpe claude hook install")
+	fmt.Fprintln(w, "  openpe windsurf hook install [--scope project|user]")
 	fmt.Fprintln(w, "  openpe enhance [--prompt text] [--json] [--client name] [--mode name]")
 	fmt.Fprintln(w, "  openpe codex [--prompt text] [--dry-run] [--codex-arg arg]...")
-	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user]")
 	fmt.Fprintln(w, "  openpe codex hook run")
-	fmt.Fprintln(w, "  openpe codex last [--path]")
-	fmt.Fprintln(w, "  openpe claude hook install")
+	fmt.Fprintln(w, "  openpe codex last [--path] [--prompt]")
 	fmt.Fprintln(w, "  openpe claude hook run")
+	fmt.Fprintln(w, "  openpe claude hook last [--path] [--prompt]")
+	fmt.Fprintln(w, "  openpe windsurf hook run")
+	fmt.Fprintln(w, "  openpe windsurf hook last [--path] [--prompt]")
 }
 
 func printCodexHookUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "正式使用：安装 hook 后，在 Codex 对话终端输入 `pe <内容>`。")
+	fmt.Fprintln(w, "测试/调试命令：")
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user] [--path hooks.json] [--openpe-bin path]")
 	fmt.Fprintln(w, "  openpe codex hook run [--auto] [--block-output json|stderr] [--copy-preview] [--terminal-preview=false] [--hook-scope user|project]")
-	fmt.Fprintln(w, "  openpe codex hook last [--path]")
+	fmt.Fprintln(w, "  openpe codex hook last [--path] [--prompt]")
 }
 
 func printClaudeHookUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "正式使用：安装 hook 后，在 Claude Code 对话终端输入 `pe <内容>`。")
+	fmt.Fprintln(w, "测试/调试命令：")
 	fmt.Fprintln(w, "  openpe claude hook install [--path settings.json] [--openpe-bin path]")
 	fmt.Fprintln(w, "  openpe claude hook run")
+	fmt.Fprintln(w, "  openpe claude hook last [--path] [--prompt]")
+}
+
+func printWindsurfHookUsage(w io.Writer) {
+	fmt.Fprintln(w, "正式使用：安装 hook 后，在 Windsurf Cascade 输入 `pe <内容>`。")
+	fmt.Fprintln(w, "测试/调试命令：")
+	fmt.Fprintln(w, "  openpe windsurf hook install [--scope project|user] [--path hooks.json] [--openpe-bin path]")
+	fmt.Fprintln(w, "  openpe windsurf hook run")
+	fmt.Fprintln(w, "  openpe windsurf hook last [--path] [--prompt]")
 }
 
 func envOrDefault(name string, fallback string) string {
@@ -687,6 +936,43 @@ func envBoolOrDefault(name string, fallback bool) bool {
 		return false
 	default:
 		return fallback
+	}
+}
+
+func localizedInvalidCodexHookInput(err error, language string) string {
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE skipped prompt enhancement: invalid hook input: %v", err)
+	}
+	return fmt.Sprintf("openPE 跳过增强：hook 输入无效：%v", err)
+}
+
+func localizedInvalidClaudeHookInput(err error, language string) string {
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE skipped prompt enhancement: invalid Claude hook input: %v", err)
+	}
+	return fmt.Sprintf("openPE 跳过增强：Claude hook 输入无效：%v", err)
+}
+
+func localizedInvalidWindsurfHookInput(err error, language string) string {
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE skipped prompt enhancement: invalid Windsurf hook input: %v", err)
+	}
+	return fmt.Sprintf("openPE 跳过增强：Windsurf hook 输入无效：%v", err)
+}
+
+func localizedEnhanceFailure(message string, language string) string {
+	if isEnglishLanguage(language) {
+		return "openPE prompt enhancement failed: " + message
+	}
+	return "openPE 增强失败：" + message
+}
+
+func isEnglishLanguage(language string) bool {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "en", "en-us", "english":
+		return true
+	default:
+		return false
 	}
 }
 

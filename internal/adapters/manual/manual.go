@@ -1,42 +1,29 @@
 package manual
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 type Mode string
 
 const (
 	ModePreview Mode = "preview"
-	ModeInject  Mode = "inject"
 )
 
 func Parse(prompt string) (string, Mode, bool) {
 	prompt = strings.TrimSpace(prompt)
-	for _, trigger := range []struct {
-		prefix string
-		mode   Mode
-	}{
-		{prefix: "pe!:", mode: ModeInject},
-		{prefix: "pe！：", mode: ModeInject},
-		{prefix: "pe!：", mode: ModeInject},
-		{prefix: "pe！:", mode: ModeInject},
-		{prefix: "openpe!:", mode: ModeInject},
-		{prefix: "openpe！：", mode: ModeInject},
-		{prefix: "openpe!：", mode: ModeInject},
-		{prefix: "openpe！:", mode: ModeInject},
-		{prefix: "增强!:", mode: ModeInject},
-		{prefix: "增强！：", mode: ModeInject},
-		{prefix: "增强!：", mode: ModeInject},
-		{prefix: "增强！:", mode: ModeInject},
-		{prefix: "pe:", mode: ModePreview},
-		{prefix: "pe：", mode: ModePreview},
-		{prefix: "openpe:", mode: ModePreview},
-		{prefix: "openpe：", mode: ModePreview},
-		{prefix: "增强:", mode: ModePreview},
-		{prefix: "增强：", mode: ModePreview},
-	} {
-		if strings.HasPrefix(prompt, trigger.prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(prompt, trigger.prefix)), trigger.mode, true
-		}
+	if prompt == "pe" {
+		return "", ModePreview, true
+	}
+	rest, ok := strings.CutPrefix(prompt, "pe")
+	if !ok || rest == "" {
+		return prompt, "", false
+	}
+	separator, size := utf8.DecodeRuneInString(rest)
+	if separator == ':' || separator == '：' || unicode.IsSpace(separator) {
+		return strings.TrimSpace(rest[size:]), ModePreview, true
 	}
 	return prompt, "", false
 }

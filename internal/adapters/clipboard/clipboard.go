@@ -58,8 +58,9 @@ func Copy(ctx context.Context, text string) (string, error) {
 	}
 	if err := copyOSC52(text); err == nil {
 		return "OSC52", nil
+	} else {
+		return "", fmt.Errorf("clipboard commands failed: %s; OSC 52 fallback failed: %w", strings.Join(attempted, ", "), err)
 	}
-	return "", fmt.Errorf("clipboard commands failed: %s", strings.Join(attempted, ", "))
 }
 
 func runShellCommand(ctx context.Context, command string, text string) error {

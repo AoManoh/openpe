@@ -10,6 +10,7 @@ import (
 const (
 	DefaultListenAddr = "127.0.0.1:18980"
 	DefaultTimeout    = 60 * time.Second
+	DefaultLanguage   = "zh"
 )
 
 type Config struct {
@@ -18,6 +19,7 @@ type Config struct {
 	Model      string
 	ListenAddr string
 	Timeout    time.Duration
+	Language   string
 }
 
 func Load() Config {
@@ -32,6 +34,7 @@ func Load() Config {
 		Model:      valueFromEnv("OPENPE_MODEL", fileEnv),
 		ListenAddr: valueOrDefault("OPENPE_LISTEN_ADDR", fileEnv, DefaultListenAddr),
 		Timeout:    durationFromValue(valueFromEnv("OPENPE_TIMEOUT", fileEnv), DefaultTimeout),
+		Language:   normalizeLanguage(valueOrDefault("OPENPE_LANGUAGE", fileEnv, DefaultLanguage)),
 	}
 }
 
@@ -57,6 +60,15 @@ func durationFromValue(value string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func normalizeLanguage(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "en", "en-us", "english":
+		return "en"
+	default:
+		return DefaultLanguage
+	}
 }
 
 func loadDotEnv(path string) map[string]string {
