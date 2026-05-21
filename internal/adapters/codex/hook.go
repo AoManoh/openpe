@@ -173,11 +173,12 @@ func HookError(manual bool, message string) HookOutput {
 }
 
 func PreviewReason(enhanced string) string {
-	return strings.TrimSpace(`openPE enhanced prompt generated. This prompt was not submitted.
+	enhanced = strings.TrimSpace(enhanced)
+	return strings.TrimSpace(`# openPE Enhanced Prompt
 
-Copy, edit, and send the prompt below when you are ready:
+> This preview was not submitted to the model. Copy, edit, and send it manually when ready.
 
-` + strings.TrimSpace(enhanced))
+` + "```markdown\n" + enhanced + "\n```")
 }
 
 func AdditionalContext(enhanced string) string {
