@@ -39,12 +39,22 @@ type Config struct {
 type ServerConfig struct {
 	// Token, when non-empty, enables bearer-token authentication on the
 	// HTTP server. Use a 256-bit hex string (e.g. produced by
-	// integration.GenerateToken).
+	// integration.GenerateToken). When LifecycleEnabled is true and Token
+	// is empty, openpe-server generates an ephemeral token at startup.
 	Token string
 	// CORSOrigins is the list of Origin headers the server reflects in
 	// Access-Control-Allow-Origin. Comma-separated in env / .env. Special
 	// values: "*" allows any origin, "null" allows Electron file:// webviews.
 	CORSOrigins []string
+	// LifecycleEnabled controls whether openpe-server writes a descriptor
+	// file at startup so IDE installers can discover its base URL and token.
+	// Default false — opt in only when integrating with a patch installer
+	// (Windsurf, Cursor, ...). Enabling auto-generates an ephemeral token
+	// when Token is empty.
+	LifecycleEnabled bool
+	// DescriptorFile overrides integration.DefaultDescriptorPath when set.
+	// Only consulted when LifecycleEnabled is true.
+	DescriptorFile string
 }
 
 type OpenaceConfig struct {
@@ -86,8 +96,10 @@ func Load() Config {
 			RetryJitter:       durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_JITTER", fileEnv), DefaultOpenaceRetryJitter),
 		},
 		Server: ServerConfig{
-			Token:       valueFromEnv("OPENPE_SERVER_TOKEN", fileEnv),
-			CORSOrigins: splitCSV(valueFromEnv("OPENPE_SERVER_CORS_ORIGINS", fileEnv)),
+			Token:            valueFromEnv("OPENPE_SERVER_TOKEN", fileEnv),
+			CORSOrigins:      splitCSV(valueFromEnv("OPENPE_SERVER_CORS_ORIGINS", fileEnv)),
+			LifecycleEnabled: boolFromValue(valueFromEnv("OPENPE_SERVER_LIFECYCLE_ENABLED", fileEnv), false),
+			DescriptorFile:   valueFromEnv("OPENPE_SERVER_DESCRIPTOR_FILE", fileEnv),
 		},
 	}
 }

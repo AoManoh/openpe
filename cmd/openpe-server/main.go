@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,9 +15,16 @@ import (
 	"github.com/AoManoh/openpe/internal/config"
 	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/integration"
 	"github.com/AoManoh/openpe/internal/providers/openai"
 	"github.com/AoManoh/openpe/internal/server"
 )
+
+// Version is the build identifier exposed via GET /v1/info and the
+// lifecycle descriptor. Override at build time with
+//
+//	go build -ldflags "-X main.Version=v0.2.0" ./cmd/openpe-server
+var Version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -49,28 +57,78 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configure context provider: %w", err)
 	}
+
+	listen := strings.TrimSpace(*listenAddr)
+	if listen == "" {
+		listen = config.DefaultListenAddr
+	}
+
+	// Lifecycle: opt-in descriptor + ephemeral token for IDE installers.
+	// When disabled (default), behaviour is identical to the historical
+	// no-handshake openpe-server used by hook / CLI consumers.
+	token := cfg.Server.Token
+	tokenSource := "OPENPE_SERVER_TOKEN"
+	var descriptorPath string
+	if cfg.Server.LifecycleEnabled {
+		if token == "" {
+			generated, err := integration.GenerateToken()
+			if err != nil {
+				return fmt.Errorf("generate ephemeral server token: %w", err)
+			}
+			token = generated
+			tokenSource = "ephemeral (lifecycle auto-generated)"
+		}
+		descriptorPath = cfg.Server.DescriptorFile
+		if descriptorPath == "" {
+			descriptorPath, err = integration.DefaultDescriptorPath()
+			if err != nil {
+				return fmt.Errorf("resolve descriptor path: %w", err)
+			}
+		}
+		descriptor := integration.NewLocalServerDescriptor(deriveBaseURL(listen), token, os.Getpid(), Version)
+		if err := integration.WriteDescriptor(descriptorPath, descriptor); err != nil {
+			return fmt.Errorf("write descriptor %s: %w", descriptorPath, err)
+		}
+		fmt.Fprintf(os.Stderr, "openpe-server: descriptor written to %s (mode 0600)\n", descriptorPath)
+		defer func() {
+			if removeErr := integration.RemoveDescriptor(descriptorPath); removeErr != nil {
+				fmt.Fprintf(os.Stderr, "openpe-server: cleanup descriptor %s: %v\n", descriptorPath, removeErr)
+			}
+		}()
+	}
+
 	httpServer := &http.Server{
-		Addr: strings.TrimSpace(*listenAddr),
+		Addr: listen,
 		Handler: server.NewWithOptions(service, server.Options{
-			Token: cfg.Server.Token,
+			Token: token,
 			CORS:  server.CORSOptions{AllowedOrigins: cfg.Server.CORSOrigins},
+			Info: server.ServerInfo{
+				Version:    Version,
+				StartedAt:  time.Now().UTC(),
+				ListenAddr: listen,
+			},
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	if httpServer.Addr == "" {
-		httpServer.Addr = config.DefaultListenAddr
-	}
+
 	authStatus := "disabled (set OPENPE_SERVER_TOKEN to enable bearer auth)"
-	if cfg.Server.Token != "" {
-		authStatus = "enabled (bearer token required for /v1/*)"
+	if token != "" {
+		authStatus = fmt.Sprintf("enabled via %s", tokenSource)
 	}
 	corsStatus := "disabled"
 	if len(cfg.Server.CORSOrigins) > 0 {
 		corsStatus = fmt.Sprintf("enabled for %s", strings.Join(cfg.Server.CORSOrigins, ", "))
 	}
+	lifecycleStatus := "disabled"
+	if cfg.Server.LifecycleEnabled {
+		lifecycleStatus = fmt.Sprintf("descriptor=%s", descriptorPath)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stderr, "openpe-server: listening on %s (auth: %s; cors: %s)\n", httpServer.Addr, authStatus, corsStatus)
+		fmt.Fprintf(os.Stderr,
+			"openpe-server: listening on %s (version=%s; auth=%s; cors=%s; lifecycle=%s)\n",
+			listen, Version, authStatus, corsStatus, lifecycleStatus)
 		errCh <- httpServer.ListenAndServe()
 	}()
 
@@ -88,6 +146,21 @@ func run(args []string) error {
 		}
 		return err
 	}
+}
+
+// deriveBaseURL converts a "host:port" listen address into the base URL an
+// IDE installer running on the same host can use. Wildcard / unspecified
+// hosts (0.0.0.0, ::, empty) are rewritten to 127.0.0.1 because the
+// installer always lives on the loopback path.
+func deriveBaseURL(listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+		if err != nil {
+			port = "18980"
+		}
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {

@@ -25,6 +25,11 @@ type Options struct {
 	// CORS configures Cross-Origin Resource Sharing for Electron / webview
 	// callers. Empty AllowedOrigins disables CORS handling entirely.
 	CORS CORSOptions
+	// Info supplies metadata returned by GET /v1/info. The AuthEnabled,
+	// CORSEnabled and CORSOrigins fields are derived automatically from
+	// the other Options fields; callers should leave them blank. Version,
+	// ListenAddr, and StartedAt are caller-supplied.
+	Info ServerInfo
 }
 
 // New returns a server handler with no authentication and no CORS handling.
@@ -47,6 +52,11 @@ func NewWithOptions(service *enhancer.Service, opts Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.health)
 	mux.HandleFunc("/v1/prompt-enhance", h.promptEnhance)
+	info := opts.Info
+	info.AuthEnabled = opts.Token != ""
+	info.CORSEnabled = len(opts.CORS.AllowedOrigins) > 0
+	info.CORSOrigins = opts.CORS.AllowedOrigins
+	mux.Handle("/v1/info", infoHandler(info))
 	skip := opts.SkipAuthPaths
 	if skip == nil {
 		skip = []string{"/healthz"}
