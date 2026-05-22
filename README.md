@@ -296,6 +296,10 @@ python3 -m installer doctor --app-dir /path/to/Windsurf
 
 输出中的 `button config: stale` 表示按钮内嵌配置与当前 server descriptor 不一致；重启 `openpe-server` 时沿用同一个 `OPENPE_SERVER_TOKEN`，或重新安装 patch 刷新内嵌配置。更多说明见 [extensions/openpe-windsurf-patch/README.md](extensions/openpe-windsurf-patch/README.md)。
 
+按钮路径会通过 `inject/src/cascade_context.ts` 观察 Windsurf renderer 的 IndexedDB，把当前 Cascade trajectory 的多轮上下文按 best-effort 抓出来，作为 `history` 字段塞进本地 `POST /v1/prompt-enhance` 请求，让 enhancer 拿到比"只看本轮 prompt"更完整的对话上下文。Phase 5 bring-up（2026-05-22）已经证实 Cascade 客户端**不存**多轮完整 transcript——IDB 里只有当前 in-flight 一个 trajectory，`SendUserCascadeMessage` RPC 请求体每轮也只有 ~458 字节 IDs + 新 turn——所以 inject 层只能给到当前 trajectory 级别的历史，**不是** Codex `~/.codex/history.jsonl` 或 Claude Code `transcript_path` 那种完整 session 级别。完整数据源对比、隐私契约和未来 streaming response tap 调查方向，见 [extensions/openpe-windsurf-patch/README.md § 注意事项与已知限制](extensions/openpe-windsurf-patch/README.md#注意事项与已知限制) 与 [extensions/openpe-windsurf-patch/docs/architecture.md](extensions/openpe-windsurf-patch/docs/architecture.md)。
+
+安装时加 `--debug` 可以打开诊断模式：inject 层会在 `window.__openpeDebug` 上挂只读的 shape-only 查询接口（`describeContext()` / `describeHistory()`，只暴露 count、role 分布、80 字符 preview，**绝不**暴露完整 message body、token 或 `Authorization` header），方便在 DevTools 内确认 history 是否成功抓到、来源标签（`latest_trajectory` / `none`）是否正确。默认（不带 `--debug`）该命名空间不挂载、`cascade_context` watcher 内部也不输出诊断日志，与之前行为保持完全静默。
+
 ## 调用方式
 
 ### 基本流程

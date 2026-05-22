@@ -1,166 +1,203 @@
 # openpe-windsurf-patch
 
-> **⚠️ EXPERIMENTAL — USER ASSUMES ALL RISK ⚠️**
+> **⚠️ 实验性 — 用户自担全部风险 ⚠️**
 >
-> This subproject **patches the Windsurf IDE Electron bundle in place** to
-> inject an openPE logo Enhance button into the Cascade chat input toolbar. It is
-> **opt-in**, **off by default**, and **completely independent from the main
-> openPE hook + VSIX paths**.
+> 该子项目会**就地修补 Windsurf IDE 的 Electron bundle**，在 Cascade
+> 聊天输入工具栏上注入一个 openPE logo Enhance 按钮。它是**显式
+> opt-in**、**默认关闭**、与 openPE 主 hook 和 VSIX 路径**完全独立**。
 >
-> By running the installer you acknowledge:
+> 运行 installer 即表示你确认：
 >
-> 1. **EULA risk** — modifying the Windsurf application bundle may violate the
->    Windsurf / Codeium End-User License Agreement. Your account may be
->    suspended or refused technical support. Read the current EULA before
->    proceeding.
-> 2. **Code-signing risk** — on macOS, re-signing the patched bundle invalidates
->    Apple notarisation; Gatekeeper may refuse to launch the IDE until the
->    quarantine attribute is removed manually.
-> 3. **Checksum bypass** — `product.json` is modified to satisfy Electron's
->    resource-integrity check; this disables that safety net for the patched
->    file only.
-> 4. **Upgrade fragility** — every Windsurf update overwrites the patched
->    bundle; you must re-run `install` after every IDE upgrade. The previous
->    backup is preserved and may not match the new IDE version.
-> 5. **No warranty** — the installer is provided AS IS. If anything goes
->    wrong, restore from the backup (or reinstall Windsurf cleanly).
+> 1. **EULA 风险** — 修改 Windsurf 应用 bundle 可能违反 Windsurf /
+>    Codeium 终端用户许可协议。你的账号可能被暂停或拒绝技术支持。
+>    安装前请阅读当前 EULA。
+> 2. **代码签名风险** — 在 macOS 上，重签修补后的 bundle 会使 Apple
+>    notarization 失效；Gatekeeper 可能拒绝启动 IDE，直到手动移除
+>    quarantine 属性。
+> 3. **绕过 checksum** — `product.json` 会被修改以满足 Electron 的资源
+>    完整性校验；这会**仅**禁用修补文件这一项安全网。
+> 4. **升级脆弱性** — Windsurf 每次更新都会覆盖修补后的 bundle；你
+>    必须在每次 IDE 升级后重新跑 `install`。之前的备份会保留，但
+>    可能与新版 IDE 不匹配。
+> 5. **无任何担保** — installer 按 AS IS 提供。出问题请从备份还原
+>    （或重新干净安装 Windsurf）。
 >
-> **If any of the above is unacceptable to you, use the default openPE
-> integration paths instead:**
+> **如果以上任何一条无法接受，请改用 openPE 默认集成路径：**
 >
-> - `openpe windsurf hook install` (terminal-based `pe ...` keyword)
-> - `extensions/vscode-openpe/` VSIX plugin (command palette / right-click)
+> - `openpe windsurf hook install`（终端 `pe ...` 关键字）
+> - `extensions/vscode-openpe/` VSIX 插件（命令面板 / 右键菜单）
 
 ---
 
-## What this is
+## 这是什么
 
-A standalone, MIT-licensed installer that:
+一个独立的、MIT 许可的 installer，它会：
 
-- **Modifies** `workbench.desktop.main.js` inside the Windsurf application
-  bundle to inject a small (~30 KB) JavaScript payload.
-- The injected payload watches the Cascade chat input toolbar with
-  `MutationObserver`, adds an openPE logo button next to Submit, opens a 3-page modal
-  on click, calls **your local** `openpe-server` over HTTP (loopback only),
-  and writes the enhanced prompt back into the Cascade input field.
-  The button icon is inlined from the same SVG design as
-  `extensions/vscode-openpe/media/openpe-icon.svg`; the patched bundle does
-  not load resources from the VSIX directory at runtime.
-- Talks to nothing outside `127.0.0.1`. No telemetry, no third-party gate
-  servers, no commercial license keys.
+- **修改** Windsurf 应用 bundle 内的 `workbench.desktop.main.js`，注入一
+  段约 30 KB 的 JavaScript payload。
+- 注入的 payload 用 `MutationObserver` 监听 Cascade 聊天输入工具栏，在
+  Submit 旁边添加一个 openPE logo 按钮，点击后调用**你本地**的
+  `openpe-server`（仅 loopback），并把增强后的 prompt 写回 Cascade 输入
+  框。按钮图标的 SVG 设计与
+  `extensions/vscode-openpe/media/openpe-icon.svg` 一致；修补后的 bundle
+  不会在运行时从 VSIX 目录加载资源。
+- 不与 `127.0.0.1` 之外的任何地方通信。无 telemetry、无第三方 gate
+  server、无商业 license key。
 
-## What this is NOT
+## 这不是什么
 
-- **NOT** a fork of WSE (`windsurf-enhance`) — no shared code, no shared keys,
-  no shared server. We borrow only the public idea of "patch the bundle to
-  add a button".
-- **NOT** a replacement for the openPE hook or VSIX paths. Those remain the
-  default, EULA-safe options.
-- **NOT** automatically updated. Windsurf upgrade ⇒ re-run `install`.
-- **NOT** part of the main openPE Go build. Lives in its own subproject with
-  its own Python + Node.js toolchains.
+- **不是** WSE（`windsurf-enhance`）的 fork — 不共享代码、不共享 key、
+  不共享 server。只借用“修补 bundle 加按钮”这个公开思路。
+- **不是** openPE hook 或 VSIX 路径的替代。那些仍然是 EULA 安全的默认
+  选项。
+- **不会**自动更新。Windsurf 升级 ⇒ 重新跑 `install`。
+- **不是** openPE 主 Go build 的一部分。它住在自己的子项目里，有自己的
+  Python + Node.js 工具链。
 
-## System requirements
+## 系统要求
 
-- Python 3.8 or newer
-- (Optional, for building inject.js from source) Node.js 18+ and npm
-- A running `openpe-server` with lifecycle descriptor enabled. For the
-  injected button path, prefer a fixed local token so the button keeps
-  working across server restarts:
+- Python 3.8 或更新版本
+- （可选，从源码构建 inject.js 用）Node.js 18+ 和 npm
+- 一个启用了 lifecycle descriptor 的运行中 `openpe-server`。对于按钮
+  路径，推荐固定本地 token，让按钮在 server 重启后仍能用：
 
   ```bash
-  # Generate this once and keep reusing it, e.g. from ~/.config/openpe/.env.
+  # 生成一次后持续复用，例如放在 ~/.config/openpe/.env。
   export OPENPE_SERVER_TOKEN="<stable-64-hex-token>"
   export OPENPE_SERVER_LIFECYCLE_ENABLED=true
   export OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf
   openpe-server
   ```
 
-  The installer reads `~/.config/openpe/server.json` to discover the
-  loopback base URL and bearer token, then snapshots them into the patched
-  bundle.
+  installer 会读 `~/.config/openpe/server.json` 拿到 loopback base URL 和
+  bearer token，再把它们快照进修补后的 bundle。
 
-## Status
+## 当前状态
 
-- **Current**: `status`, `install`, `uninstall`, and `doctor` are real
-  commands. `install` resolves the Windsurf bundle, verifies the local
-  `openpe-server` descriptor via `GET /v1/info`, backs up the bundle and
-  `product.json`, injects the built `inject/dist/inject.js` payload with a
-  `globalThis.__openpe` bootstrap, removes the bundle checksum entry, and
-  re-signs the app on macOS.
-- The injected payload watches the Cascade toolbar, adds the openPE logo button,
-  calls local `POST /v1/prompt-enhance`, previews original/enhanced text,
-  and best-effort writes the enhanced prompt back to the Cascade input.
-- This remains experimental and off by default because it modifies the
-  Windsurf application bundle and depends on private Cascade DOM selectors.
+- **现状**：`status`、`install`、`uninstall`、`doctor` 都是真实可用的命令。
+  `install` 会解析 Windsurf bundle、通过 `GET /v1/info` 校验本地
+  `openpe-server` descriptor、备份 bundle 和 `product.json`、注入构建好的
+  `inject/dist/inject.js` payload 和 `globalThis.__openpe` bootstrap、移除
+  bundle 的 checksum 条目、并在 macOS 上重签 app。
+- 注入的 payload 会监听 Cascade 工具栏、添加 openPE logo 按钮、调本地
+  `POST /v1/prompt-enhance`、预览原文/增强文本、并尽力把增强后的
+  prompt 写回 Cascade 输入框。
+- 仍然是实验性、默认关闭的，因为它会修改 Windsurf 应用 bundle，并依赖
+  Cascade 的私有 DOM 选择器。
 
-The work is tracked under `docs/development/2026-05-22-windsurf-patch-installer.md`
-in the main openPE repository.
+工作日志详见主 openPE 仓库的
+`docs/development/2026-05-22-windsurf-patch-installer.md`。
 
-## Usage
+## 注意事项与已知限制
+
+### 对话历史抓取是 best-effort（只能拿到当前 trajectory）
+
+点击注入的 openPE 按钮时，若有缓存到消息，payload 会把它们以 `history`
+字段附在本地 `POST /v1/prompt-enhance` 请求里。该字段由
+`inject/src/cascade_context.ts` 里的 renderer 侧 watcher 提供：watcher
+监听 Windsurf 的 IndexedDB（`keyval-store` /
+`windsurf:cache:cachedActiveTrajectory:<workspace>`）里**当前进行中那个
+trajectory** 的完整字节，按尾切片返回——最多 32 条消息，每条截到 6 000
+字符，总字符数硬上限 80 000（超额时优先丢最旧的）。
+
+它**抓不到**同一 chat session 里早期已经结束的 task。Phase 5 bring-up
+（2026-05-22）逆向了 renderer 可见的状态，给出了原因：
+
+| 客户端数据源 | 是否含完整多轮内容 |
+|---|---|
+| `cachedActiveTrajectory:<workspace>`（IDB） | 是——只有最近一个 trajectory；Cascade 起新 task 时被覆盖 |
+| `cachedTrajectorySummaries:*`（IDB） | 否——只有 trajectory ID / 标题；无 `user_input` / `planner_response` 字段 |
+| `SendUserCascadeMessage` RPC 请求 body（`localhost:<port>/exa.language_server_pb.LanguageServerService/...`） | 否——实测每轮约 458 字节，仅含 IDs + 新一条 user message |
+
+完整 session 状态保存在本地 **Codeium daemon 进程**里（`localhost:<port>`
+上的 `exa.language_server_pb` 那批 Connect-RPC / gRPC-web 服务），**不在
+任何 renderer 可访问的存储中**。Cascade 没有 `~/.codex/history.jsonl`
+那种本地全文 transcript 文件，所以本 patch **纯 renderer 侧无法**给出
+codex CLI / Claude CLI 级别的完整历史上下文。
+
+这个限制是**可观测**的，不是被掩盖的：用 `--debug` 安装后，
+`window.__openpeDebug.describeHistory()` 会显示 `source:
+'latest_trajectory' | 'none'` 以及形状级统计（counts、roles、80 字符
+preview）。完整调查日志见 `inject/README.md` § "Dev/test 诊断网关
+(`--debug`)" 和 `docs/architecture.md` § "Best-effort 抓取范围与 IDB
+拓扑"。
+
+### 后续调查方向 — 通过 daemon 响应流榨出 full session
+
+如果 codex / Claude-CLI 级别的完整 transcript 成为硬需求，唯一还值得
+试的客户端侧路径是 **streaming response tap**：在
+`SendUserCascadeMessage` 端点上 hook `window.fetch`，读 chunked
+protobuf 响应流，看 daemon 推回来的数据有没有超出"新 assistant 一轮"
+的内容。实现规划是在 `cascade_context.ts` 旁边加一个 `fetch_tap.ts`
+模块，新增 `HistorySource` 变体（`'fetch_tap'` 或 `'merged'`），全程
+**不动 wire 契约**——`POST /v1/prompt-enhance` 的 `history` 字段
+shape 不变，server、hook adapter、enhancer 都不需要改。
+
+回收到有意义多轮数据的概率估计**偏低**（daemon 是 server-stateful 的，
+没有任何架构动机往每轮响应里塞自己已有的状态），所以它停留在 open
+investigation，**没有**进入计划阶段。后人接手时建议先看
+`docs/architecture.md` 里 IDB topology 和 `SendUserCascadeMessage`
+body-shape 探针的原始记录，避免把同一批死胡同再趟一遍。
+
+## 使用方式
 
 ```bash
-# 1. Start openpe-server with lifecycle + CORS before installing.
+# 1. 安装前先启动 openpe-server，启用 lifecycle 和 CORS。
 OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
 OPENPE_SERVER_LIFECYCLE_ENABLED=true \
 OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
 openpe-server
 
-# 2. Build the injected payload when changing TypeScript sources.
+# 2. 修改 TypeScript 源码后，重新构建 inject payload。
 cd extensions/openpe-windsurf-patch/inject
 npm install
 npm run build
 
-# 3. Install from the subproject root.
+# 3. 从子项目根目录安装。
 cd ..
 python3 -m installer doctor
 python3 -m installer status
 python3 -m installer install --i-accept-experimental-risk
 ```
 
-For repeatable daily use, do not regenerate `OPENPE_SERVER_TOKEN` on every
-server launch. Generate it once, store it in your user-level openPE env file
-or shell profile, and reuse it so the already-installed button remains
-authenticated after `openpe-server` restarts. If the browser console reports
-a CORS error, inspect the request `Origin` in Windsurf DevTools and add that
-exact origin to `OPENPE_SERVER_CORS_ORIGINS`.
+为了能日常稳定使用，请**不要**每次启动 server 都重新生成
+`OPENPE_SERVER_TOKEN`。生成一次后放在用户级 openPE env 文件或 shell
+profile 里复用，这样已经安装的按钮在 `openpe-server` 重启后仍然保持鉴
+权有效。如果浏览器 console 报 CORS 错误，在 Windsurf DevTools 里看请求
+的 `Origin`，把这个精确 origin 加到 `OPENPE_SERVER_CORS_ORIGINS`。
 
-Restart Windsurf after install. The openPE logo button should appear next to the
-Cascade submit controls. Click it, review the enhanced prompt, then use
-`Apply to input`. If Windsurf changed its private DOM and the button does
-not appear, see `inject/README.md` and widen `findCascadeToolbar()` /
-`SUBMIT_BUTTON_SELECTORS`, rebuild `inject/dist/inject.js`, then re-run
-`install`.
+安装后重启 Windsurf。openPE logo 按钮应该出现在 Cascade submit 控件旁
+边。点它、查看增强后的 prompt、用 `Apply to input`。如果 Windsurf 改了
+私有 DOM 导致按钮不出现，见 `inject/README.md`，扩充
+`findCascadeToolbar()` / `SUBMIT_BUTTON_SELECTORS` 后重新构建
+`inject/dist/inject.js`，再重跑 `install`。
 
-All subcommands accept `--help`. `status` and `doctor --app-dir <path>`
-also report `button config`. A `stale` result means the token or base URL
-embedded at install time no longer matches the current server descriptor;
-restart `openpe-server` with the same `OPENPE_SERVER_TOKEN` or re-run
-`install` to refresh the bundle bootstrap.
+所有子命令都接受 `--help`。`status` 和 `doctor --app-dir <path>` 还会汇报
+`button config`。`stale` 结果表示安装时嵌入的 token 或 base URL 与当前
+server descriptor 不一致；用同一个 `OPENPE_SERVER_TOKEN` 重启
+`openpe-server`，或重跑 `install` 刷新 bundle bootstrap。
 
-For the P3 descriptor-read spike, run install with `--fs-probe` after
-starting `openpe-server` with `OPENPE_SERVER_LIFECYCLE_ENABLED=true`.
-Restart Windsurf, click the openPE button, and inspect DevTools for
-`[openpe-fs-probe]` logs. The probe reports only non-secret descriptor
-metadata and whether the renderer can read the 0600 descriptor via Node
-`fs`; it does not change token transport yet.
+P3 descriptor-read 试验需要带 `--fs-probe` 安装；先用
+`OPENPE_SERVER_LIFECYCLE_ENABLED=true` 启动 `openpe-server`，重启 Windsurf
+后点 openPE 按钮，在 DevTools 看 `[openpe-fs-probe]` 日志。该探针只输出非
+敏感的 descriptor 元信息和 renderer 能否通过 Node `fs` 读到 0600
+descriptor 的状态；它还没改 token 传输方式。
 
-## Testing
+## 测试
 
 ```bash
 python3 -m unittest discover -v tests
 ```
 
-No third-party Python dependencies are required.
+不需要任何第三方 Python 依赖。
 
-## Architecture
+## 架构
 
-See [`docs/architecture.md`](docs/architecture.md). The high level: the
-installer implements the `Injector` and `BundlePatcher` contracts defined
-in the main openPE repository's `internal/integration/` package, so the
-same patterns can be reused for future IDEs (Cursor, VS Code Composer)
-by creating sibling subprojects.
+见 [`docs/architecture.md`](docs/architecture.md)。简要：installer 实现了主
+openPE 仓库 `internal/integration/` 包定义的 `Injector` 和
+`BundlePatcher` 契约，所以同样的模式可以通过新增同级子项目复用到未
+来的 IDE（Cursor、VS Code Composer）。
 
-## License
+## 许可证
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — 见 [`LICENSE`](LICENSE)。
