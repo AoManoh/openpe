@@ -30,6 +30,17 @@ type Config struct {
 	Timeout    time.Duration
 	Language   string
 	Openace    OpenaceConfig
+	Server     ServerConfig
+}
+
+// ServerConfig collects HTTP server runtime options that are independent of
+// the prompt enhancement core. Empty fields preserve the historical default
+// behaviour (no authentication, no lifecycle hooks).
+type ServerConfig struct {
+	// Token, when non-empty, enables bearer-token authentication on the
+	// HTTP server. Use a 256-bit hex string (e.g. produced by
+	// integration.GenerateToken).
+	Token string
 }
 
 type OpenaceConfig struct {
@@ -69,6 +80,9 @@ func Load() Config {
 			RetryBaseDelay:    durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_BASE_DELAY", fileEnv), DefaultOpenaceRetryBaseDelay),
 			RetryMaxDelay:     durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_MAX_DELAY", fileEnv), DefaultOpenaceRetryMaxDelay),
 			RetryJitter:       durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_JITTER", fileEnv), DefaultOpenaceRetryJitter),
+		},
+		Server: ServerConfig{
+			Token: valueFromEnv("OPENPE_SERVER_TOKEN", fileEnv),
 		},
 	}
 }

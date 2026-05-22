@@ -51,15 +51,19 @@ func run(args []string) error {
 	}
 	httpServer := &http.Server{
 		Addr:              strings.TrimSpace(*listenAddr),
-		Handler:           server.New(service),
+		Handler:           server.NewWithOptions(service, server.Options{Token: cfg.Server.Token}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	if httpServer.Addr == "" {
 		httpServer.Addr = config.DefaultListenAddr
 	}
+	authStatus := "disabled (set OPENPE_SERVER_TOKEN to enable bearer auth)"
+	if cfg.Server.Token != "" {
+		authStatus = "enabled (bearer token required for /v1/*)"
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stderr, "openpe-server: listening on %s\n", httpServer.Addr)
+		fmt.Fprintf(os.Stderr, "openpe-server: listening on %s (auth: %s)\n", httpServer.Addr, authStatus)
 		errCh <- httpServer.ListenAndServe()
 	}()
 

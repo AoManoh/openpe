@@ -12,12 +12,37 @@ type Handler struct {
 	service *enhancer.Service
 }
 
+// Options configures the HTTP server handler. The zero value preserves the
+// historical no-auth behaviour and is what New uses internally.
+type Options struct {
+	// Token, when non-empty, enables bearer-token authentication for all
+	// routes except those in SkipAuthPaths.
+	Token string
+	// SkipAuthPaths is the set of request paths that bypass the bearer
+	// check. When nil, defaults to ["/healthz"]; pass an explicit slice
+	// (possibly empty) to override.
+	SkipAuthPaths []string
+}
+
+// New returns a server handler with no authentication. Convenience wrapper
+// over NewWithOptions kept for backwards compatibility with existing call
+// sites (tests, ad-hoc tooling, code that does not yet care about auth).
 func New(service *enhancer.Service) http.Handler {
+	return NewWithOptions(service, Options{})
+}
+
+// NewWithOptions returns a server handler honouring the supplied options.
+// When opts.Token is empty the returned handler is identical to New(service).
+func NewWithOptions(service *enhancer.Service, opts Options) http.Handler {
 	h := &Handler{service: service}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.health)
 	mux.HandleFunc("/v1/prompt-enhance", h.promptEnhance)
-	return mux
+	skip := opts.SkipAuthPaths
+	if skip == nil {
+		skip = []string{"/healthz"}
+	}
+	return authMiddleware(mux, opts.Token, skip)
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
