@@ -102,6 +102,10 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_SERVER_DESCRIPTOR_FILE` | `~/.config/openpe/server.json` | lifecycle descriptor 路径覆盖，仅在 lifecycle 启用时使用 |
 | `OPENPE_CACHE_DIR` | `os.UserCacheDir()/openpe`（Linux 通常 `~/.cache/openpe`） | hook 预览与纯文本缓存根目录 |
 | `OPENPE_COPY_COMMAND` | 自动探测 | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`） |
+| `OPENPE_DISABLE_OSC52_CLIPBOARD` | `false` | 禁用 OSC52 剪贴板兜底 |
+| `OPENPE_OSC52_TTY` | `/dev/tty` | OSC52 写入目标 TTY 路径 |
+| `OPENPE_CLAUDE_PROMPT_FALLBACK` | `true` | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制 |
+| `OPENPE_WINDSURF_PROMPT_FALLBACK` | `false` | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长 |
 | `OPENPE_ENV_FILE` | hook 安装时注入 | hook 子进程加载的 dotenv 文件路径 |
 | `OPENPE_CODEX_HISTORY_ENABLED` | `false` | 是否允许 Codex hook 读取本机 Codex session 历史并注入 `Request.History` |
 | `OPENPE_CODEX_HOME` | `CODEX_HOME` 或 `~/.codex` | Codex 本地数据目录，仅在 Codex history 启用时使用 |
@@ -205,6 +209,7 @@ openpe claude hook install --dry-run
 **关键注意事项**：
 
 - Claude transcript 默认不读取。若要让 `pe` 理解当前 Claude Code 对话里的“选项一”“方案A”等引用，可在 hook dotenv 中设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=true`。openPE 只读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`；若 transcript 缺失、不可读或其中 `cwd` 与 hook 当前 `cwd` 不一致，则不注入历史。
+- Claude Code 的 hook 子进程可能无法访问系统剪贴板或 `/dev/tty`。当增强成功但剪贴板交付失败时，openPE 默认会在 Claude 可见的 blocked feedback 中追加完整增强 prompt 的 Markdown 代码块；用户可直接复制该代码块，或继续使用 `openpe claude hook last --prompt` / `last-prompt.txt` 兜底。
 - Claude Code `--print` headless 模式会执行 hook，但**不像交互式 TUI 一样稳定展示被阻断 feedback**；调试请用交互式模式。
 - Claude Code 自身调哪个模型由 Claude Code 决定，openPE 只负责增强 prompt。若想让 Claude Code 走 Anthropic-compatible 第三方网关：
 
@@ -393,7 +398,8 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 - **OSC52 在 IDE 子进程必然失败**：Windsurf、Cursor、VS Code 等 IDE 拉起 hook 子进程时不分配控制 TTY，OSC52 兜底会以 `open /dev/tty: no such device or address` 失败。这是协议与进程模型的硬限制，openPE 无法在自己侧修复。
 - **Linux 纯 TTY / 远程 SSH 下系统剪贴板工具不可用**：`XDG_SESSION_TYPE=tty` 或 X server 不可达时 `xclip` / `xsel` 报 `Can't open display`；缺 `WAYLAND_DISPLAY` 时 `wl-copy` 不可用。此时复制必然失败，按 stderr 提示从 `last-prompt.txt` 取回。
 - **macOS / Windows / 桌面 Linux 完整会话**：`pbcopy` / `clip.exe` / `wl-copy` / `xclip` 默认可用，复制稳定。
-- **强警告文案**：失败时 stderr 首句固定为"剪贴板未更新，请勿直接粘贴旧内容"。**看到这句不要按 Ctrl+V**，先按 stderr 指示从缓存文件取回。
+- **Claude 交互式兜底**：Claude Code 会展示被阻断 hook 的 stderr。openPE 默认利用这一点，在 Claude 剪贴板失败时直接显示完整增强 prompt，避免用户必须另开终端执行 `last --prompt`。
+- **强警告文案**：失败时 stderr 会明确说明"剪贴板未更新，请勿直接粘贴旧内容"。**看到这句不要按 Ctrl+V**，先复制 Claude feedback 中的增强 prompt，或按 stderr 指示从缓存文件取回。
 
 ### Hook 阻断模型
 

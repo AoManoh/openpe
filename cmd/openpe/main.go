@@ -15,6 +15,7 @@ import (
 	"time"
 
 	claudeadapter "github.com/AoManoh/openpe/internal/adapters/claude"
+	"github.com/AoManoh/openpe/internal/adapters/clipboard"
 	codexadapter "github.com/AoManoh/openpe/internal/adapters/codex"
 	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
@@ -253,6 +254,8 @@ func runCodexHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 func runDeliveryLast(commandName string, client string, args []string, stdout io.Writer, stderr io.Writer) int {
+	cfg := config.Load()
+	opts := configuredDeliveryOptions(cfg, client)
 	fs := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	pathOnly := fs.Bool("path", false, "print the cached content path")
@@ -266,6 +269,12 @@ func runDeliveryLast(commandName string, client string, args []string, stdout io
 			pathFn = delivery.LastPromptPath
 		}
 		path, err := pathFn(client)
+		if opts.CacheDir != "" {
+			path, err = delivery.LastPreviewPathWithOptions(client, opts)
+			if *promptOnly {
+				path, err = delivery.LastPromptPathWithOptions(client, opts)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "resolve cache path: %v\n", err)
 			return 1
@@ -278,12 +287,48 @@ func runDeliveryLast(commandName string, client string, args []string, stdout io
 		readFn = delivery.ReadLastPrompt
 	}
 	content, err := readFn(client)
+	if opts.CacheDir != "" {
+		content, err = delivery.ReadLastPreviewWithOptions(client, opts)
+		if *promptOnly {
+			content, err = delivery.ReadLastPromptWithOptions(client, opts)
+		}
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "read cached content: %v\n", err)
 		return 1
 	}
 	fmt.Fprint(stdout, content)
 	return 0
+}
+
+func configuredDeliveryOptions(cfg config.Config, client string) delivery.Options {
+	clipboardOpts := clipboard.Options{
+		Command:      cfg.Delivery.CopyCommand,
+		DisableOSC52: cfg.Delivery.DisableOSC52Clipboard,
+		OSC52TTY:     cfg.Delivery.OSC52TTY,
+	}
+	return delivery.Options{
+		Client:    client,
+		Language:  cfg.Language,
+		CacheDir:  cfg.Delivery.CacheDir,
+		Clipboard: &clipboardOpts,
+	}
+}
+
+func hookLastPromptCommand(client string) string {
+	command := "openpe " + client + " hook last --prompt"
+	if envFile := strings.TrimSpace(os.Getenv("OPENPE_ENV_FILE")); envFile != "" {
+		return "OPENPE_ENV_FILE=" + shellQuoteStatus(envFile) + " " + command
+	}
+	return command
+}
+
+func shellQuoteStatus(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
@@ -354,11 +399,8 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error(), cfg.Language))
 	}
 	if output.Decision == "block" && *copyPreview && output.PreviewPrompt != "" {
-		result := delivery.Deliver(context.Background(), output.PreviewPrompt, delivery.Options{
-			Client:   "codex",
-			Language: cfg.Language,
-		})
-		output.Reason = delivery.HookStatus(result, cfg.Language, "openpe codex hook last --prompt")
+		result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "codex"))
+		output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("codex"))
 	}
 	if output.Decision == "block" && *blockOutput == "stderr" {
 		if *terminalPreview {
@@ -551,11 +593,12 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 	if strings.TrimSpace(output.PreviewPrompt) == "" {
 		return 0
 	}
-	result := delivery.Deliver(context.Background(), output.PreviewPrompt, delivery.Options{
-		Client:   "claude",
-		Language: cfg.Language,
-	})
-	fmt.Fprintln(stderr, delivery.HookStatus(result, cfg.Language, "openpe claude hook last --prompt"))
+	result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "claude"))
+	status := delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("claude"))
+	if result.CopyError != nil && cfg.Delivery.ClaudePromptFallback {
+		status = delivery.AppendPromptFallback(status, output.PreviewPrompt, cfg.Language)
+	}
+	fmt.Fprintln(stderr, status)
 	return 2
 }
 
@@ -727,11 +770,12 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newPro
 	if strings.TrimSpace(output.PreviewPrompt) == "" {
 		return 0
 	}
-	result := delivery.Deliver(context.Background(), output.PreviewPrompt, delivery.Options{
-		Client:   "windsurf",
-		Language: cfg.Language,
-	})
-	fmt.Fprintln(stderr, delivery.HookStatus(result, cfg.Language, "openpe windsurf hook last --prompt"))
+	result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "windsurf"))
+	status := delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("windsurf"))
+	if result.CopyError != nil && cfg.Delivery.WindsurfPromptFallback {
+		status = delivery.AppendPromptFallback(status, output.PreviewPrompt, cfg.Language)
+	}
+	fmt.Fprintln(stderr, status)
 	return 2
 }
 

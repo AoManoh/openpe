@@ -20,7 +20,21 @@ type commandSpec struct {
 	args []string
 }
 
+type Options struct {
+	Command      string
+	DisableOSC52 bool
+	OSC52TTY     string
+}
+
 func Copy(ctx context.Context, text string) (string, error) {
+	return CopyWithOptions(ctx, text, Options{
+		Command:      os.Getenv("OPENPE_COPY_COMMAND"),
+		DisableOSC52: strings.TrimSpace(os.Getenv("OPENPE_DISABLE_OSC52_CLIPBOARD")) != "",
+		OSC52TTY:     os.Getenv("OPENPE_OSC52_TTY"),
+	})
+}
+
+func CopyWithOptions(ctx context.Context, text string, opts Options) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", errors.New("empty clipboard text")
@@ -32,7 +46,7 @@ func Copy(ctx context.Context, text string) (string, error) {
 	ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	if command := strings.TrimSpace(os.Getenv("OPENPE_COPY_COMMAND")); command != "" {
+	if command := strings.TrimSpace(opts.Command); command != "" {
 		if err := runShellCommand(ctx, command, text); err != nil {
 			return "", err
 		}
@@ -51,12 +65,12 @@ func Copy(ctx context.Context, text string) (string, error) {
 		return spec.name, nil
 	}
 	if len(attempted) == 0 {
-		if err := copyOSC52(text); err != nil {
+		if err := copyOSC52(text, opts); err != nil {
 			return "", fmt.Errorf("no supported clipboard command found; OSC 52 fallback failed: %w", err)
 		}
 		return "OSC52", nil
 	}
-	if err := copyOSC52(text); err == nil {
+	if err := copyOSC52(text, opts); err == nil {
 		return "OSC52", nil
 	} else {
 		return "", fmt.Errorf("clipboard commands failed: %s; OSC 52 fallback failed: %w", strings.Join(attempted, ", "), err)
@@ -83,14 +97,14 @@ func runCommand(ctx context.Context, spec commandSpec, text string) error {
 	return nil
 }
 
-func copyOSC52(text string) error {
-	if strings.TrimSpace(os.Getenv("OPENPE_DISABLE_OSC52_CLIPBOARD")) != "" {
+func copyOSC52(text string, opts Options) error {
+	if opts.DisableOSC52 {
 		return errors.New("OSC 52 clipboard fallback disabled")
 	}
 	if len([]byte(text)) > osc52MaxBytes {
 		return fmt.Errorf("text exceeds OSC 52 safety limit of %d bytes", osc52MaxBytes)
 	}
-	ttyPath := strings.TrimSpace(os.Getenv("OPENPE_OSC52_TTY"))
+	ttyPath := strings.TrimSpace(opts.OSC52TTY)
 	if ttyPath == "" {
 		ttyPath = "/dev/tty"
 	}

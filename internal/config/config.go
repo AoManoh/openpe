@@ -38,6 +38,7 @@ type Config struct {
 	Openace    OpenaceConfig
 	Codex      CodexConfig
 	Claude     ClaudeConfig
+	Delivery   DeliveryConfig
 	Server     ServerConfig
 }
 
@@ -60,6 +61,15 @@ type ClaudeTranscriptConfig struct {
 	Enabled     bool
 	MaxMessages int
 	MaxChars    int
+}
+
+type DeliveryConfig struct {
+	CacheDir               string
+	CopyCommand            string
+	DisableOSC52Clipboard  bool
+	OSC52TTY               string
+	ClaudePromptFallback   bool
+	WindsurfPromptFallback bool
 }
 
 // ServerConfig collects HTTP server runtime options that are independent of
@@ -138,6 +148,14 @@ func Load() Config {
 				MaxMessages: intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES", fileEnv), DefaultClaudeTranscriptMaxMessages),
 				MaxChars:    intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS", fileEnv), DefaultClaudeTranscriptMaxChars),
 			},
+		},
+		Delivery: DeliveryConfig{
+			CacheDir:               valueFromEnv("OPENPE_CACHE_DIR", fileEnv),
+			CopyCommand:            valueFromEnv("OPENPE_COPY_COMMAND", fileEnv),
+			DisableOSC52Clipboard:  boolFromValue(valueFromEnv("OPENPE_DISABLE_OSC52_CLIPBOARD", fileEnv), false),
+			OSC52TTY:               valueFromEnv("OPENPE_OSC52_TTY", fileEnv),
+			ClaudePromptFallback:   boolFromValue(valueFromEnv("OPENPE_CLAUDE_PROMPT_FALLBACK", fileEnv), true),
+			WindsurfPromptFallback: boolFromValue(valueFromEnv("OPENPE_WINDSURF_PROMPT_FALLBACK", fileEnv), false),
 		},
 		Server: ServerConfig{
 			Token:            valueFromEnv("OPENPE_SERVER_TOKEN", fileEnv),
