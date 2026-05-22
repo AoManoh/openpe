@@ -13,7 +13,7 @@ type Handler struct {
 }
 
 // Options configures the HTTP server handler. The zero value preserves the
-// historical no-auth behaviour and is what New uses internally.
+// historical no-auth, no-CORS behaviour and is what New uses internally.
 type Options struct {
 	// Token, when non-empty, enables bearer-token authentication for all
 	// routes except those in SkipAuthPaths.
@@ -22,17 +22,26 @@ type Options struct {
 	// check. When nil, defaults to ["/healthz"]; pass an explicit slice
 	// (possibly empty) to override.
 	SkipAuthPaths []string
+	// CORS configures Cross-Origin Resource Sharing for Electron / webview
+	// callers. Empty AllowedOrigins disables CORS handling entirely.
+	CORS CORSOptions
 }
 
-// New returns a server handler with no authentication. Convenience wrapper
-// over NewWithOptions kept for backwards compatibility with existing call
-// sites (tests, ad-hoc tooling, code that does not yet care about auth).
+// New returns a server handler with no authentication and no CORS handling.
+// Convenience wrapper over NewWithOptions kept for backwards compatibility
+// with existing call sites (tests, ad-hoc tooling, code that does not yet
+// care about auth or CORS).
 func New(service *enhancer.Service) http.Handler {
 	return NewWithOptions(service, Options{})
 }
 
 // NewWithOptions returns a server handler honouring the supplied options.
-// When opts.Token is empty the returned handler is identical to New(service).
+// When opts.Token and opts.CORS.AllowedOrigins are both zero values the
+// returned handler is identical to New(service).
+//
+// Middleware order (outer → inner): CORS → auth → mux. CORS sits outermost so
+// browser preflight (OPTIONS) requests succeed without an Authorization
+// header; auth then guards the actual data routes.
 func NewWithOptions(service *enhancer.Service, opts Options) http.Handler {
 	h := &Handler{service: service}
 	mux := http.NewServeMux()
@@ -42,7 +51,7 @@ func NewWithOptions(service *enhancer.Service, opts Options) http.Handler {
 	if skip == nil {
 		skip = []string{"/healthz"}
 	}
-	return authMiddleware(mux, opts.Token, skip)
+	return corsMiddleware(authMiddleware(mux, opts.Token, skip), opts.CORS)
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {

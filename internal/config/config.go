@@ -35,12 +35,16 @@ type Config struct {
 
 // ServerConfig collects HTTP server runtime options that are independent of
 // the prompt enhancement core. Empty fields preserve the historical default
-// behaviour (no authentication, no lifecycle hooks).
+// behaviour (no authentication, no CORS, no lifecycle hooks).
 type ServerConfig struct {
 	// Token, when non-empty, enables bearer-token authentication on the
 	// HTTP server. Use a 256-bit hex string (e.g. produced by
 	// integration.GenerateToken).
 	Token string
+	// CORSOrigins is the list of Origin headers the server reflects in
+	// Access-Control-Allow-Origin. Comma-separated in env / .env. Special
+	// values: "*" allows any origin, "null" allows Electron file:// webviews.
+	CORSOrigins []string
 }
 
 type OpenaceConfig struct {
@@ -82,9 +86,31 @@ func Load() Config {
 			RetryJitter:       durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_JITTER", fileEnv), DefaultOpenaceRetryJitter),
 		},
 		Server: ServerConfig{
-			Token: valueFromEnv("OPENPE_SERVER_TOKEN", fileEnv),
+			Token:       valueFromEnv("OPENPE_SERVER_TOKEN", fileEnv),
+			CORSOrigins: splitCSV(valueFromEnv("OPENPE_SERVER_CORS_ORIGINS", fileEnv)),
 		},
 	}
+}
+
+// splitCSV parses a comma-separated string into a clean slice, trimming
+// whitespace and dropping empty entries. Returns nil when the input has no
+// non-empty entries.
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func valueFromEnv(key string, fileEnv map[string]string) string {

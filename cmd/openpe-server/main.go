@@ -50,8 +50,11 @@ func run(args []string) error {
 		return fmt.Errorf("configure context provider: %w", err)
 	}
 	httpServer := &http.Server{
-		Addr:              strings.TrimSpace(*listenAddr),
-		Handler:           server.NewWithOptions(service, server.Options{Token: cfg.Server.Token}),
+		Addr: strings.TrimSpace(*listenAddr),
+		Handler: server.NewWithOptions(service, server.Options{
+			Token: cfg.Server.Token,
+			CORS:  server.CORSOptions{AllowedOrigins: cfg.Server.CORSOrigins},
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	if httpServer.Addr == "" {
@@ -61,9 +64,13 @@ func run(args []string) error {
 	if cfg.Server.Token != "" {
 		authStatus = "enabled (bearer token required for /v1/*)"
 	}
+	corsStatus := "disabled"
+	if len(cfg.Server.CORSOrigins) > 0 {
+		corsStatus = fmt.Sprintf("enabled for %s", strings.Join(cfg.Server.CORSOrigins, ", "))
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stderr, "openpe-server: listening on %s (auth: %s)\n", httpServer.Addr, authStatus)
+		fmt.Fprintf(os.Stderr, "openpe-server: listening on %s (auth: %s; cors: %s)\n", httpServer.Addr, authStatus, corsStatus)
 		errCh <- httpServer.ListenAndServe()
 	}()
 
