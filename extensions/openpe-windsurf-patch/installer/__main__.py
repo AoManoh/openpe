@@ -35,6 +35,7 @@ from .checksum import (
     backup_product_json,
     patch_product_json,
     restore_product_json,
+    vscode_checksum,
 )
 from .codesign import CodesignError, codesign_app, is_macos, remove_quarantine_hint
 from .handshake import (
@@ -125,6 +126,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     install.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "enable dev/test diagnostics inside the inject layer: verbose "
+            "console.warn traces from the cascade-context observer and a "
+            "read-only globalThis.__openpeDebug namespace exposing shape-only "
+            "views of internal state (no full message bodies, no token, no "
+            "Authorization). Default off; production installs stay silent."
+        ),
+    )
+    install.add_argument(
         "--i-accept-experimental-risk",
         action="store_true",
         help="acknowledge the EULA / user-assumes-risk disclaimer non-interactively",
@@ -178,6 +190,7 @@ def _build_payload_prelude(
     descriptor: LocalServerDescriptor,
     descriptor_path: Optional[Path] = None,
     fs_probe: bool = False,
+    debug: bool = False,
 ) -> str:
     """Render the ``globalThis.__openpe`` bootstrap injected before inject.js.
 
@@ -202,6 +215,8 @@ def _build_payload_prelude(
         config["descriptorPath"] = str(descriptor_path)
     if fs_probe:
         config["fsProbe"] = True
+    if debug:
+        config["debug"] = True
     return (
         "/* === OPENPE-BOOTSTRAP === */\n"
         "/* rewritten by installer at install time; do not edit by hand */\n"
@@ -364,6 +379,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             f"  backup → {paths.backup_dir}\n"
             f"  payload: {payload_path} ({payload_path.stat().st_size} bytes)\n"
             f"  fs probe: {'yes' if args.fs_probe else 'no'}\n"
+            f"  debug:    {'yes' if args.debug else 'no'}\n"
             f"  codesign: {'yes (macOS)' if is_macos() else 'no (non-macOS)'}\n"
         )
         return EXIT_OK
@@ -390,12 +406,24 @@ def _cmd_install(args: argparse.Namespace) -> int:
             descriptor,
             descriptor_path=descriptor_path if args.fs_probe else None,
             fs_probe=args.fs_probe,
+            debug=args.debug,
         )
         payload_text = payload_path.read_text(encoding="utf-8")
         inject_bundle(paths.bundle_file, prelude + payload_text)
         sys.stderr.write("  ✓ injected payload into bundle (bootstrap + inject.js)\n")
-        patch_product_json(paths.product_file, bundle_relpath=DEFAULT_BUNDLE_RELPATH)
-        sys.stderr.write("  ✓ patched product.json (checksum entry removed)\n")
+        # Windsurf 1.110.x enforces "missing checksums entry == corrupted
+        # install" (vanilla VS Code merely skips verification). Recompute
+        # the SHA-256 of the just-patched bundle and write the new value
+        # into product.json so the host accepts the modified file.
+        new_sum = vscode_checksum(paths.bundle_file)
+        patch_product_json(
+            paths.product_file,
+            bundle_relpath=DEFAULT_BUNDLE_RELPATH,
+            new_value=new_sum,
+        )
+        sys.stderr.write(
+            f"  ✓ patched product.json (checksum updated to {new_sum[:12]}...)\n"
+        )
     except (BundleError, ChecksumError) as exc:
         sys.stderr.write(f"openpe-windsurf-patch: install failed mid-patch: {exc}\n")
         return EXIT_BUNDLE_ERROR

@@ -12,6 +12,13 @@
  */
 
 import { getConfig } from "./auth.js";
+import {
+  describeCascadeContext,
+  describeHistory,
+  setDebugEnabled,
+  startCascadeContextWatcher,
+} from "./cascade_context.js";
+import { getLastEnhanceSnapshot } from "./dialog.js";
 import { runFilesystemProbe } from "./fs_probe.js";
 import { ensureStyles } from "./styles.js";
 import { startObserver } from "./observer.js";
@@ -27,9 +34,23 @@ declare global {
       token?: string;
       descriptorPath?: string;
       fsProbe?: boolean;
+      debug?: boolean;
       version?: string;
     };
     __openpeInjected?: boolean;
+    /**
+     * Read-only dev/test diagnostic namespace. Only attached when the
+     * installer was run with ``--debug``. Returns shape-only views of
+     * inject internals — never full message bodies, tokens, or
+     * Authorization headers. See ``cascade_context.ts.describeHistory``
+     * and ``dialog.ts.getLastEnhanceSnapshot`` for the exact preview
+     * budgets and privacy contract for each accessor.
+     */
+    __openpeDebug?: Readonly<{
+      describeContext: () => ReturnType<typeof describeCascadeContext>;
+      describeHistory: () => ReturnType<typeof describeHistory>;
+      describeLastEnhance: () => ReturnType<typeof getLastEnhanceSnapshot>;
+    }>;
   }
 }
 
@@ -62,10 +83,43 @@ function boot(): void {
     return;
   }
 
+  // Wire the dev/test gate BEFORE starting any subsystem so the very
+  // first lifecycle event (e.g. an early IDB hook install failure) is
+  // visible in debug builds. Production installs (debug=false) flip no
+  // flag, so subsystem internals stay completely silent.
+  if (config.debug) {
+    setDebugEnabled(true);
+    try {
+      Object.defineProperty(window, "__openpeDebug", {
+        value: Object.freeze({
+          describeContext: () => describeCascadeContext(),
+          describeHistory: () => describeHistory(),
+          describeLastEnhance: () => getLastEnhanceSnapshot(),
+        }),
+        writable: false,
+        configurable: false,
+        enumerable: false,
+      });
+    } catch {
+      // defineProperty can throw on browsers that already have a
+      // matching non-configurable descriptor (e.g. a stale build left
+      // one behind); swallow and keep booting.
+    }
+  }
+
   try {
     ensureStyles();
+    // Cascade context observation is best-effort and entirely client-side:
+    // if it fails or the trajectory cache is absent, the inject layer
+    // continues to call /v1/prompt-enhance with the prompt only — no
+    // hook-side behaviour change, no server-side change.
+    startCascadeContextWatcher();
     startObserver(config);
-    log("ready", { baseUrl: config.baseUrl, version: config.version ?? "unknown" });
+    log("ready", {
+      baseUrl: config.baseUrl,
+      version: config.version ?? "unknown",
+      debug: config.debug,
+    });
   } catch (err) {
     warn("boot failed", err);
   }

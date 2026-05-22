@@ -41,6 +41,16 @@ export interface ButtonHandle {
   dispose(): void;
 }
 
+// Pre-encoded once at module load so each button creation is allocation-light.
+// btoa() is safe here because OPENPE_LOGO_SVG is ASCII-only.
+const OPENPE_LOGO_DATA_URI =
+  "data:image/svg+xml;base64," +
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ((globalThis as any).btoa
+    ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).btoa(OPENPE_LOGO_SVG.replace(/\s+/g, " "))
+    : "");
+
 export function createEnhanceButton(onClick: () => void): ButtonHandle {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -48,7 +58,30 @@ export function createEnhanceButton(onClick: () => void): ButtonHandle {
   btn.title = "openPE: enhance prompt";
   btn.setAttribute("aria-label", "openPE: enhance prompt");
   btn.setAttribute(BUTTON_MARKER_ATTR, "1");
-  btn.innerHTML = OPENPE_LOGO_SVG;
+  // Windsurf 1.110.x enables Trusted Types CSP, which rejects plain-string
+  // `innerHTML` assignment AND treats `DOMParser.parseFromString` (any mime)
+  // as a sink in Chromium 95+. Setting `img.src` to a data URI is NOT a sink
+  // — the browser's image loader parses image/svg+xml safely from URLs.
+  // If the host's CSP `img-src` forbids `data:`, the img.onerror fallback
+  // renders a plain "PE" text label so the button stays usable.
+  if (OPENPE_LOGO_DATA_URI.length > "data:image/svg+xml;base64,".length) {
+    const img = document.createElement("img");
+    img.className = "openpe-btn-icon";
+    img.alt = "openPE";
+    img.setAttribute("aria-hidden", "true");
+    img.addEventListener(
+      "error",
+      () => {
+        img.remove();
+        if (!btn.textContent) btn.textContent = "PE";
+      },
+      { once: true },
+    );
+    img.src = OPENPE_LOGO_DATA_URI;
+    btn.appendChild(img);
+  } else {
+    btn.textContent = "PE";
+  }
   btn.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();

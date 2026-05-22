@@ -152,6 +152,52 @@ const CSS = `
   padding: 6px 8px;
   border-radius: 4px;
 }
+
+/* Auto-enhance toast notifications. Scoped to .openpe-toast* so they
+ * cannot interact with the openPE logo button styles above.
+ */
+.openpe-toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 2147483647;
+  pointer-events: none;
+  max-width: 420px;
+}
+.openpe-toast {
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-family: var(--vscode-font-family, ui-sans-serif, system-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  pointer-events: auto;
+  word-wrap: break-word;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  border: 1px solid transparent;
+}
+.openpe-toast-info {
+  background: var(--vscode-notifications-background, #252526);
+  color: var(--vscode-notifications-foreground, #cccccc);
+  border-color: var(--vscode-notifications-border, #3c3c3c);
+}
+.openpe-toast-ok {
+  background: var(--vscode-notifications-background, #1d2c22);
+  color: var(--vscode-notifications-foreground, #b8f1c8);
+  border-color: #2d8748;
+}
+.openpe-toast-warn {
+  background: var(--vscode-inputValidation-warningBackground, #5a4b00);
+  color: var(--vscode-inputValidation-warningForeground, #ffec9d);
+  border-color: var(--vscode-inputValidation-warningBorder, #b89100);
+}
+.openpe-toast-error {
+  background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+  color: var(--vscode-inputValidation-errorForeground, #f48771);
+  border-color: var(--vscode-inputValidation-errorBorder, #f48771);
+}
 `;
 
 export function ensureStyles(): void {

@@ -99,7 +99,12 @@ def read_descriptor(path: Optional[Path] = None) -> LocalServerDescriptor:
     except OSError as exc:
         raise DescriptorError(f"stat descriptor {path}: {exc}") from exc
     mode = stat.S_IMODE(st.st_mode)
-    if mode & 0o077 != 0:
+    # NTFS does not honour POSIX mode bits: Go's os.Chmod(0o600) only toggles
+    # the read-only flag on Windows, and Path.stat().st_mode reports 0o666
+    # for any writable file. The check would unconditionally reject any
+    # descriptor on Windows; rely on the default %USERPROFILE% ACL instead,
+    # matching OpenSSH's StrictModes-on-Windows behaviour.
+    if os.name == "posix" and mode & 0o077 != 0:
         raise DescriptorError(
             f"descriptor file {path} has insecure mode {oct(mode)} (want 0o600 or stricter)"
         )

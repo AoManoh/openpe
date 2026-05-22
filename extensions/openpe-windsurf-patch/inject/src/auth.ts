@@ -11,6 +11,17 @@ export interface OpenpeConfig {
   token: string;
   descriptorPath?: string;
   fsProbe: boolean;
+  /**
+   * Dev/test diagnostic gate. When ``true``, inject modules may emit
+   * verbose ``console.warn`` traces and attach a read-only
+   * ``globalThis.__openpeDebug`` namespace exposing shape-only views of
+   * internal state (history length, role distribution, char counts,
+   * short content previews — never full message bodies). Default false
+   * so production installs stay silent regardless of what the inject
+   * code internally collects. Installer surfaces this via
+   * ``installer install --debug``.
+   */
+  debug: boolean;
   version?: string;
 }
 
@@ -23,6 +34,7 @@ export function getConfig(): OpenpeConfig {
     descriptorPath:
       typeof raw.descriptorPath === "string" ? raw.descriptorPath : undefined,
     fsProbe: raw.fsProbe === true,
+    debug: raw.debug === true,
     version: typeof raw.version === "string" ? raw.version : undefined,
   };
 }

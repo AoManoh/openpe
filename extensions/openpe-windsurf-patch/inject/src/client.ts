@@ -2,18 +2,26 @@
  * Tiny HTTP client for the local `POST /v1/prompt-enhance` endpoint.
  *
  * Mirrors the openPE canonical enhancer.Request schema for the fields
- * the dialog actually populates: prompt, client, mode. Other fields
- * (context, rules, ...) are deliberately omitted in Phase 1 of the
- * inject UI; the server will fall back to its defaults.
+ * the dialog actually populates: prompt, client, mode, history. Other
+ * fields (rules, guidelines, context.files, options) are still left to
+ * server defaults; future inject phases can extend `EnhanceRequest`
+ * without touching the wire contract because the server uses the same
+ * canonical `enhancer.Request` JSON schema.
  */
 
 import type { OpenpeConfig } from "./auth.js";
+
+export interface EnhanceMessage {
+  role: string;
+  content: string;
+}
 
 export interface EnhanceRequest {
   prompt: string;
   client?: string;
   mode?: string;
   cwd?: string;
+  history?: EnhanceMessage[];
 }
 
 export interface EnhanceResponse {
@@ -50,8 +58,20 @@ export async function enhancePrompt(
     body: JSON.stringify({
       prompt: body.prompt,
       client: body.client ?? "windsurf",
-      mode: body.mode ?? "agent",
+      // Match the Windsurf hook adapter (internal/adapters/windsurf/hook.go)
+      // which sends mode="cascade". The enhancer's prompt assembly puts the
+      // mode label into the LLM context verbatim, so a mismatch between hook
+      // and button paths produces visibly different output styles even
+      // though both routes use the same backend enhancer.
+      mode: body.mode ?? "cascade",
       cwd: body.cwd ?? "",
+      // Only attach history when we actually have messages — otherwise the
+      // server sees the field absent (matching the existing Windsurf hook
+      // behaviour) instead of an empty array, which is friendlier to any
+      // future enhancer.Request validators.
+      ...(body.history && body.history.length > 0
+        ? { history: body.history }
+        : {}),
     }),
     signal,
   });

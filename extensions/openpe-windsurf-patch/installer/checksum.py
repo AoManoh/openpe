@@ -21,6 +21,8 @@ The module performs no codesign work; that lives in :mod:`installer.codesign`.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -74,6 +76,24 @@ def get_checksum(product: Dict[str, Any], bundle_relpath: str = DEFAULT_BUNDLE_R
     table = product[field]
     value = table.get(bundle_relpath)
     return value if isinstance(value, str) else None
+
+
+def vscode_checksum(path: Path) -> str:
+    """Return the VS Code / Windsurf product.json checksum format for ``path``.
+
+    Format: ``base64(SHA-256(bytes))`` with trailing ``=`` padding stripped.
+    This is exactly what Windsurf 1.110.x stores in ``product.json``'s
+    ``checksums`` table and verifies at bundle load time. Note that vanilla
+    VS Code treats a missing entry as "skip verification", but Windsurf
+    enforces "missing entry == corrupted install" and surfaces a user-
+    visible warning, so the installer MUST update the entry rather than
+    delete it.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(64 * 1024), b""):
+            h.update(chunk)
+    return base64.b64encode(h.digest()).decode("ascii").rstrip("=")
 
 
 def patch_product_json(
