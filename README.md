@@ -95,7 +95,11 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_MODEL` | （必填） | 模型名，如 `gpt-4o-mini`、`qwen-max`、`gpt-5.5` |
 | `OPENPE_LANGUAGE` | `zh` | hook 终端反馈语言：`zh` / `en` |
 | `OPENPE_TIMEOUT` | `60s` | 单次 provider 调用超时（Go duration） |
-| `OPENPE_LISTEN_ADDR` | `127.0.0.1:18980` | `openpe-server` 监听地址 |
+| `OPENPE_LISTEN_ADDR` | `127.0.0.1:18980` | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost` |
+| `OPENPE_SERVER_TOKEN` | 空 | 可选 HTTP bearer token；绑定非 loopback 地址时必填 |
+| `OPENPE_SERVER_CORS_ORIGINS` | 空 | 可选 CORS Origin allowlist，逗号分隔；空值禁用 CORS |
+| `OPENPE_SERVER_LIFECYCLE_ENABLED` | `false` | 是否写入本地 server descriptor，供 IDE 注入安装器发现 endpoint/token |
+| `OPENPE_SERVER_DESCRIPTOR_FILE` | `~/.config/openpe/server.json` | lifecycle descriptor 路径覆盖，仅在 lifecycle 启用时使用 |
 | `OPENPE_CACHE_DIR` | `os.UserCacheDir()/openpe`（Linux 通常 `~/.cache/openpe`） | hook 预览与纯文本缓存根目录 |
 | `OPENPE_COPY_COMMAND` | 自动探测 | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`） |
 | `OPENPE_ENV_FILE` | hook 安装时注入 | hook 子进程加载的 dotenv 文件路径 |
@@ -308,9 +312,15 @@ openpe <client> hook last --path --prompt  # 纯文本 prompt 路径
 
 ```bash
 openpe-server                                  # 监听 OPENPE_LISTEN_ADDR，默认 127.0.0.1:18980
-openpe-server --listen 0.0.0.0:9000            # 自定义监听地址
+OPENPE_SERVER_TOKEN=... openpe-server --listen 0.0.0.0:9000  # 非 loopback 监听必须启用 bearer auth
 openpe-server --base-url ... --api-key ... --model ... --timeout 90s   # 命令行覆盖配置
 ```
+
+安全边界：
+
+- 未设置 `OPENPE_SERVER_TOKEN` 时，server 只允许绑定 `127.0.0.1`、`::1` 或 `localhost`；`0.0.0.0`、`::`、LAN IP 和其它主机名会拒绝启动。
+- 设置 `OPENPE_SERVER_TOKEN` 后，`/v1/*` 请求必须带 `Authorization: Bearer <token>`；`/healthz` 始终免鉴权。
+- provider / Openace / 内部错误对 HTTP 客户端脱敏，响应只包含稳定错误文案和 `request_id`；完整错误写入 server 日志。
 
 可用路由：
 
@@ -323,6 +333,24 @@ curl http://127.0.0.1:18980/healthz
 curl http://127.0.0.1:18980/v1/prompt-enhance \
   -H 'content-type: application/json' \
   -d '{"prompt":"帮我实现 openPE MVP","client":"codex","mode":"agent"}'
+```
+
+响应会返回 `enhanced_prompt`，并在 `metadata.sections` 中给出本次 prompt assembly 的 section 级诊断：
+
+```json
+{
+  "enhanced_prompt": "请在当前仓库中实现 openPE MVP...",
+  "warnings": [],
+  "metadata": {
+    "used_context": ["context.retrieval"],
+    "sections": [
+      {"name": "original_prompt", "length": 31, "truncated": false},
+      {"name": "context_retrieval", "length": 1200, "truncated": false}
+    ],
+    "provider": "openai-compatible",
+    "model": "your-model"
+  }
+}
 ```
 
 ### 裸 CLI 增强
@@ -416,6 +444,8 @@ client / hook / HTTP
 - 不依赖宿主一定能替换输入框、追加隐藏上下文、保持剪贴板成功，或识别某客户端专有 slash command。
 - 对 Windsurf / Cursor / VS Code / Composer / Cascade 等 IDE 类环境，按"可粘贴到聊天输入框或通过缓存回退取回"的方式生成结果。
 - 对 `client=codex` 且 `mode=agent`，仍保持适合终端 coding agent 的清晰任务范围、执行步骤和验证期望。
+- `options.max_context_tokens` 只裁剪可选上下文 section；原始用户 prompt、目标客户端、工作区和增强契约不会被最终字符串粗暴截断。
+- `metadata.sections` 只记录 section 名称、最终长度和是否裁剪，不记录正文，用于诊断 history、files、retrieval 是否真正进入本次增强。
 
 ### 架构边界
 
