@@ -34,7 +34,7 @@ function suggestPrompt(): string {
 
 function findActiveCascadeInput(): HTMLTextAreaElement | null {
   // Best-effort: the focused element is usually the Cascade textarea when
-  // the user clicks the ✨ button without leaving the chat input.
+  // the user clicks the openPE logo button without leaving the chat input.
   const active = document.activeElement;
   if (active instanceof HTMLTextAreaElement) {
     return active;

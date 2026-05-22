@@ -52,7 +52,7 @@ INSTALL_RC=$?
 echo
 echo "============================================================================"
 if [ $INSTALL_RC -eq 0 ]; then
-  echo "  ✓ install complete · restart Windsurf to load the ✨ button"
+  echo "  ✓ install complete · restart Windsurf to load the openPE logo button"
 else
   echo "  ✗ install exited with code $INSTALL_RC · see message above"
 fi

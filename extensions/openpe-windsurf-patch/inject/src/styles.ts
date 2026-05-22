@@ -1,5 +1,5 @@
 /**
- * CSS rules for the ✨ button and the enhancement dialog.
+ * CSS rules for the openPE logo button and the enhancement dialog.
  *
  * All colour / border tokens reference `var(--vscode-*)` variables so
  * the UI inherits Windsurf's current theme (dark / light / custom) with
@@ -22,9 +22,15 @@ const CSS = `
   background: transparent;
   color: var(--vscode-input-foreground, #d4d4d4);
   cursor: pointer;
-  font-size: 16px;
   line-height: 1;
   transition: background 80ms ease-in-out;
+}
+.openpe-btn-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  border-radius: 4px;
+  pointer-events: none;
 }
 .openpe-btn:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));

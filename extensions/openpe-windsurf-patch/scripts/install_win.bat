@@ -55,7 +55,7 @@ set INSTALL_RC=%ERRORLEVEL%
 echo.
 echo ============================================================================
 if %INSTALL_RC% equ 0 (
-  echo   + install complete . restart Windsurf to load the * button
+  echo   + install complete . restart Windsurf to load the openPE logo button
 ) else (
   echo   X install exited with code %INSTALL_RC%
 )

@@ -271,6 +271,31 @@ npm run package
 
 默认传输方式是 `openpe enhance --json`。如果需要把当前文件内容作为结构化上下文传给 core，可启动 `openpe-server` 并把插件配置 `openpe.transport` 改为 `http`。更多说明见 [extensions/vscode-openpe/README.md](extensions/vscode-openpe/README.md)。
 
+### Windsurf 实验性 openPE logo 按钮集成
+
+`extensions/openpe-windsurf-patch/` 是独立的实验性 bundle patcher，会修改 Windsurf Electron bundle，在 Cascade 输入区旁注入 openPE logo Enhance 按钮。按钮图案复用 `extensions/vscode-openpe/media/openpe-icon.svg` 的 SVG 设计，并在注入 payload 中内联，避免依赖 VSIX 资源路径。它不是默认推荐路径，存在 EULA、签名、升级覆盖和私有 DOM 选择器风险；不能接受这些风险时，请继续使用 `openpe windsurf hook install` 或 VSIX 插件。
+
+按钮路径依赖本地 `openpe-server`：
+
+```bash
+OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
+OPENPE_SERVER_LIFECYCLE_ENABLED=true \
+OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
+openpe-server
+```
+
+安装器会读取 `~/.config/openpe/server.json`，把当前 `baseUrl` 和 bearer token 快照进 Windsurf bundle。若使用 lifecycle 自动生成的临时 token，`openpe-server` 每次重启后 token 都会变化，已安装按钮会变成旧 token 并出现 401 / fetch 失败。推荐生成一次固定的本地 `OPENPE_SERVER_TOKEN` 并写入 user 级 env；若使用临时 token，则每次重启 server 后重新运行 `python3 -m installer install --i-accept-experimental-risk`。
+
+排障入口：
+
+```bash
+cd extensions/openpe-windsurf-patch
+python3 -m installer status
+python3 -m installer doctor --app-dir /path/to/Windsurf
+```
+
+输出中的 `button config: stale` 表示按钮内嵌配置与当前 server descriptor 不一致；重启 `openpe-server` 时沿用同一个 `OPENPE_SERVER_TOKEN`，或重新安装 patch 刷新内嵌配置。更多说明见 [extensions/openpe-windsurf-patch/README.md](extensions/openpe-windsurf-patch/README.md)。
+
 ## 调用方式
 
 ### 基本流程

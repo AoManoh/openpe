@@ -3,7 +3,7 @@
 > **⚠️ EXPERIMENTAL — USER ASSUMES ALL RISK ⚠️**
 >
 > This subproject **patches the Windsurf IDE Electron bundle in place** to
-> inject a ✨ Enhance button into the Cascade chat input toolbar. It is
+> inject an openPE logo Enhance button into the Cascade chat input toolbar. It is
 > **opt-in**, **off by default**, and **completely independent from the main
 > openPE hook + VSIX paths**.
 >
@@ -40,9 +40,12 @@ A standalone, MIT-licensed installer that:
 - **Modifies** `workbench.desktop.main.js` inside the Windsurf application
   bundle to inject a small (~30 KB) JavaScript payload.
 - The injected payload watches the Cascade chat input toolbar with
-  `MutationObserver`, adds a ✨ button next to Submit, opens a 3-page modal
+  `MutationObserver`, adds an openPE logo button next to Submit, opens a 3-page modal
   on click, calls **your local** `openpe-server` over HTTP (loopback only),
   and writes the enhanced prompt back into the Cascade input field.
+  The button icon is inlined from the same SVG design as
+  `extensions/vscode-openpe/media/openpe-icon.svg`; the patched bundle does
+  not load resources from the VSIX directory at runtime.
 - Talks to nothing outside `127.0.0.1`. No telemetry, no third-party gate
   servers, no commercial license keys.
 
@@ -61,37 +64,79 @@ A standalone, MIT-licensed installer that:
 
 - Python 3.8 or newer
 - (Optional, for building inject.js from source) Node.js 18+ and npm
-- A running `openpe-server` with `OPENPE_SERVER_LIFECYCLE_ENABLED=true`
-  (the installer reads `~/.config/openpe/server.json` to discover the
-  bearer token and base URL)
+- A running `openpe-server` with lifecycle descriptor enabled. For the
+  injected button path, prefer a fixed local token so the button keeps
+  working across server restarts:
+
+  ```bash
+  # Generate this once and keep reusing it, e.g. from ~/.config/openpe/.env.
+  export OPENPE_SERVER_TOKEN="<stable-64-hex-token>"
+  export OPENPE_SERVER_LIFECYCLE_ENABLED=true
+  export OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf
+  openpe-server
+  ```
+
+  The installer reads `~/.config/openpe/server.json` to discover the
+  loopback base URL and bearer token, then snapshots them into the patched
+  bundle.
 
 ## Status
 
-- **Phase 1 (current)**: Project skeleton. CLI subcommands `status`,
-  `install`, `uninstall`, `doctor` are stubs that explain the EULA risk
-  and exit. No bundle is touched.
-- **Phase 2**: Path resolution + handshake with openpe-server.
-- **Phase 3**: Bundle patcher (backup → marker inject → checksum bypass →
-  optional codesign).
-- **Phase 4**: inject.js TypeScript build (observer → button → dialog →
-  client → input refill).
-- **Phase 5**: Cross-platform double-click installers + end-to-end fixture
-  tests.
+- **Current**: `status`, `install`, `uninstall`, and `doctor` are real
+  commands. `install` resolves the Windsurf bundle, verifies the local
+  `openpe-server` descriptor via `GET /v1/info`, backs up the bundle and
+  `product.json`, injects the built `inject/dist/inject.js` payload with a
+  `globalThis.__openpe` bootstrap, removes the bundle checksum entry, and
+  re-signs the app on macOS.
+- The injected payload watches the Cascade toolbar, adds the openPE logo button,
+  calls local `POST /v1/prompt-enhance`, previews original/enhanced text,
+  and best-effort writes the enhanced prompt back to the Cascade input.
+- This remains experimental and off by default because it modifies the
+  Windsurf application bundle and depends on private Cascade DOM selectors.
 
 The work is tracked under `docs/development/2026-05-22-windsurf-patch-installer.md`
 in the main openPE repository.
 
-## Usage (Phase 1 stubs)
+## Usage
 
 ```bash
-# From the subproject root:
-python3 -m installer status      # show what would be done
-python3 -m installer install     # currently exits with EULA prompt
-python3 -m installer uninstall   # currently a no-op (no patch to revert)
-python3 -m installer doctor      # environment self-check
+# 1. Start openpe-server with lifecycle + CORS before installing.
+OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
+OPENPE_SERVER_LIFECYCLE_ENABLED=true \
+OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
+openpe-server
+
+# 2. Build the injected payload when changing TypeScript sources.
+cd extensions/openpe-windsurf-patch/inject
+npm install
+npm run build
+
+# 3. Install from the subproject root.
+cd ..
+python3 -m installer doctor
+python3 -m installer status
+python3 -m installer install --i-accept-experimental-risk
 ```
 
-All subcommands accept `--help`.
+For repeatable daily use, do not regenerate `OPENPE_SERVER_TOKEN` on every
+server launch. Generate it once, store it in your user-level openPE env file
+or shell profile, and reuse it so the already-installed button remains
+authenticated after `openpe-server` restarts. If the browser console reports
+a CORS error, inspect the request `Origin` in Windsurf DevTools and add that
+exact origin to `OPENPE_SERVER_CORS_ORIGINS`.
+
+Restart Windsurf after install. The openPE logo button should appear next to the
+Cascade submit controls. Click it, review the enhanced prompt, then use
+`Apply to input`. If Windsurf changed its private DOM and the button does
+not appear, see `inject/README.md` and widen `findCascadeToolbar()` /
+`SUBMIT_BUTTON_SELECTORS`, rebuild `inject/dist/inject.js`, then re-run
+`install`.
+
+All subcommands accept `--help`. `status` and `doctor --app-dir <path>`
+also report `button config`. A `stale` result means the token or base URL
+embedded at install time no longer matches the current server descriptor;
+restart `openpe-server` with the same `OPENPE_SERVER_TOKEN` or re-run
+`install` to refresh the bundle bootstrap.
 
 For the P3 descriptor-read spike, run install with `--fs-probe` after
 starting `openpe-server` with `OPENPE_SERVER_LIFECYCLE_ENABLED=true`.

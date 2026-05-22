@@ -1,6 +1,6 @@
 /**
  * MutationObserver that locates the Cascade chat input toolbar and
- * attaches the ✨ button to it.
+ * attaches the openPE logo button to it.
  *
  * The Cascade input toolbar is private Windsurf DOM. We use a small
  * cascade of best-effort selectors and stop at the first match. If

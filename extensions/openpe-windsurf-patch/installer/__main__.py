@@ -19,7 +19,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 from . import __version__
 from .bundle import (
@@ -104,7 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser(
         "install",
-        help="patch the Windsurf bundle (currently a stub; prints EULA and exits)",
+        help="patch the Windsurf bundle after explicit experimental-risk acceptance",
     )
     install.add_argument(
         "--app-dir",
@@ -150,9 +150,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="override the Windsurf application directory",
     )
 
-    subparsers.add_parser(
+    doctor = subparsers.add_parser(
         "doctor",
         help="environment self-check (Python version, IDE detected, server descriptor)",
+    )
+    doctor.add_argument(
+        "--app-dir",
+        default=None,
+        help="override the Windsurf application directory",
     )
 
     return parser
@@ -204,6 +209,59 @@ def _build_payload_prelude(
     )
 
 
+def _read_embedded_openpe_config(bundle_file: Path) -> Optional[Dict[str, Any]]:
+    """Return the ``globalThis.__openpe`` object embedded in a patched bundle.
+
+    The injected button uses a snapshot of the server descriptor captured at
+    install time. Comparing that snapshot with the current descriptor gives
+    users an actionable diagnosis when the button starts returning 401 after
+    ``openpe-server`` has been restarted with a fresh ephemeral token.
+    """
+    try:
+        text = bundle_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    needle = "globalThis.__openpe = "
+    idx = text.find(needle)
+    if idx < 0:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        value, _ = decoder.raw_decode(text[idx + len(needle) :])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    return value
+
+
+def _button_config_status(
+    paths: Optional[WindsurfPaths],
+    descriptor: Optional[LocalServerDescriptor],
+) -> str:
+    if paths is None or not paths.exists:
+        return "not checked (Windsurf install not detected)"
+    config = _read_embedded_openpe_config(paths.bundle_file)
+    if config is None:
+        return "not embedded (bundle is unpatched or missing OPENPE-BOOTSTRAP)"
+    base_url = str(config.get("baseUrl", "")).strip()
+    token = str(config.get("token", "")).strip()
+    if descriptor is None:
+        return "embedded, but current server descriptor is unavailable; cannot verify freshness"
+    mismatches = []
+    if base_url != descriptor.base_url:
+        mismatches.append("baseUrl mismatch")
+    if token != descriptor.token:
+        mismatches.append("token mismatch")
+    if mismatches:
+        return (
+            "stale ("
+            + ", ".join(mismatches)
+            + "); restart openpe-server with the same OPENPE_SERVER_TOKEN or re-run install"
+        )
+    return "fresh (embedded baseUrl/token match current server descriptor)"
+
+
 def _find_latest_backup(backup_dir: Path, bundle_name: str) -> Optional[Path]:
     """Return the most recent ``<bundle>.<ts>.original`` snapshot, or None."""
     if not backup_dir.is_dir():
@@ -249,7 +307,13 @@ def _read_descriptor_or_explain() -> Optional[LocalServerDescriptor]:
     return descriptor
 
 
-def _print_status(paths: Optional[WindsurfPaths], descriptor_outcome: str, marker_present: bool, backup_path: Optional[Path]) -> None:
+def _print_status(
+    paths: Optional[WindsurfPaths],
+    descriptor_outcome: str,
+    button_config_outcome: str,
+    marker_present: bool,
+    backup_path: Optional[Path],
+) -> None:
     sys.stdout.write(f"openpe-windsurf-patch {__version__}\n")
     if paths is None:
         sys.stdout.write("  ide:             not detected\n")
@@ -262,6 +326,7 @@ def _print_status(paths: Optional[WindsurfPaths], descriptor_outcome: str, marke
             f"  backup present:  {'yes (' + backup_path.name + ')' if backup_path else 'no'}\n"
         )
     sys.stdout.write(f"  server descriptor: {descriptor_outcome}\n")
+    sys.stdout.write(f"  button config:     {button_config_outcome}\n")
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
@@ -347,7 +412,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             return EXIT_CODESIGN_ERROR
     sys.stdout.write(
         "openpe-windsurf-patch: install complete.\n"
-        "  restart Windsurf to pick up the ✨ button.\n"
+        "  restart Windsurf to pick up the openPE logo button.\n"
         f"  to revert: python3 -m installer uninstall {('--app-dir ' + args.app_dir) if args.app_dir else ''}\n"
     )
     return EXIT_OK
@@ -399,6 +464,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             marker_present = False
         backup_path = _find_latest_backup(paths.backup_dir, paths.bundle_file.name)
     descriptor_outcome = "not checked"
+    descriptor: Optional[LocalServerDescriptor] = None
     try:
         descriptor = read_descriptor()
         descriptor_outcome = (
@@ -406,7 +472,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
         )
     except DescriptorError as exc:
         descriptor_outcome = f"unavailable ({exc})"
-    _print_status(paths, descriptor_outcome, marker_present, backup_path)
+    _print_status(
+        paths,
+        descriptor_outcome,
+        _button_config_status(paths if paths is not None and paths.exists else None, descriptor),
+        marker_present,
+        backup_path,
+    )
     return EXIT_OK
 
 
@@ -415,7 +487,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     sys.stdout.write(f"  python:           {sys.version.split()[0]} ({sys.executable})\n")
     sys.stdout.write(f"  platform:         {sys.platform}\n")
     sys.stdout.write(f"  codesign needed:  {'yes (macOS)' if is_macos() else 'no'}\n")
-    paths = resolve_paths()
+    paths = resolve_paths(override=args.app_dir)
     if paths is None:
         sys.stdout.write("  ide:              not detected at default paths\n")
     else:
@@ -429,6 +501,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         sys.stdout.write(f"  backup dir:       {paths.backup_dir}\n")
     descriptor_path = default_descriptor_path()
     sys.stdout.write(f"  descriptor path:  {descriptor_path}\n")
+    descriptor: Optional[LocalServerDescriptor] = None
     try:
         descriptor = read_descriptor()
         sys.stdout.write(f"  descriptor:       OK (pid={descriptor.pid}, version={descriptor.version or 'unknown'})\n")
@@ -441,6 +514,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             sys.stdout.write(f"  /v1/info:         FAIL ({exc})\n")
     except DescriptorError as exc:
         sys.stdout.write(f"  descriptor:       FAIL ({exc})\n")
+    sys.stdout.write(f"  button config:    {_button_config_status(paths if paths is not None and paths.exists else None, descriptor)}\n")
     payload = _load_inject_payload()
     if payload is None:
         sys.stdout.write("  inject payload:   missing (run `npm run build` inside inject/)\n")
