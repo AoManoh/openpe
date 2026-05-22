@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -34,31 +36,25 @@ func main() {
 }
 
 func run(args []string) error {
+	return runWithIO(args, os.Stdout, os.Stderr)
+}
+
+func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 	cfg := config.Load()
-	fs := flag.NewFlagSet("openpe-server", flag.ExitOnError)
-	listenAddr := fs.String("listen", cfg.ListenAddr, "listen address")
-	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
-	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
-	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	fs := flag.NewFlagSet("openpe-server", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	listenAddr := configStringFlag(fs, "listen", "listen address (defaults to OPENPE_LISTEN_ADDR or 127.0.0.1:18980)")
+	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
+	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
+	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
 	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
-	provider, err := openai.New(openai.Config{
-		BaseURL: strings.TrimSpace(*baseURL),
-		APIKey:  strings.TrimSpace(*apiKey),
-		Model:   strings.TrimSpace(*model),
-		Timeout: *timeout,
-	})
-	if err != nil {
-		return fmt.Errorf("configure provider: %w", err)
-	}
-	service, err := newEnhancerService(provider, cfg)
-	if err != nil {
-		return fmt.Errorf("configure context provider: %w", err)
-	}
-
-	listen := strings.TrimSpace(*listenAddr)
+	listen := listenAddr.ValueOrDefault(cfg.ListenAddr)
 	if listen == "" {
 		listen = config.DefaultListenAddr
 	}
@@ -78,6 +74,26 @@ func run(args []string) error {
 			token = generated
 			tokenSource = "ephemeral (lifecycle auto-generated)"
 		}
+	}
+	if err := validateUnauthenticatedListen(listen, token); err != nil {
+		return err
+	}
+
+	provider, err := openai.New(openai.Config{
+		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
+		Model:   model.ValueOrDefault(cfg.Model),
+		Timeout: *timeout,
+	})
+	if err != nil {
+		return fmt.Errorf("configure provider: %w", err)
+	}
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		return fmt.Errorf("configure context provider: %w", err)
+	}
+
+	if cfg.Server.LifecycleEnabled {
 		descriptorPath = cfg.Server.DescriptorFile
 		if descriptorPath == "" {
 			descriptorPath, err = integration.DefaultDescriptorPath()
@@ -89,10 +105,10 @@ func run(args []string) error {
 		if err := integration.WriteDescriptor(descriptorPath, descriptor); err != nil {
 			return fmt.Errorf("write descriptor %s: %w", descriptorPath, err)
 		}
-		fmt.Fprintf(os.Stderr, "openpe-server: descriptor written to %s (mode 0600)\n", descriptorPath)
+		fmt.Fprintf(stderr, "openpe-server: descriptor written to %s (mode 0600)\n", descriptorPath)
 		defer func() {
 			if removeErr := integration.RemoveDescriptor(descriptorPath); removeErr != nil {
-				fmt.Fprintf(os.Stderr, "openpe-server: cleanup descriptor %s: %v\n", descriptorPath, removeErr)
+				fmt.Fprintf(stderr, "openpe-server: cleanup descriptor %s: %v\n", descriptorPath, removeErr)
 			}
 		}()
 	}
@@ -100,8 +116,9 @@ func run(args []string) error {
 	httpServer := &http.Server{
 		Addr: listen,
 		Handler: server.NewWithOptions(service, server.Options{
-			Token: token,
-			CORS:  server.CORSOptions{AllowedOrigins: cfg.Server.CORSOrigins},
+			Token:    token,
+			CORS:     server.CORSOptions{AllowedOrigins: cfg.Server.CORSOrigins},
+			ErrorLog: stderr,
 			Info: server.ServerInfo{
 				Version:    Version,
 				StartedAt:  time.Now().UTC(),
@@ -126,7 +143,7 @@ func run(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(stderr,
 			"openpe-server: listening on %s (version=%s; auth=%s; cors=%s; lifecycle=%s)\n",
 			listen, Version, authStatus, corsStatus, lifecycleStatus)
 		errCh <- httpServer.ListenAndServe()
@@ -136,7 +153,7 @@ func run(args []string) error {
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 	select {
 	case sig := <-signalCh:
-		fmt.Fprintf(os.Stderr, "openpe-server: shutting down after %s\n", sig)
+		fmt.Fprintf(stderr, "openpe-server: shutting down after %s\n", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return httpServer.Shutdown(ctx)
@@ -146,6 +163,63 @@ func run(args []string) error {
 		}
 		return err
 	}
+}
+
+type configStringValue struct {
+	value string
+	set   bool
+}
+
+func configStringFlag(fs *flag.FlagSet, name string, usage string) *configStringValue {
+	value := &configStringValue{}
+	fs.Var(value, name, usage)
+	return value
+}
+
+func (v *configStringValue) String() string {
+	if v == nil {
+		return ""
+	}
+	return v.value
+}
+
+func (v *configStringValue) Set(value string) error {
+	v.value = value
+	v.set = true
+	return nil
+}
+
+func (v *configStringValue) ValueOrDefault(defaultValue string) string {
+	if v != nil && v.set {
+		return strings.TrimSpace(v.value)
+	}
+	return strings.TrimSpace(defaultValue)
+}
+
+func validateUnauthenticatedListen(listenAddr string, token string) error {
+	if strings.TrimSpace(token) != "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil {
+		return fmt.Errorf("validate unauthenticated listen address %q: %w", listenAddr, err)
+	}
+	if isAllowedUnauthenticatedHost(host) {
+		return nil
+	}
+	return fmt.Errorf("refusing unauthenticated listen address %q: set OPENPE_SERVER_TOKEN or bind to 127.0.0.1, ::1, or localhost", listenAddr)
+}
+
+func isAllowedUnauthenticatedHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if zoneIndex := strings.LastIndex(host, "%"); zoneIndex >= 0 {
+		host = host[:zoneIndex]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback))
 }
 
 // deriveBaseURL converts a "host:port" listen address into the base URL an

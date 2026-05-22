@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -65,12 +66,12 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	client := fs.String("client", "generic", "target client name")
 	mode := fs.String("mode", "agent", "prompt mode")
 	cwd := fs.String("cwd", "", "workspace path")
-	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
-	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
-	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
+	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
+	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
 	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	rawPrompt := strings.TrimSpace(*prompt)
 	if rawPrompt == "" {
@@ -94,9 +95,9 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		*cwd = workingDir
 	}
 	provider, err := newProvider(openai.Config{
-		BaseURL: strings.TrimSpace(*baseURL),
-		APIKey:  strings.TrimSpace(*apiKey),
-		Model:   strings.TrimSpace(*model),
+		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
+		Model:   model.ValueOrDefault(cfg.Model),
 		Timeout: *timeout,
 	})
 	if err != nil {
@@ -151,12 +152,12 @@ func runCodex(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 	codexBin := fs.String("codex-bin", envOrDefault("CODEX_BIN", "codex"), "codex executable path")
 	var codexArgs repeatedFlag
 	fs.Var(&codexArgs, "codex-arg", "extra argument passed to codex exec; repeat for multiple args")
-	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
-	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
-	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
+	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
+	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
 	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	rawPrompt := strings.TrimSpace(*prompt)
 	if rawPrompt == "" && len(fs.Args()) > 0 {
@@ -183,9 +184,9 @@ func runCodex(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 		*cwd = workingDir
 	}
 	provider, err := newProvider(openai.Config{
-		BaseURL: strings.TrimSpace(*baseURL),
-		APIKey:  strings.TrimSpace(*apiKey),
-		Model:   strings.TrimSpace(*model),
+		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
+		Model:   model.ValueOrDefault(cfg.Model),
 		Timeout: *timeout,
 	})
 	if err != nil {
@@ -254,8 +255,8 @@ func runDeliveryLast(commandName string, client string, args []string, stdout io
 	fs.SetOutput(stderr)
 	pathOnly := fs.Bool("path", false, "print the cached content path")
 	promptOnly := fs.Bool("prompt", false, "print the paste-ready enhanced prompt instead of Markdown preview")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	if *pathOnly {
 		pathFn := delivery.LastPreviewPath
@@ -294,12 +295,12 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	terminalPreview := fs.Bool("terminal-preview", envBoolOrDefault("OPENPE_CODEX_TERMINAL_PREVIEW", false), "experimental: write full Markdown preview directly to /dev/tty when blocking")
 	copyPreview := fs.Bool("copy-preview", envBoolOrDefault("OPENPE_CODEX_COPY_PREVIEW", false), "copy enhanced prompt to the system clipboard when blocking")
 	hookScope := fs.String("hook-scope", envOrDefault("OPENPE_HOOK_SCOPE", ""), "hook scope for duplicate suppression: user or project")
-	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
-	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
-	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
+	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
+	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
 	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	input, err := codexadapter.DecodeHookInput(stdin)
 	if err != nil {
@@ -325,9 +326,9 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return 0
 	}
 	provider, err := newProvider(openai.Config{
-		BaseURL: strings.TrimSpace(*baseURL),
-		APIKey:  strings.TrimSpace(*apiKey),
-		Model:   strings.TrimSpace(*model),
+		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
+		Model:   model.ValueOrDefault(cfg.Model),
 		Timeout: *timeout,
 	})
 	if err != nil {
@@ -377,8 +378,8 @@ func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getw
 	envFile := fs.String("env-file", "", "dotenv file loaded by the hook; defaults to project .env")
 	hookTimeout := fs.Int("hook-timeout", 120, "Codex hook timeout in seconds")
 	dryRun := fs.Bool("dry-run", false, "print hooks.json without writing it")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	if *hookTimeout <= 0 {
 		fmt.Fprintln(stderr, "hook-timeout must be positive")
@@ -474,12 +475,12 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 	fs.SetOutput(stderr)
 	client := fs.String("client", "claude-code", "target client name")
 	mode := fs.String("mode", "agent", "prompt mode")
-	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
-	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
-	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
+	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
+	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
 	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	input, err := claudeadapter.DecodeHookInput(stdin)
 	if err != nil {
@@ -499,9 +500,9 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 		overrideCWD = workingDir
 	}
 	provider, err := newProvider(openai.Config{
-		BaseURL: strings.TrimSpace(*baseURL),
-		APIKey:  strings.TrimSpace(*apiKey),
-		Model:   strings.TrimSpace(*model),
+		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
+		Model:   model.ValueOrDefault(cfg.Model),
 		Timeout: *timeout,
 	})
 	if err != nil {
@@ -543,8 +544,8 @@ func runClaudeHookInstall(args []string, stdout io.Writer, stderr io.Writer, get
 	envFile := fs.String("env-file", "", "dotenv file loaded by the hook; defaults to ~/.config/openpe/.env")
 	hookTimeout := fs.Int("hook-timeout", 120, "Claude hook timeout in seconds")
 	dryRun := fs.Bool("dry-run", false, "print settings.json without writing it")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	if *hookTimeout <= 0 {
 		fmt.Fprintln(stderr, "hook-timeout must be positive")
@@ -636,12 +637,12 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newPro
 	fs.SetOutput(stderr)
 	client := fs.String("client", "windsurf", "target client name")
 	mode := fs.String("mode", "cascade", "prompt mode")
-	baseURL := fs.String("base-url", cfg.BaseURL, "OpenAI-compatible base URL")
-	apiKey := fs.String("api-key", cfg.APIKey, "OpenAI-compatible API key")
-	model := fs.String("model", cfg.Model, "OpenAI-compatible model")
+	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
+	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
+	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
 	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	input, err := windsurfadapter.DecodeHookInput(stdin)
 	if err != nil {
@@ -661,9 +662,9 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newPro
 		overrideCWD = workingDir
 	}
 	provider, err := newProvider(openai.Config{
-		BaseURL: strings.TrimSpace(*baseURL),
-		APIKey:  strings.TrimSpace(*apiKey),
-		Model:   strings.TrimSpace(*model),
+		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
+		Model:   model.ValueOrDefault(cfg.Model),
 		Timeout: *timeout,
 	})
 	if err != nil {
@@ -709,8 +710,8 @@ func runWindsurfHookInstall(args []string, stdout io.Writer, stderr io.Writer, g
 	openpeBin := fs.String("openpe-bin", "", "openpe executable path; defaults to PATH lookup")
 	envFile := fs.String("env-file", "", "dotenv file loaded by the hook; defaults to ~/.config/openpe/.env for user hooks or project .env for project hooks")
 	dryRun := fs.Bool("dry-run", false, "print hooks.json without writing it")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
 	}
 	hooksPath, err := windsurfHooksPath(*scope, *target, getwd)
 	if err != nil {
@@ -924,6 +925,47 @@ func timeoutOrDefault(value time.Duration) time.Duration {
 		return config.DefaultTimeout
 	}
 	return value
+}
+
+type configStringValue struct {
+	value string
+	set   bool
+}
+
+func configStringFlag(fs *flag.FlagSet, name string, usage string) *configStringValue {
+	value := &configStringValue{}
+	fs.Var(value, name, usage)
+	return value
+}
+
+func (v *configStringValue) String() string {
+	if v == nil {
+		return ""
+	}
+	return v.value
+}
+
+func (v *configStringValue) Set(value string) error {
+	v.value = value
+	v.set = true
+	return nil
+}
+
+func (v *configStringValue) ValueOrDefault(defaultValue string) string {
+	if v != nil && v.set {
+		return strings.TrimSpace(v.value)
+	}
+	return strings.TrimSpace(defaultValue)
+}
+
+func parseFlagSet(fs *flag.FlagSet, args []string) (bool, int) {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return false, 0
+		}
+		return false, 2
+	}
+	return true, 0
 }
 
 func printUsage(w io.Writer) {
