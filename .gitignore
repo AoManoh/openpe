@@ -29,3 +29,21 @@ pnpm-debug.log*
 
 # Private governance outputs and local knowledge assets.
 /docs/
+
+# Go build outputs left at repo root by `go build` without -o.
+# The published install path is `go install ./cmd/...`, which writes to
+# $GOPATH/bin instead, so repo-root .exe files are always local artefacts.
+/openpe.exe
+/openpe-server.exe
+/openpe*.exe~
+
+# Installer UAC elevation scratch (transient per-run wrappers + redirected
+# stdout/stderr/result files dropped by the installer when it re-launches
+# itself elevated on Windows). The .log siblings are already covered by the
+# global *.log rule above; we only need the .ps1 anchor here.
+/.openpe-*-elevated.ps1
+
+# Third-party Windsurf-enhance reference clones kept locally for research
+# (not part of this project's distributable surface).
+/.windsurf-enhance-ref/
+/extensions/windsurf-enhance-v1.0.1.zip
