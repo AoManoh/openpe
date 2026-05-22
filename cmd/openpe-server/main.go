@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/AoManoh/openpe/internal/config"
+	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers/openai"
 	"github.com/AoManoh/openpe/internal/server"
@@ -44,9 +45,13 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("configure provider: %w", err)
 	}
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		return fmt.Errorf("configure context provider: %w", err)
+	}
 	httpServer := &http.Server{
 		Addr:              strings.TrimSpace(*listenAddr),
-		Handler:           server.New(enhancer.NewService(provider)),
+		Handler:           server.New(service),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	if httpServer.Addr == "" {
@@ -72,4 +77,25 @@ func run(args []string) error {
 		}
 		return err
 	}
+}
+
+func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {
+	if !cfg.Openace.Enabled {
+		return enhancer.NewService(provider), nil
+	}
+	contextProvider, err := openacectx.New(openacectx.Config{
+		DaemonAddr:        cfg.Openace.Addr,
+		DaemonToken:       cfg.Openace.Token,
+		ProviderProfileID: cfg.Openace.ProviderProfileID,
+		MaxOutputLength:   cfg.Openace.MaxOutputLength,
+		Timeout:           cfg.Openace.Timeout,
+		MaxRetries:        cfg.Openace.MaxRetries,
+		RetryBaseDelay:    cfg.Openace.RetryBaseDelay,
+		RetryMaxDelay:     cfg.Openace.RetryMaxDelay,
+		RetryJitter:       cfg.Openace.RetryJitter,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return enhancer.NewServiceWithContext(provider, contextProvider), nil
 }

@@ -64,6 +64,10 @@ type Provider interface {
 	Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error)
 }
 
+type ContextProvider interface {
+	Retrieve(ctx context.Context, req Request) ([]string, error)
+}
+
 type ValidationError struct {
 	Message string
 }

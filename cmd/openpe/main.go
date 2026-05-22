@@ -18,6 +18,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
 	"github.com/AoManoh/openpe/internal/config"
+	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers/openai"
 )
@@ -102,9 +103,14 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		fmt.Fprintf(stderr, "configure provider: %v\n", err)
 		return 1
 	}
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "configure context provider: %v\n", err)
+		return 1
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutOrDefault(*timeout))
 	defer cancel()
-	resp, err := enhancer.NewService(provider).Enhance(ctx, enhancer.Request{
+	resp, err := service.Enhance(ctx, enhancer.Request{
 		Prompt: rawPrompt,
 		Client: *client,
 		CWD:    *cwd,
@@ -186,9 +192,14 @@ func runCodex(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 		fmt.Fprintf(stderr, "configure provider: %v\n", err)
 		return 1
 	}
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "configure context provider: %v\n", err)
+		return 1
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutOrDefault(*timeout))
 	defer cancel()
-	resp, err := enhancer.NewService(provider).Enhance(ctx, enhancer.Request{
+	resp, err := service.Enhance(ctx, enhancer.Request{
 		Prompt: rawPrompt,
 		Client: *client,
 		CWD:    *cwd,
@@ -322,7 +333,11 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if err != nil {
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure provider: %v", err), cfg.Language))
 	}
-	output, err := codexadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, codexadapter.HookOptions{
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+	}
+	output, err := codexadapter.HandleHook(context.Background(), service, input, codexadapter.HookOptions{
 		Client:   *client,
 		Mode:     *mode,
 		Auto:     *auto,
@@ -493,7 +508,12 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure provider: %v", err), cfg.Language))
 		return 2
 	}
-	output, err := claudeadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, claudeadapter.HookOptions{
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+		return 2
+	}
+	output, err := claudeadapter.HandleHook(context.Background(), service, input, claudeadapter.HookOptions{
 		Client:   *client,
 		Mode:     *mode,
 		CWD:      overrideCWD,
@@ -650,7 +670,12 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newPro
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure provider: %v", err), cfg.Language))
 		return 2
 	}
-	output, err := windsurfadapter.HandleHook(context.Background(), enhancer.NewService(provider), input, windsurfadapter.HookOptions{
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+		return 2
+	}
+	output, err := windsurfadapter.HandleHook(context.Background(), service, input, windsurfadapter.HookOptions{
 		Client:   *client,
 		Mode:     *mode,
 		CWD:      overrideCWD,
@@ -871,6 +896,27 @@ func runCommand(ctx context.Context, name string, args []string, stdin io.Reader
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {
+	if !cfg.Openace.Enabled {
+		return enhancer.NewService(provider), nil
+	}
+	contextProvider, err := openacectx.New(openacectx.Config{
+		DaemonAddr:        cfg.Openace.Addr,
+		DaemonToken:       cfg.Openace.Token,
+		ProviderProfileID: cfg.Openace.ProviderProfileID,
+		MaxOutputLength:   cfg.Openace.MaxOutputLength,
+		Timeout:           cfg.Openace.Timeout,
+		MaxRetries:        cfg.Openace.MaxRetries,
+		RetryBaseDelay:    cfg.Openace.RetryBaseDelay,
+		RetryMaxDelay:     cfg.Openace.RetryMaxDelay,
+		RetryJitter:       cfg.Openace.RetryJitter,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return enhancer.NewServiceWithContext(provider, contextProvider), nil
 }
 
 func timeoutOrDefault(value time.Duration) time.Duration {

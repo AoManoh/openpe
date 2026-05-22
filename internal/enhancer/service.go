@@ -17,11 +17,16 @@ Do not answer the task yourself.
 Return only the enhanced prompt.`
 
 type Service struct {
-	provider Provider
+	provider        Provider
+	contextProvider ContextProvider
 }
 
 func NewService(provider Provider) *Service {
 	return &Service{provider: provider}
+}
+
+func NewServiceWithContext(provider Provider, contextProvider ContextProvider) *Service {
+	return &Service{provider: provider, contextProvider: contextProvider}
 }
 
 func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
@@ -31,6 +36,13 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	if req.Prompt == "" {
 		return Response{}, invalid("prompt is required")
+	}
+	if s.contextProvider != nil && len(req.Context.Retrieval) == 0 {
+		retrieved, err := s.contextProvider.Retrieve(ctx, req)
+		if err != nil {
+			return Response{}, err
+		}
+		req.Context.Retrieval = append(req.Context.Retrieval, retrieved...)
 	}
 
 	user, usedContext, warnings := buildUserPrompt(req)

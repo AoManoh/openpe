@@ -99,8 +99,30 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_CACHE_DIR` | `os.UserCacheDir()/openpe`（Linux 通常 `~/.cache/openpe`） | hook 预览与纯文本缓存根目录 |
 | `OPENPE_COPY_COMMAND` | 自动探测 | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`） |
 | `OPENPE_ENV_FILE` | hook 安装时注入 | hook 子进程加载的 dotenv 文件路径 |
+| `OPENPE_OPENACE_ENABLED` | `false` | 是否启用 Openace 代码检索上下文 |
+| `OPENPE_OPENACE_ADDR` | `127.0.0.1:8765` | Openace daemon 地址；也可沿用 `OPENACE_DAEMON_ADDR` |
+| `OPENPE_OPENACE_TOKEN` | 空 | Openace daemon token；也可沿用 `OPENACE_DAEMON_TOKEN` |
+| `OPENPE_OPENACE_PROVIDER_PROFILE_ID` | 空 | 可选 ACE provider profile |
+| `OPENPE_OPENACE_MAX_OUTPUT_LENGTH` | `12000` | 单次 Openace 检索结果上限 |
+| `OPENPE_OPENACE_TIMEOUT` | `30s` | 单次 Openace daemon HTTP 调用超时 |
+| `OPENPE_OPENACE_MAX_RETRIES` | `2` | 临时错误最大重试次数，实际总尝试次数为 `1 + max_retries` |
+| `OPENPE_OPENACE_RETRY_BASE_DELAY` | `250ms` | Openace 重试指数退避起始延迟 |
+| `OPENPE_OPENACE_RETRY_MAX_DELAY` | `2s` | Openace 单次重试最大等待 |
+| `OPENPE_OPENACE_RETRY_JITTER` | `100ms` | Openace 重试抖动上限 |
 
-`.env.example` 含上述前 6 项的模板，可 `cp .env.example ~/.config/openpe/.env` 后改值。
+`.env.example` 含常用模板，可 `cp .env.example ~/.config/openpe/.env` 后改值。
+
+### Openace 代码检索上下文
+
+Openace 是可选 context provider。启用后，openPE 会在调用 prompt rewrite 模型前，基于 `prompt`、目标客户端、模式和 `cwd` 向本机 Openace daemon `POST /v1/retrieve` 发起一次代码检索，并把返回内容写入 canonical request 的 `context.retrieval`。如果调用方已经显式传入 `context.retrieval`，openPE 不会重复检索。
+
+```bash
+OPENPE_OPENACE_ENABLED=true
+OPENPE_OPENACE_ADDR=127.0.0.1:8765
+openpe enhance --prompt "帮我修复 provider 超时重试" --cwd /path/to/repo
+```
+
+Openace 临时错误只会有限重试：HTTP `408`、`429`、`499`、`5xx`、网络超时和短暂连接错误会按指数退避加抖动重试；`400`、`401`、`403`、`404` 等配置、权限或请求错误不会重试。超过最大重试次数后，openPE 返回清晰错误，不静默降级为无检索上下文。
 
 ## 客户端配置
 
@@ -349,6 +371,7 @@ client / hook / HTTP
 | `cmd/openpe` | CLI 入口；正式路径是 `<client> hook install`，裸命令仅用于测试 |
 | `cmd/openpe-server` | HTTP server 入口，暴露 `POST /v1/prompt-enhance` 和 `GET /healthz` |
 | `internal/enhancer` | 核心 prompt rewrite 服务、canonical Request / Response 类型 |
+| `internal/context/openace` | 可选 Openace daemon 检索 provider，负责 query 组织、结果格式化和临时错误重试 |
 | `internal/providers/openai` | 最小 OpenAI-compatible `/v1/chat/completions` provider |
 | `internal/adapters/codex` | Codex `UserPromptSubmit` hook 适配 |
 | `internal/adapters/claude` | Claude Code `UserPromptSubmit` hook 适配 |
@@ -386,7 +409,7 @@ client / hook / HTTP
 - 不代理完整 agent chat / completion 请求；只在 prompt 进入宿主前做一次改写。
 - 不保存长期会话状态；缓存只保留每个客户端最近一次 hook 的预览和纯文本。
 - 不复刻 Augment Code 或任何商用工具的私有 prompt / 后端逻辑。
-- 不把 Openace 作为必选依赖；Openace 未来只能作为可选 context provider 接入。
+- 不把 Openace 作为必选依赖；Openace 只作为显式启用的可选 context provider，不承载 prompt rewrite 核心逻辑。
 
 ## 开发与贡献
 
