@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -134,7 +135,12 @@ func ReadDescriptor(path string) (LocalServerDescriptor, error) {
 	if err != nil {
 		return d, err
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	// NTFS does not honour POSIX mode bits: os.Chmod(0o600) only toggles
+	// the read-only flag on Windows and Stat().Mode().Perm() reports 0o666
+	// for any writable file, so the check would unconditionally reject any
+	// descriptor on Windows. Rely on the default %USERPROFILE% ACL there,
+	// matching OpenSSH's StrictModes-on-Windows behaviour.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return d, fmt.Errorf("descriptor file %s has insecure mode %#o (want 0600 or stricter)", path, info.Mode().Perm())
 	}
 	raw, err := os.ReadFile(path)
