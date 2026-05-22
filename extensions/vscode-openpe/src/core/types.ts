@@ -55,6 +55,11 @@ export interface OpenPEResponse {
   warnings?: string[];
   metadata?: {
     used_context?: string[];
+    sections?: Array<{
+      name: string;
+      length: number;
+      truncated: boolean;
+    }>;
     provider?: string;
     model?: string;
     latency_ms?: number;
@@ -69,4 +74,3 @@ export interface EnhancementState {
   response?: OpenPEResponse;
   template?: EnhanceTemplate;
 }
-
