@@ -256,11 +256,25 @@ def _cmd_install(args: argparse.Namespace) -> int:
             f"  codesign: {'yes (macOS)' if is_macos() else 'no (non-macOS)'}\n"
         )
         return EXIT_OK
+    # Idempotency guard: when the bundle already carries the marker
+    # (e.g. the user re-runs install to refresh the payload), skip the
+    # backup step so we never overwrite the truly-original snapshot
+    # with a patched copy. Without this, uninstall would restore the
+    # patched bundle and effectively become a no-op.
     try:
-        bundle_backup = backup_bundle(paths.bundle_file, paths.backup_dir)
-        product_backup = backup_product_json(paths.product_file, paths.backup_dir)
-        sys.stderr.write(f"  ✓ backup bundle  → {bundle_backup}\n")
-        sys.stderr.write(f"  ✓ backup product → {product_backup}\n")
+        already_patched = has_marker(paths.bundle_file)
+    except BundleError:
+        already_patched = False
+    try:
+        if already_patched:
+            sys.stderr.write(
+                "  ▸ bundle already patched; reusing the existing backup\n"
+            )
+        else:
+            bundle_backup = backup_bundle(paths.bundle_file, paths.backup_dir)
+            product_backup = backup_product_json(paths.product_file, paths.backup_dir)
+            sys.stderr.write(f"  ✓ backup bundle  → {bundle_backup}\n")
+            sys.stderr.write(f"  ✓ backup product → {product_backup}\n")
         inject_bundle(paths.bundle_file, payload_path.read_text(encoding="utf-8"))
         sys.stderr.write("  ✓ injected payload into bundle\n")
         patch_product_json(paths.product_file, bundle_relpath=DEFAULT_BUNDLE_RELPATH)
