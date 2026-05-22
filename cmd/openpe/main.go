@@ -19,6 +19,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
 	"github.com/AoManoh/openpe/internal/config"
+	codexhistory "github.com/AoManoh/openpe/internal/context/codexhistory"
 	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers/openai"
@@ -325,6 +326,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if codexadapter.ShouldSkipDuplicateHook(*hookScope, os.Getenv("OPENPE_ENV_FILE"), effectiveCWD) {
 		return 0
 	}
+	history := codexSessionHistory(input.Prompt, effectiveCWD, cfg)
 	provider, err := newProvider(openai.Config{
 		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
 		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
@@ -345,6 +347,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		CWD:      overrideCWD,
 		Language: cfg.Language,
 		Timeout:  timeoutOrDefault(*timeout),
+		History:  history,
 	})
 	if err != nil {
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error(), cfg.Language))
@@ -367,6 +370,21 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(true, fmt.Sprintf("unsupported block-output %q", *blockOutput), cfg.Language))
 	}
 	return codexadapter.EncodeHookOutputOrFallback(stdout, output)
+}
+
+func codexSessionHistory(prompt string, cwd string, cfg config.Config) []enhancer.Message {
+	if !cfg.Codex.History.Enabled {
+		return nil
+	}
+	result, err := codexhistory.New(codexhistory.Options{
+		Home:        cfg.Codex.History.Home,
+		MaxMessages: cfg.Codex.History.MaxMessages,
+		MaxChars:    cfg.Codex.History.MaxChars,
+	}).Retrieve(prompt, cwd)
+	if err != nil {
+		return nil
+	}
+	return result.Messages
 }
 
 func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {

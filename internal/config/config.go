@@ -20,6 +20,9 @@ const (
 	DefaultOpenaceRetryBaseDelay  = 250 * time.Millisecond
 	DefaultOpenaceRetryMaxDelay   = 2 * time.Second
 	DefaultOpenaceRetryJitter     = 100 * time.Millisecond
+
+	DefaultCodexHistoryMaxMessages = 12
+	DefaultCodexHistoryMaxChars    = 12000
 )
 
 type Config struct {
@@ -30,7 +33,19 @@ type Config struct {
 	Timeout    time.Duration
 	Language   string
 	Openace    OpenaceConfig
+	Codex      CodexConfig
 	Server     ServerConfig
+}
+
+type CodexConfig struct {
+	History CodexHistoryConfig
+}
+
+type CodexHistoryConfig struct {
+	Enabled     bool
+	Home        string
+	MaxMessages int
+	MaxChars    int
 }
 
 // ServerConfig collects HTTP server runtime options that are independent of
@@ -94,6 +109,14 @@ func Load() Config {
 			RetryBaseDelay:    durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_BASE_DELAY", fileEnv), DefaultOpenaceRetryBaseDelay),
 			RetryMaxDelay:     durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_MAX_DELAY", fileEnv), DefaultOpenaceRetryMaxDelay),
 			RetryJitter:       durationFromValue(valueFromEnv("OPENPE_OPENACE_RETRY_JITTER", fileEnv), DefaultOpenaceRetryJitter),
+		},
+		Codex: CodexConfig{
+			History: CodexHistoryConfig{
+				Enabled:     boolFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_ENABLED", fileEnv), false),
+				Home:        valueFromAnyEnv([]string{"OPENPE_CODEX_HOME", "CODEX_HOME"}, fileEnv),
+				MaxMessages: intFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_MAX_MESSAGES", fileEnv), DefaultCodexHistoryMaxMessages),
+				MaxChars:    intFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_MAX_CHARS", fileEnv), DefaultCodexHistoryMaxChars),
+			},
 		},
 		Server: ServerConfig{
 			Token:            valueFromEnv("OPENPE_SERVER_TOKEN", fileEnv),

@@ -52,6 +52,7 @@ type HookOptions struct {
 	Prompt   string
 	Language string
 	Timeout  time.Duration
+	History  []enhancer.Message
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -104,10 +105,11 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		cwd = strings.TrimSpace(opts.CWD)
 	}
 	req := enhancer.Request{
-		Prompt: rawPrompt,
-		Client: valueOrDefault(opts.Client, "codex"),
-		CWD:    cwd,
-		Mode:   valueOrDefault(opts.Mode, "agent"),
+		Prompt:  rawPrompt,
+		Client:  valueOrDefault(opts.Client, "codex"),
+		CWD:     cwd,
+		Mode:    valueOrDefault(opts.Mode, "agent"),
+		History: opts.History,
 	}
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc

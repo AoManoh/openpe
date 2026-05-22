@@ -103,6 +103,10 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_CACHE_DIR` | `os.UserCacheDir()/openpe`（Linux 通常 `~/.cache/openpe`） | hook 预览与纯文本缓存根目录 |
 | `OPENPE_COPY_COMMAND` | 自动探测 | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`） |
 | `OPENPE_ENV_FILE` | hook 安装时注入 | hook 子进程加载的 dotenv 文件路径 |
+| `OPENPE_CODEX_HISTORY_ENABLED` | `false` | 是否允许 Codex hook 读取本机 Codex session 历史并注入 `Request.History` |
+| `OPENPE_CODEX_HOME` | `CODEX_HOME` 或 `~/.codex` | Codex 本地数据目录，仅在 Codex history 启用时使用 |
+| `OPENPE_CODEX_HISTORY_MAX_MESSAGES` | `12` | Codex session history 注入的最近消息数上限 |
+| `OPENPE_CODEX_HISTORY_MAX_CHARS` | `12000` | Codex session history 注入的字符预算上限 |
 | `OPENPE_OPENACE_ENABLED` | `false` | 是否启用 Openace 代码检索上下文 |
 | `OPENPE_OPENACE_ADDR` | `127.0.0.1:8765` | Openace daemon 地址；也可沿用 `OPENACE_DAEMON_ADDR` |
 | `OPENPE_OPENACE_TOKEN` | 空 | Openace daemon token；也可沿用 `OPENACE_DAEMON_TOKEN` |
@@ -163,6 +167,7 @@ openpe codex hook install --dry-run
 **关键注意事项**：
 
 - Codex hook 输入里的 `cwd` 来自当前 Codex session，影响 enhancer 推断项目。处理 openPE 自己时请从 `/home/oh/projects/openPE` 启动 Codex，或用 `codex -C /home/oh/projects/openPE`。
+- Codex session history 默认不读取。若要让 `pe` 理解当前对话里的“选项一”“星桥方案”等引用，可在 hook dotenv 中设置 `OPENPE_CODEX_HISTORY_ENABLED=true`。openPE 会用当前 `pe` 原文从 `~/.codex/history.jsonl` 反查 session id，再读取对应 rollout JSONL 的最近 user/assistant 消息，填入 `enhancer.Request.History`；若无法唯一匹配或 `cwd` 不一致，则不注入历史。
 - Codex TUI 把 captured hook feedback 压成单行，stderr 只输出短状态。完整预览见 [调用方式](#调用方式) 中的 `openpe codex hook last`。
 - 同时安装 user + project hook 会触发两次执行；openPE 在 project hook 安装器中会检测 user hook 并自动跳过去重。
 - Codex CLI `0.132.0` 的 `/` 菜单只枚举内置命令，不会列出 `~/.codex/prompts/*.md` 或自定义 commands；openPE 当前**不规划** `/pe` slash command，正式入口保持 hook 触发。
