@@ -9,6 +9,8 @@
 export interface OpenpeConfig {
   baseUrl: string;
   token: string;
+  descriptorPath?: string;
+  fsProbe: boolean;
   version?: string;
 }
 
@@ -18,6 +20,9 @@ export function getConfig(): OpenpeConfig {
   return {
     baseUrl: typeof raw.baseUrl === "string" ? raw.baseUrl.replace(/\/+$/, "") : "",
     token: typeof raw.token === "string" ? raw.token : "",
+    descriptorPath:
+      typeof raw.descriptorPath === "string" ? raw.descriptorPath : undefined,
+    fsProbe: raw.fsProbe === true,
     version: typeof raw.version === "string" ? raw.version : undefined,
   };
 }

@@ -28,6 +28,7 @@ npm run check    # tsc --noEmit
 |---|---|
 | `src/index.ts`    | IIFE entry; single-instance guard; wires observer + ✨ button. |
 | `src/auth.ts`     | Reads `globalThis.__openpe` (written by the installer) for the bearer token and base URL. |
+| `src/fs_probe.ts` | Optional P3 diagnostic probe for checking whether the Windsurf renderer can read the local 0600 descriptor via Node `fs`. |
 | `src/client.ts`   | `fetch` against the local `POST /v1/prompt-enhance`. |
 | `src/observer.ts` | `MutationObserver` that locates the Cascade input toolbar and dispatches injection. |
 | `src/button.ts`   | ✨ button DOM creation; styling delegated to `styles.ts`. |
@@ -45,3 +46,18 @@ rebuild.
 No telemetry, no third-party network calls. Every fetch goes to
 `base_url` from the descriptor, which the installer guarantees points
 at `127.0.0.1:<port>`.
+
+## P3 filesystem probe
+
+Run the installer with `--fs-probe` when validating whether the injected
+Windsurf renderer can read the local server descriptor at runtime:
+
+```bash
+python3 -m installer install --i-accept-experimental-risk --fs-probe
+```
+
+After restarting Windsurf, click the openPE button and inspect DevTools
+for `[openpe-fs-probe]`. The probe logs only descriptor path, byte count,
+file mode and schema shape; it must not print the bearer token. This is a
+temporary diagnostic gate before replacing install-time token embedding
+with descriptor runtime reads.

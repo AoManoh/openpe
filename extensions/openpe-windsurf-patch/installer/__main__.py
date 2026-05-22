@@ -117,6 +117,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="describe the actions that would be taken without touching disk",
     )
     install.add_argument(
+        "--fs-probe",
+        action="store_true",
+        help=(
+            "enable a renderer-side filesystem probe that reads the 0600 "
+            "openpe-server descriptor and logs non-secret diagnostics"
+        ),
+    )
+    install.add_argument(
         "--i-accept-experimental-risk",
         action="store_true",
         help="acknowledge the EULA / user-assumes-risk disclaimer non-interactively",
@@ -161,7 +169,11 @@ def _load_inject_payload() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _build_payload_prelude(descriptor: LocalServerDescriptor) -> str:
+def _build_payload_prelude(
+    descriptor: LocalServerDescriptor,
+    descriptor_path: Optional[Path] = None,
+    fs_probe: bool = False,
+) -> str:
     """Render the ``globalThis.__openpe`` bootstrap injected before inject.js.
 
     ``inject/src/auth.ts`` reads ``window.__openpe`` for the live server
@@ -181,6 +193,10 @@ def _build_payload_prelude(descriptor: LocalServerDescriptor) -> str:
         "token": descriptor.token,
         "version": descriptor.version or "unknown",
     }
+    if descriptor_path is not None:
+        config["descriptorPath"] = str(descriptor_path)
+    if fs_probe:
+        config["fsProbe"] = True
     return (
         "/* === OPENPE-BOOTSTRAP === */\n"
         "/* rewritten by installer at install time; do not edit by hand */\n"
@@ -258,6 +274,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     descriptor = _read_descriptor_or_explain()
     if descriptor is None:
         return EXIT_DESCRIPTOR_ERROR
+    descriptor_path = default_descriptor_path()
     try:
         verify_server(descriptor)
     except HandshakeError as exc:
@@ -281,6 +298,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             f"  product: {paths.product_file}\n"
             f"  backup → {paths.backup_dir}\n"
             f"  payload: {payload_path} ({payload_path.stat().st_size} bytes)\n"
+            f"  fs probe: {'yes' if args.fs_probe else 'no'}\n"
             f"  codesign: {'yes (macOS)' if is_macos() else 'no (non-macOS)'}\n"
         )
         return EXIT_OK
@@ -303,7 +321,11 @@ def _cmd_install(args: argparse.Namespace) -> int:
             product_backup = backup_product_json(paths.product_file, paths.backup_dir)
             sys.stderr.write(f"  ✓ backup bundle  → {bundle_backup}\n")
             sys.stderr.write(f"  ✓ backup product → {product_backup}\n")
-        prelude = _build_payload_prelude(descriptor)
+        prelude = _build_payload_prelude(
+            descriptor,
+            descriptor_path=descriptor_path if args.fs_probe else None,
+            fs_probe=args.fs_probe,
+        )
         payload_text = payload_path.read_text(encoding="utf-8")
         inject_bundle(paths.bundle_file, prelude + payload_text)
         sys.stderr.write("  ✓ injected payload into bundle (bootstrap + inject.js)\n")

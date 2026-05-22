@@ -12,6 +12,7 @@
  */
 
 import { getConfig } from "./auth.js";
+import { runFilesystemProbe } from "./fs_probe.js";
 import { ensureStyles } from "./styles.js";
 import { startObserver } from "./observer.js";
 
@@ -24,6 +25,8 @@ declare global {
     __openpe?: {
       baseUrl?: string;
       token?: string;
+      descriptorPath?: string;
+      fsProbe?: boolean;
       version?: string;
     };
     __openpeInjected?: boolean;
@@ -51,6 +54,7 @@ function boot(): void {
   window.__openpeInjected = true;
 
   const config = getConfig();
+  runFilesystemProbe(config);
   if (!config.baseUrl || !config.token) {
     warn(
       "globalThis.__openpe missing baseUrl/token; installer should have set these before injection",

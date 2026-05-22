@@ -93,6 +93,13 @@ python3 -m installer doctor      # environment self-check
 
 All subcommands accept `--help`.
 
+For the P3 descriptor-read spike, run install with `--fs-probe` after
+starting `openpe-server` with `OPENPE_SERVER_LIFECYCLE_ENABLED=true`.
+Restart Windsurf, click the openPE button, and inspect DevTools for
+`[openpe-fs-probe]` logs. The probe reports only non-secret descriptor
+metadata and whether the renderer can read the 0600 descriptor via Node
+`fs`; it does not change token transport yet.
+
 ## Testing
 
 ```bash
