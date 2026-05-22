@@ -234,6 +234,25 @@ openpe windsurf hook install --dry-run
 - Windsurf 公开 hook 协议仅证明可阻断原 prompt，**无法替换 Cascade 输入框内容**。openPE 因此采用"阻断 + 缓存 + 复制"模式。
 - Windsurf hook 子进程**没有控制 TTY**，OSC52 剪贴板兜底**必然失败**。本地命令（`wl-copy` / `xclip` / `pbcopy` / `clip.exe`）可用时复制仍能成功；不可用时按 stderr 提示从 `last-prompt.txt` 文件取回。详见 [注意事项与已知限制](#注意事项与已知限制)。
 
+### VS Code / Windsurf / Cursor VSIX 插件
+
+openPE 也提供一个 VS Code 兼容插件初版，面向 Windsurf、Cursor、VS Code 等现代 IDE 的普通编辑器场景。它不是 Chat / Composer / Cascade 的 pre-submit hook，不承诺替换 IDE 原生聊天输入框；它负责在 IDE 内采集选区、当前文件或用户输入，调用本地 openPE，并把增强结果展示给用户。
+
+```bash
+cd extensions/vscode-openpe
+npm install
+npm run compile
+npm run package
+```
+
+生成的 `vscode-openpe-*.vsix` 可手动安装到兼容 VSIX 的 IDE。常用命令：
+
+- `openPE: Enhance Prompt`
+- `openPE: Enhance Selection`
+- `openPE: Enhance Current File`
+
+默认传输方式是 `openpe enhance --json`。如果需要把当前文件内容作为结构化上下文传给 core，可启动 `openpe-server` 并把插件配置 `openpe.transport` 改为 `http`。更多说明见 [extensions/vscode-openpe/README.md](extensions/vscode-openpe/README.md)。
+
 ## 调用方式
 
 ### 基本流程
@@ -382,6 +401,7 @@ client / hook / HTTP
 | `internal/adapters/delivery` | 剪贴板复制 + 双缓存（Markdown 预览 + 纯文本）+ 失败 UX 文案的统一交付层，三方 hook 共用 |
 | `internal/config` | `.env` 与环境变量读取 |
 | `internal/server` | HTTP API 与健康检查 |
+| `extensions/vscode-openpe` | VS Code 兼容 VSIX 插件；调用 CLI/HTTP，负责 IDE 侧输入采集、预览、复制、插入和替换 |
 
 ### 增强契约（开发者参考）
 

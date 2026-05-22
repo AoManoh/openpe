@@ -1,0 +1,15 @@
+.vscode/**
+.vscode-test/**
+.gitignore
+design/**
+scripts/**
+media/openpic/**
+coverage/**
+node_modules/**
+src/**
+test/**
+out/test/**
+tsconfig.json
+*.vsix
+*.zip
+**/*.map
