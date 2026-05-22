@@ -1,0 +1,17 @@
+{
+  "name": "openpe-windsurf-inject",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "openPE Windsurf bundle injection payload (esbuild → dist/inject.js IIFE)",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "check": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.5.4"
+  }
+}
