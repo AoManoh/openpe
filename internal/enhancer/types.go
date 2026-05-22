@@ -44,9 +44,10 @@ type Response struct {
 }
 
 type Metadata struct {
-	UsedContext []string `json:"used_context,omitempty"`
-	Provider    string   `json:"provider,omitempty"`
-	Model       string   `json:"model,omitempty"`
+	UsedContext []string      `json:"used_context,omitempty"`
+	Sections    []SectionInfo `json:"sections,omitempty"`
+	Provider    string        `json:"provider,omitempty"`
+	Model       string        `json:"model,omitempty"`
 }
 
 type CompletionRequest struct {

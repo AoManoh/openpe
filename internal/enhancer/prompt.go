@@ -3,58 +3,161 @@ package enhancer
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 const charsPerTokenApprox = 4
 
-func buildUserPrompt(req Request) (string, []string, []string) {
+type promptSection struct {
+	name        string
+	content     string
+	usedContext string
+	required    bool
+}
+
+func buildUserPrompt(req Request) (string, []string, []string, []SectionInfo) {
+	sections := promptSections(req)
+	user, infos, warnings := assemblePrompt(sections, req.Options.MaxContextTokens)
+	used := usedContexts(sections, infos)
+	return user, used, warnings, infos
+}
+
+func promptSections(req Request) []promptSection {
+	var sections []promptSection
+
+	sections = appendSection(sections, sectionOriginalPrompt, formatSection("Original prompt", req.Prompt), "", true)
+	sections = appendSection(sections, sectionTargetClient, formatSection("Target client", req.Client), "", true)
+	sections = appendSection(sections, sectionMode, formatSection("Mode", req.Mode), "", true)
+	sections = appendSection(sections, sectionWorkspace, formatSection("Workspace", req.CWD), "", true)
+	sections = appendSection(sections, sectionEnhancementContract, formatList("Enhancement contract", compatibilityGuidance(req)), "", true)
+	sections = appendSection(sections, sectionRules, formatList("Rules", req.Rules), "rules", false)
+	sections = appendSection(sections, sectionGuidelines, formatList("Guidelines", req.Guidelines), "guidelines", false)
+	sections = appendSection(sections, sectionHistory, formatHistory(req.History), "history", false)
+	sections = appendSection(sections, sectionContextFiles, formatFiles(req.Context.Files), "context.files", false)
+	sections = appendSection(sections, sectionContextRetrieval, formatList("Retrieved context", req.Context.Retrieval), "context.retrieval", false)
+	sections = appendSection(sections, sectionFinalInstruction, "\nRewrite the original prompt now. Return only the enhanced prompt.\n", "", true)
+
+	return sections
+}
+
+func appendSection(sections []promptSection, name string, content string, usedContext string, required bool) []promptSection {
+	if content == "" {
+		return sections
+	}
+	return append(sections, promptSection{
+		name:        name,
+		content:     content,
+		usedContext: usedContext,
+		required:    required,
+	})
+}
+
+func assemblePrompt(sections []promptSection, maxContextTokens int) (string, []SectionInfo, []string) {
 	var b strings.Builder
-	var used []string
+	var infos []SectionInfo
 	var warnings []string
 
-	writeSection(&b, "Original prompt", req.Prompt)
-	if value := strings.TrimSpace(req.Client); value != "" {
-		writeSection(&b, "Target client", value)
-	}
-	if value := strings.TrimSpace(req.Mode); value != "" {
-		writeSection(&b, "Mode", value)
-	}
-	if value := strings.TrimSpace(req.CWD); value != "" {
-		writeSection(&b, "Workspace", value)
-	}
-	writeList(&b, "Enhancement contract", compatibilityGuidance(req))
-	if len(req.Rules) > 0 {
-		used = append(used, "rules")
-		writeList(&b, "Rules", req.Rules)
-	}
-	if len(req.Guidelines) > 0 {
-		used = append(used, "guidelines")
-		writeList(&b, "Guidelines", req.Guidelines)
-	}
-	if len(req.History) > 0 {
-		used = append(used, "history")
-		writeHistory(&b, req.History)
-	}
-	if len(req.Context.Files) > 0 {
-		used = append(used, "context.files")
-		writeFiles(&b, req.Context.Files)
-	}
-	if len(req.Context.Retrieval) > 0 {
-		used = append(used, "context.retrieval")
-		writeList(&b, "Retrieved context", req.Context.Retrieval)
-	}
-
-	b.WriteString("\nRewrite the original prompt now. Return only the enhanced prompt.\n")
-
-	user := b.String()
-	if req.Options.MaxContextTokens > 0 {
-		limit := req.Options.MaxContextTokens * charsPerTokenApprox
-		if len(user) > limit {
-			user = user[:limit] + "\n\n[openPE warning: context was truncated to fit max_context_tokens]\n"
-			warnings = append(warnings, "context truncated to max_context_tokens")
+	limit := 0
+	remaining := 0
+	if maxContextTokens > 0 {
+		limit = maxContextTokens * charsPerTokenApprox
+		remaining = limit - requiredLength(sections)
+		if remaining < 0 {
+			warnings = append(warnings, "max_context_tokens is smaller than required prompt sections; preserved original prompt and enhancement contract")
 		}
 	}
-	return user, used, warnings
+
+	truncatedContext := false
+	for _, section := range sections {
+		content := section.content
+		truncated := false
+
+		if limit > 0 && !section.required {
+			switch {
+			case remaining <= 0:
+				content = ""
+				truncated = true
+			case runeLen(content) > remaining:
+				content = truncateRunes(content, remaining)
+				truncated = true
+				remaining = 0
+			default:
+				remaining -= runeLen(content)
+			}
+			if truncated {
+				truncatedContext = true
+			}
+		}
+
+		if content != "" {
+			b.WriteString(content)
+		}
+		infos = append(infos, SectionInfo{
+			Name:      section.name,
+			Length:    runeLen(content),
+			Truncated: truncated,
+		})
+	}
+
+	if truncatedContext {
+		warnings = append(warnings, "context truncated to max_context_tokens")
+	}
+
+	return b.String(), infos, warnings
+}
+
+func usedContexts(sections []promptSection, infos []SectionInfo) []string {
+	included := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		if info.Length > 0 {
+			included[info.Name] = true
+		}
+	}
+
+	seen := make(map[string]bool)
+	var used []string
+	for _, section := range sections {
+		if section.usedContext == "" || !included[section.name] || seen[section.usedContext] {
+			continue
+		}
+		used = append(used, section.usedContext)
+		seen[section.usedContext] = true
+	}
+	return used
+}
+
+func requiredLength(sections []promptSection) int {
+	total := 0
+	for _, section := range sections {
+		if section.required {
+			total += runeLen(section.content)
+		}
+	}
+	return total
+}
+
+func runeLen(value string) int {
+	return utf8.RuneCountInString(value)
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if runeLen(value) <= limit {
+		return value
+	}
+	var b strings.Builder
+	b.Grow(limit)
+	count := 0
+	for _, r := range value {
+		if count >= limit {
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	return b.String()
 }
 
 func compatibilityGuidance(req Request) []string {
@@ -100,27 +203,37 @@ func isIDEMode(mode string) bool {
 	}
 }
 
-func writeSection(b *strings.Builder, title string, value string) {
+func formatSection(title string, value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return
+		return ""
 	}
-	fmt.Fprintf(b, "\n## %s\n%s\n", title, value)
+	return fmt.Sprintf("\n## %s\n%s\n", title, value)
 }
 
-func writeList(b *strings.Builder, title string, values []string) {
-	b.WriteString("\n## " + title + "\n")
+func formatList(title string, values []string) string {
+	var items []string
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
+		if value != "" {
+			items = append(items, value)
 		}
-		fmt.Fprintf(b, "- %s\n", value)
 	}
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n## " + title + "\n")
+	for _, value := range items {
+		fmt.Fprintf(&b, "- %s\n", value)
+	}
+	return b.String()
 }
 
-func writeHistory(b *strings.Builder, history []Message) {
+func formatHistory(history []Message) string {
+	var b strings.Builder
 	b.WriteString("\n## Conversation history\n")
+	wrote := false
 	for _, msg := range history {
 		role := strings.TrimSpace(msg.Role)
 		if role == "" {
@@ -130,12 +243,19 @@ func writeHistory(b *strings.Builder, history []Message) {
 		if content == "" {
 			continue
 		}
-		fmt.Fprintf(b, "[%s] %s\n", role, content)
+		fmt.Fprintf(&b, "[%s] %s\n", role, content)
+		wrote = true
 	}
+	if !wrote {
+		return ""
+	}
+	return b.String()
 }
 
-func writeFiles(b *strings.Builder, files []ContextFile) {
+func formatFiles(files []ContextFile) string {
+	var b strings.Builder
 	b.WriteString("\n## Context files\n")
+	wrote := false
 	for _, file := range files {
 		content := strings.TrimSpace(file.Content)
 		if content == "" {
@@ -145,6 +265,11 @@ func writeFiles(b *strings.Builder, files []ContextFile) {
 		if path == "" {
 			path = "unnamed"
 		}
-		fmt.Fprintf(b, "### %s\n%s\n", path, content)
+		fmt.Fprintf(&b, "### %s\n%s\n", path, content)
+		wrote = true
 	}
+	if !wrote {
+		return ""
+	}
+	return b.String()
 }

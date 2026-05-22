@@ -45,7 +45,7 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 		req.Context.Retrieval = append(req.Context.Retrieval, retrieved...)
 	}
 
-	user, usedContext, warnings := buildUserPrompt(req)
+	user, usedContext, warnings, sections := buildUserPrompt(req)
 	out, err := s.provider.Complete(ctx, CompletionRequest{
 		System: systemPrompt,
 		User:   user,
@@ -62,6 +62,7 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 		Warnings:       warnings,
 		Metadata: Metadata{
 			UsedContext: usedContext,
+			Sections:    sections,
 			Provider:    out.Provider,
 			Model:       out.Model,
 		},
