@@ -400,8 +400,10 @@ client / hook / HTTP
 | `internal/adapters/preview` | Markdown 预览包装 |
 | `internal/adapters/delivery` | 剪贴板复制 + 双缓存（Markdown 预览 + 纯文本）+ 失败 UX 文案的统一交付层，三方 hook 共用 |
 | `internal/config` | `.env` 与环境变量读取 |
-| `internal/server` | HTTP API 与健康检查 |
+| `internal/server` | HTTP API、bearer 鉴权、CORS 中间件、`/v1/info` 端点、lifecycle descriptor |
+| `internal/integration` | IDE patch installer 与 openpe-server 的握手契约：`LocalServerDescriptor`、token 工具、`BundlePatcher` |
 | `extensions/vscode-openpe` | VS Code 兼容 VSIX 插件；调用 CLI/HTTP，负责 IDE 侧输入采集、预览、复制、插入和替换 |
+| `extensions/openpe-windsurf-patch` | **实验性** Windsurf bundle 注入式安装器（独立 MIT 子项目，默认禁用，用户自担风险） |
 
 ### 增强契约（开发者参考）
 
