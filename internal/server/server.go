@@ -1,15 +1,22 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/AoManoh/openpe/internal/enhancer"
 )
 
 type Handler struct {
-	service *enhancer.Service
+	service  *enhancer.Service
+	errorLog *log.Logger
 }
 
 // Options configures the HTTP server handler. The zero value preserves the
@@ -30,6 +37,9 @@ type Options struct {
 	// the other Options fields; callers should leave them blank. Version,
 	// ListenAddr, and StartedAt are caller-supplied.
 	Info ServerInfo
+	// ErrorLog receives full internal / upstream errors together with the
+	// request_id returned to the client. Nil disables handler-level logging.
+	ErrorLog io.Writer
 }
 
 // New returns a server handler with no authentication and no CORS handling.
@@ -48,7 +58,7 @@ func New(service *enhancer.Service) http.Handler {
 // browser preflight (OPTIONS) requests succeed without an Authorization
 // header; auth then guards the actual data routes.
 func NewWithOptions(service *enhancer.Service, opts Options) http.Handler {
-	h := &Handler{service: service}
+	h := &Handler{service: service, errorLog: newErrorLogger(opts.ErrorLog)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.health)
 	mux.HandleFunc("/v1/prompt-enhance", h.promptEnhance)
@@ -78,7 +88,9 @@ func (h *Handler) promptEnhance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.service == nil {
-		writeError(w, http.StatusInternalServerError, "enhancer service is not configured")
+		requestID := newRequestID()
+		h.logError(r, requestID, http.StatusInternalServerError, errors.New("enhancer service is not configured"))
+		writeErrorWithRequestID(w, http.StatusInternalServerError, "internal server error", requestID)
 		return
 	}
 	defer r.Body.Close()
@@ -96,7 +108,9 @@ func (h *Handler) promptEnhance(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, validation.Error())
 			return
 		}
-		writeError(w, http.StatusBadGateway, err.Error())
+		requestID := newRequestID()
+		h.logError(r, requestID, http.StatusBadGateway, err)
+		writeErrorWithRequestID(w, http.StatusBadGateway, "prompt enhancement failed", requestID)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -109,5 +123,47 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	writeErrorWithRequestID(w, status, message, "")
+}
+
+func writeErrorWithRequestID(w http.ResponseWriter, status int, message string, requestID string) {
+	if requestID != "" {
+		w.Header().Set("x-request-id", requestID)
+	}
+	writeJSON(w, status, errorResponse{Error: message, RequestID: requestID})
+}
+
+type errorResponse struct {
+	Error     string `json:"error"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+func newErrorLogger(w io.Writer) *log.Logger {
+	if w == nil {
+		return nil
+	}
+	return log.New(w, "", log.LstdFlags)
+}
+
+func (h *Handler) logError(r *http.Request, requestID string, status int, err error) {
+	if h.errorLog == nil {
+		return
+	}
+	path := ""
+	if r != nil && r.URL != nil {
+		path = r.URL.Path
+	}
+	method := ""
+	if r != nil {
+		method = r.Method
+	}
+	h.errorLog.Printf("request_id=%s method=%s path=%s status=%d error=%v", requestID, method, path, status, err)
+}
+
+func newRequestID() string {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err == nil {
+		return hex.EncodeToString(data[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
 }
