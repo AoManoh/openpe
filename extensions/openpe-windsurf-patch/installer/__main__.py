@@ -16,6 +16,7 @@ no mutating operation runs without an explicit user acknowledgement.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -160,6 +161,33 @@ def _load_inject_payload() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def _build_payload_prelude(descriptor: LocalServerDescriptor) -> str:
+    """Render the ``globalThis.__openpe`` bootstrap injected before inject.js.
+
+    ``inject/src/auth.ts`` reads ``window.__openpe`` for the live server
+    base_url / token, and ``inject/src/index.ts`` silently aborts when
+    either field is missing. Without this prelude the inject IIFE would
+    load on every Windsurf launch but never render the button — install
+    must snapshot the descriptor into the bundle.
+
+    Caveat: this embeds the bearer token into the on-disk bundle. When
+    openpe-server is restarted with a new token (the default ``ephemeral
+    (lifecycle auto-generated)`` mode), re-run ``installer install`` so
+    the bundle picks up the fresh token. ``uninstall`` byte-restores the
+    pre-install bundle.
+    """
+    config = {
+        "baseUrl": descriptor.base_url,
+        "token": descriptor.token,
+        "version": descriptor.version or "unknown",
+    }
+    return (
+        "/* === OPENPE-BOOTSTRAP === */\n"
+        "/* rewritten by installer at install time; do not edit by hand */\n"
+        f"globalThis.__openpe = {json.dumps(config, ensure_ascii=False)};\n"
+    )
+
+
 def _find_latest_backup(backup_dir: Path, bundle_name: str) -> Optional[Path]:
     """Return the most recent ``<bundle>.<ts>.original`` snapshot, or None."""
     if not backup_dir.is_dir():
@@ -275,8 +303,10 @@ def _cmd_install(args: argparse.Namespace) -> int:
             product_backup = backup_product_json(paths.product_file, paths.backup_dir)
             sys.stderr.write(f"  ✓ backup bundle  → {bundle_backup}\n")
             sys.stderr.write(f"  ✓ backup product → {product_backup}\n")
-        inject_bundle(paths.bundle_file, payload_path.read_text(encoding="utf-8"))
-        sys.stderr.write("  ✓ injected payload into bundle\n")
+        prelude = _build_payload_prelude(descriptor)
+        payload_text = payload_path.read_text(encoding="utf-8")
+        inject_bundle(paths.bundle_file, prelude + payload_text)
+        sys.stderr.write("  ✓ injected payload into bundle (bootstrap + inject.js)\n")
         patch_product_json(paths.product_file, bundle_relpath=DEFAULT_BUNDLE_RELPATH)
         sys.stderr.write("  ✓ patched product.json (checksum entry removed)\n")
     except (BundleError, ChecksumError) as exc:
