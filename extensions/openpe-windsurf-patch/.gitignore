@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg
+.venv/
+venv/
+
+# inject/ build artifacts (esbuild output, lockfiles for the inject sub-tree)
+inject/dist/
+inject/node_modules/
+
+# Per-installation backup snapshots; reproducible from the live IDE and
+# huge, so we never commit them.
+backup/

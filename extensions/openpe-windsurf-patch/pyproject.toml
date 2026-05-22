@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openpe-windsurf-patch"
+version = "0.1.0.dev0"
+description = "Experimental Windsurf IDE bundle patch installer for openPE"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [{name = "openPE contributors"}]
+keywords = ["openpe", "windsurf", "patch", "installer", "experimental"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
+# Intentionally no runtime dependencies: stdlib only. Keeps the install
+# footprint small and removes supply-chain risk for a tool that modifies
+# user binaries.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/AoManoh/openpe"
+Repository = "https://github.com/AoManoh/openpe"
+Issues = "https://github.com/AoManoh/openpe/issues"
+
+[project.scripts]
+openpe-windsurf-patch = "installer.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["installer*"]
+exclude = ["tests*", "inject*", "docs*", "scripts*"]
