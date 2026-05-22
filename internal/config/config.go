@@ -23,6 +23,9 @@ const (
 
 	DefaultCodexHistoryMaxMessages = 12
 	DefaultCodexHistoryMaxChars    = 12000
+
+	DefaultClaudeTranscriptMaxMessages = 12
+	DefaultClaudeTranscriptMaxChars    = 12000
 )
 
 type Config struct {
@@ -34,6 +37,7 @@ type Config struct {
 	Language   string
 	Openace    OpenaceConfig
 	Codex      CodexConfig
+	Claude     ClaudeConfig
 	Server     ServerConfig
 }
 
@@ -44,6 +48,16 @@ type CodexConfig struct {
 type CodexHistoryConfig struct {
 	Enabled     bool
 	Home        string
+	MaxMessages int
+	MaxChars    int
+}
+
+type ClaudeConfig struct {
+	Transcript ClaudeTranscriptConfig
+}
+
+type ClaudeTranscriptConfig struct {
+	Enabled     bool
 	MaxMessages int
 	MaxChars    int
 }
@@ -116,6 +130,13 @@ func Load() Config {
 				Home:        valueFromAnyEnv([]string{"OPENPE_CODEX_HOME", "CODEX_HOME"}, fileEnv),
 				MaxMessages: intFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_MAX_MESSAGES", fileEnv), DefaultCodexHistoryMaxMessages),
 				MaxChars:    intFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_MAX_CHARS", fileEnv), DefaultCodexHistoryMaxChars),
+			},
+		},
+		Claude: ClaudeConfig{
+			Transcript: ClaudeTranscriptConfig{
+				Enabled:     boolFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_ENABLED", fileEnv), false),
+				MaxMessages: intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES", fileEnv), DefaultClaudeTranscriptMaxMessages),
+				MaxChars:    intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS", fileEnv), DefaultClaudeTranscriptMaxChars),
 			},
 		},
 		Server: ServerConfig{

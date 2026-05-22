@@ -107,6 +107,9 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_CODEX_HOME` | `CODEX_HOME` 或 `~/.codex` | Codex 本地数据目录，仅在 Codex history 启用时使用 |
 | `OPENPE_CODEX_HISTORY_MAX_MESSAGES` | `12` | Codex session history 注入的最近消息数上限 |
 | `OPENPE_CODEX_HISTORY_MAX_CHARS` | `12000` | Codex session history 注入的字符预算上限 |
+| `OPENPE_CLAUDE_TRANSCRIPT_ENABLED` | `false` | 是否允许 Claude hook 读取 Claude Code 提供的 `transcript_path` 并注入 `Request.History` |
+| `OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES` | `12` | Claude transcript 注入的最近消息数上限 |
+| `OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS` | `12000` | Claude transcript 注入的字符预算上限 |
 | `OPENPE_OPENACE_ENABLED` | `false` | 是否启用 Openace 代码检索上下文 |
 | `OPENPE_OPENACE_ADDR` | `127.0.0.1:8765` | Openace daemon 地址；也可沿用 `OPENACE_DAEMON_ADDR` |
 | `OPENPE_OPENACE_TOKEN` | 空 | Openace daemon token；也可沿用 `OPENACE_DAEMON_TOKEN` |
@@ -201,6 +204,7 @@ openpe claude hook install --dry-run
 
 **关键注意事项**：
 
+- Claude transcript 默认不读取。若要让 `pe` 理解当前 Claude Code 对话里的“选项一”“方案A”等引用，可在 hook dotenv 中设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=true`。openPE 只读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`；若 transcript 缺失、不可读或其中 `cwd` 与 hook 当前 `cwd` 不一致，则不注入历史。
 - Claude Code `--print` headless 模式会执行 hook，但**不像交互式 TUI 一样稳定展示被阻断 feedback**；调试请用交互式模式。
 - Claude Code 自身调哪个模型由 Claude Code 决定，openPE 只负责增强 prompt。若想让 Claude Code 走 Anthropic-compatible 第三方网关：
 

@@ -28,6 +28,7 @@ type HookOptions struct {
 	CWD      string
 	Language string
 	Timeout  time.Duration
+	History  []enhancer.Message
 }
 
 type HookOutput struct {
@@ -72,10 +73,11 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		defer cancel()
 	}
 	resp, err := service.Enhance(ctx, enhancer.Request{
-		Prompt: rawPrompt,
-		Client: valueOrDefault(opts.Client, "claude-code"),
-		CWD:    cwd,
-		Mode:   valueOrDefault(opts.Mode, "agent"),
+		Prompt:  rawPrompt,
+		Client:  valueOrDefault(opts.Client, "claude-code"),
+		CWD:     cwd,
+		Mode:    valueOrDefault(opts.Mode, "agent"),
+		History: opts.History,
 	})
 	if err != nil {
 		return HookOutput{}, err

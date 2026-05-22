@@ -19,6 +19,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
 	"github.com/AoManoh/openpe/internal/config"
+	claudetranscript "github.com/AoManoh/openpe/internal/context/claudetranscript"
 	codexhistory "github.com/AoManoh/openpe/internal/context/codexhistory"
 	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
@@ -509,14 +510,17 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 		return 0
 	}
 	overrideCWD := ""
-	if strings.TrimSpace(input.CWD) == "" {
+	effectiveCWD := strings.TrimSpace(input.CWD)
+	if effectiveCWD == "" {
 		workingDir, err := getwd()
 		if err != nil {
 			fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("get cwd: %v", err), cfg.Language))
 			return 2
 		}
 		overrideCWD = workingDir
+		effectiveCWD = workingDir
 	}
+	history := claudeTranscriptHistory(input.TranscriptPath, effectiveCWD, cfg)
 	provider, err := newProvider(openai.Config{
 		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
 		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
@@ -538,6 +542,7 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 		CWD:      overrideCWD,
 		Language: cfg.Language,
 		Timeout:  timeoutOrDefault(*timeout),
+		History:  history,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
@@ -552,6 +557,20 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 	})
 	fmt.Fprintln(stderr, delivery.HookStatus(result, cfg.Language, "openpe claude hook last --prompt"))
 	return 2
+}
+
+func claudeTranscriptHistory(transcriptPath string, cwd string, cfg config.Config) []enhancer.Message {
+	if !cfg.Claude.Transcript.Enabled {
+		return nil
+	}
+	result, err := claudetranscript.New(claudetranscript.Options{
+		MaxMessages: cfg.Claude.Transcript.MaxMessages,
+		MaxChars:    cfg.Claude.Transcript.MaxChars,
+	}).Retrieve(transcriptPath, cwd)
+	if err != nil {
+		return nil
+	}
+	return result.Messages
 }
 
 func runClaudeHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
