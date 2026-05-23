@@ -17,8 +17,9 @@
  * plaintext.
  *
  * The reverse-engineered byte layout was first published by
- * windsurf-enhance (WSE) under the GPLv3 reference snapshot at
- * ``.windsurf-enhance-ref/windsurf-enhance-v1.0.1/src/inject.js``. We
+ * windsurf-enhance (WSE) under the GPLv3. The original payload is kept
+ * locally as ``extensions/windsurf-enhance-v1.0.1.zip`` (gitignored —
+ * unzip into any scratch dir to inspect ``src/inject.js``). We
  * re-implement the parser here in TypeScript so the openPE inject keeps
  * its own dependency surface (no runtime imports of WSE code) while
  * matching the schema WSE validated on Windsurf 1.110.x.
