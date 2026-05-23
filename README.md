@@ -129,7 +129,9 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 
 ### Openace 代码检索上下文
 
-Openace 是可选 context provider。启用后，openPE 会在调用 prompt rewrite 模型前，基于 `prompt`、目标客户端、模式和 `cwd` 向本机 Openace daemon `POST /v1/retrieve` 发起一次代码检索，并把返回内容写入 canonical request 的 `context.retrieval`。如果调用方已经显式传入 `context.retrieval`，openPE 不会重复检索。
+Openace 是**可选** context provider，**不是 openPE 的必选依赖**——未启用时 openPE 走完整的 prompt rewrite 流程，只是 `context.retrieval` 为空。引入它的目的是：让 prompt enhancement 阶段能在用户允许的范围内基于代码事实做更准确的改写——包括项目设计理念、技术决策、历史上下文、ADR/决策文章和关键调用链等——而不是把 openPE 的核心能力绑定到 Openace。
+
+启用后，openPE 会在调用 prompt rewrite 模型前，基于 `prompt`、目标客户端、模式和 `cwd` 向本机 Openace daemon `POST /v1/retrieve` 发起一次代码检索，并把返回内容写入 canonical request 的 `context.retrieval`。如果调用方已经显式传入 `context.retrieval`，openPE 不会重复检索。
 
 ```bash
 OPENPE_OPENACE_ENABLED=true
@@ -252,28 +254,24 @@ openpe windsurf hook install --dry-run
 - Windsurf 公开 hook 协议仅证明可阻断原 prompt，**无法替换 Cascade 输入框内容**。openPE 因此采用"阻断 + 缓存 + 复制"模式。
 - Windsurf hook 子进程**没有控制 TTY**，OSC52 剪贴板兜底**必然失败**。本地命令（`wl-copy` / `xclip` / `pbcopy` / `clip.exe`）可用时复制仍能成功；不可用时按 stderr 提示从 `last-prompt.txt` 文件取回。详见 [注意事项与已知限制](#注意事项与已知限制)。
 
-### VS Code / Windsurf / Cursor VSIX 插件
+### VSIX 编辑器命令路径（已删除）
 
-openPE 也提供一个 VS Code 兼容插件初版，面向 Windsurf、Cursor、VS Code 等现代 IDE 的普通编辑器场景。它不是 Chat / Composer / Cascade 的 pre-submit hook，不承诺替换 IDE 原生聊天输入框；它负责在 IDE 内采集选区、当前文件或用户输入，调用本地 openPE，并把增强结果展示给用户。
+曾经有一个 VS Code / Windsurf / Cursor 兼容的 VSIX 编辑器命令插件（`extensions/vscode-openpe/`），通过命令面板和右键菜单触发增强。该路径已在 `extensions/openpe-windsurf-patch/` 注入方案落地后**整目录删除**。
 
-```bash
-cd extensions/vscode-openpe
-npm install
-npm run compile
-npm run package
-```
+删除原因：
 
-生成的 `vscode-openpe-*.vsix` 可手动安装到兼容 VSIX 的 IDE。常用命令：
+- VSIX 通过命令面板 / 右键菜单 / 编辑器选区触发，**无法注入或替换** IDE 原生 Chat / Composer / Cascade 的提交内容；增强结果只能复制到剪贴板、展示在 webview 或写回普通编辑器。
+- 受 VS Code Extension API 边界限制，**没有公开通道**能写入 IDE 私有聊天输入框，用户仍需手动复制粘贴。
+- 注入方案（见下一节 [Windsurf 实验性 openPE logo 按钮集成](#windsurf-实验性-openpe-logo-按钮集成)）已经证实可以**直接在 Cascade 输入框旁加按钮、把增强结果写回输入框**，覆盖 VSIX 路径的核心使用场景且 UX 显著更好。
+- 终端 CLI 用户继续走 hook 方案（`openpe codex|claude|windsurf hook install`），不需要任何 IDE 插件。
 
-- `openPE: Enhance Prompt`
-- `openPE: Enhance Selection`
-- `openPE: Enhance Current File`
-
-默认传输方式是 `openpe enhance --json`。如果需要把当前文件内容作为结构化上下文传给 core，可启动 `openpe-server` 并把插件配置 `openpe.transport` 改为 `http`。更多说明见 [extensions/vscode-openpe/README.md](extensions/vscode-openpe/README.md)。
+历史源码可通过 `git log -- extensions/vscode-openpe/` 查阅。
 
 ### Windsurf 实验性 openPE logo 按钮集成
 
-`extensions/openpe-windsurf-patch/` 是独立的实验性 bundle patcher，会修改 Windsurf Electron bundle，在 Cascade 输入区旁注入 openPE logo Enhance 按钮。按钮图案复用 `extensions/vscode-openpe/media/openpe-icon.svg` 的 SVG 设计，并在注入 payload 中内联，避免依赖 VSIX 资源路径。它不是默认推荐路径，存在 EULA、签名、升级覆盖和私有 DOM 选择器风险；不能接受这些风险时，请继续使用 `openpe windsurf hook install` 或 VSIX 插件。
+`extensions/openpe-windsurf-patch/` 是独立的实验性 bundle patcher，会修改 Windsurf Electron bundle，在 Cascade 输入区旁注入 openPE logo Enhance 按钮。按钮 SVG 图案已 inline 到 `inject/src/button.ts`，注入 payload 完全自包含，不依赖任何外部 SVG 文件。它不是默认推荐路径，存在 EULA、签名、升级覆盖和私有 DOM 选择器风险；不能接受这些风险时，请改用 `openpe windsurf hook install` hook 方案。
+
+> **平台验证状态**：当前**只在 Windows 本地 Windsurf 端到端验证过**。`installer/paths.py` 的代码层面对 macOS（`/Applications/Windsurf.app`）和 Linux（`/opt/Windsurf` 等）都有路径探测分支，但**尚未做端到端验证**，相关 codesign / 权限 / DOM 适配可能需要进一步调整。**Remote 场景明确不支持**——Windsurf IDE 在 Windows/macOS 本地运行，remote Linux 服务器找不到本地 IDE bundle，无法完成注入。
 
 按钮路径依赖本地 `openpe-server`：
 
@@ -474,7 +472,6 @@ client / hook / HTTP
 | `internal/config` | `.env` 与环境变量读取 |
 | `internal/server` | HTTP API、bearer 鉴权、CORS 中间件、`/v1/info` 端点、lifecycle descriptor |
 | `internal/integration` | IDE patch installer 与 openpe-server 的握手契约：`LocalServerDescriptor`、token 工具、`BundlePatcher` |
-| `extensions/vscode-openpe` | VS Code 兼容 VSIX 插件；调用 CLI/HTTP，负责 IDE 侧输入采集、预览、复制、插入和替换 |
 | `extensions/openpe-windsurf-patch` | **实验性** Windsurf bundle 注入式安装器（独立 MIT 子项目，默认禁用，用户自担风险） |
 
 ### 增强契约（开发者参考）
@@ -504,7 +501,6 @@ client / hook / HTTP
 
 - 不代理完整 agent chat / completion 请求；只在 prompt 进入宿主前做一次改写。
 - 不保存长期会话状态；缓存只保留每个客户端最近一次 hook 的预览和纯文本。
-- 不复刻 Augment Code 或任何商用工具的私有 prompt / 后端逻辑。
 - 不把 Openace 作为必选依赖；Openace 只作为显式启用的可选 context provider，不承载 prompt rewrite 核心逻辑。
 
 ## 开发与贡献

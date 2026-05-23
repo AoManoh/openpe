@@ -31,7 +31,7 @@ npm run check    # tsc --noEmit
 | `src/fs_probe.ts`        | 可选的 P3 诊断探针，验证 Windsurf renderer 能否通过 Node `fs` 读到本地 0600 descriptor。 |
 | `src/client.ts`          | `fetch` 调本地 `POST /v1/prompt-enhance`。有缓存时附带可选的 `history` 字段。 |
 | `src/observer.ts`        | `MutationObserver` 定位 Cascade 输入工具栏并触发注入。 |
-| `src/button.ts`          | openPE logo 按钮的 DOM 创建；样式委托给 `styles.ts`。图标内联自 VSIX `openpe-icon.svg` 的设计，所以修补后的 bundle 在运行时不依赖任何 VSIX 文件。 |
+| `src/button.ts`          | openPE logo 按钮的 DOM 创建；样式委托给 `styles.ts`。图标 SVG 完整 inline 在本文件内（`OPENPE_LOGO_SVG`），模块加载时编码成 data URI，运行时不依赖任何外部 SVG 文件。 |
 | `src/dialog.ts`          | 点击增强流程：读 editor → 调 enhancer → 写回。 |
 | `src/styles.ts`          | 尊重 `var(--vscode-*)` 主题变量的 CSS 变量。 |
 | `src/cascade_context.ts` | 从 IndexedDB trajectory 缓存里镜像当前 Cascade 对话，让 `dialog.ts` 能把最近消息作为 `enhancer.Request.History` 附上。纯 renderer 侧观察；不需要 hook adapter、server 或 enhancer 任何改动。 |

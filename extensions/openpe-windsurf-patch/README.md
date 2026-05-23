@@ -4,7 +4,7 @@
 >
 > 该子项目会**就地修补 Windsurf IDE 的 Electron bundle**，在 Cascade
 > 聊天输入工具栏上注入一个 openPE logo Enhance 按钮。它是**显式
-> opt-in**、**默认关闭**、与 openPE 主 hook 和 VSIX 路径**完全独立**。
+> opt-in**、**默认关闭**、与 openPE 主 hook 路径**完全独立**。
 >
 > 运行 installer 即表示你确认：
 >
@@ -24,8 +24,10 @@
 >
 > **如果以上任何一条无法接受，请改用 openPE 默认集成路径：**
 >
-> - `openpe windsurf hook install`（终端 `pe ...` 关键字）
-> - `extensions/vscode-openpe/` VSIX 插件（命令面板 / 右键菜单）
+> - `openpe windsurf hook install`（终端 `pe ...` 关键字）——跨平台默认推荐。
+>
+> （早期的 VSIX 编辑器命令插件路径 `extensions/vscode-openpe/` 已整目录删除，
+> 历史原因见主仓 README “VSIX 编辑器命令路径” 节。）
 
 ---
 
@@ -38,9 +40,8 @@
 - 注入的 payload 用 `MutationObserver` 监听 Cascade 聊天输入工具栏，在
   Submit 旁边添加一个 openPE logo 按钮，点击后调用**你本地**的
   `openpe-server`（仅 loopback），并把增强后的 prompt 写回 Cascade 输入
-  框。按钮图标的 SVG 设计与
-  `extensions/vscode-openpe/media/openpe-icon.svg` 一致；修补后的 bundle
-  不会在运行时从 VSIX 目录加载资源。
+  框。按钮 SVG 图案已完整 inline 到 `inject/src/button.ts`，注入 payload
+  为自包含，不依赖任何外部 SVG 文件。
 - 不与 `127.0.0.1` 之外的任何地方通信。无 telemetry、无第三方 gate
   server、无商业 license key。
 
@@ -48,8 +49,7 @@
 
 - **不是** WSE（`windsurf-enhance`）的 fork — 不共享代码、不共享 key、
   不共享 server。只借用“修补 bundle 加按钮”这个公开思路。
-- **不是** openPE hook 或 VSIX 路径的替代。那些仍然是 EULA 安全的默认
-  选项。
+- **不是** openPE hook 路径的替代。hook 仍然是 EULA 安全、跨平台稳定的默认选项。
 - **不会**自动更新。Windsurf 升级 ⇒ 重新跑 `install`。
 - **不是** openPE 主 Go build 的一部分。它住在自己的子项目里，有自己的
   Python + Node.js 工具链。
@@ -82,6 +82,14 @@
 - 注入的 payload 会监听 Cascade 工具栏、添加 openPE logo 按钮、调本地
   `POST /v1/prompt-enhance`、预览原文/增强文本、并尽力把增强后的
   prompt 写回 Cascade 输入框。
+- **平台端到端验证状态**：目前**只在 Windows 本地 Windsurf 上验证过完整
+  install → 按钮注入 → 增强 → 回填 → uninstall 流程**。`installer/paths.py`
+  代码层面对 macOS（`/Applications/Windsurf.app`）和 Linux（`/opt/Windsurf`
+  等）都有路径探测分支，但**尚未做端到端验证**，macOS 的 codesign
+  重签、权限处理、bundle 布局差异、以及 Cascade DOM 选择器适配都可能
+  需要进一步调整。**Remote 场景明确不支持**——Windsurf IDE 在
+  Windows/macOS 本地运行，remote Linux 服务器找不到本地 IDE bundle，
+  无法自然完成本地 IDE 注入。
 - 仍然是实验性、默认关闭的，因为它会修改 Windsurf 应用 bundle，并依赖
   Cascade 的私有 DOM 选择器。
 

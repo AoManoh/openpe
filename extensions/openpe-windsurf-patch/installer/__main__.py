@@ -63,10 +63,9 @@ proceeding you acknowledge that you have read the README and accept:
   • Upgrade fragility — every Windsurf update overwrites the patch.
   • No warranty whatsoever.
 
-Default openPE paths that DO NOT carry these risks:
+Default openPE path that DOES NOT carry these risks:
 
   • openpe windsurf hook install         (terminal `pe ...` keyword)
-  • extensions/vscode-openpe/             (VS Code / Windsurf VSIX plugin)
 
 If you accept the risk, re-run with --i-accept-experimental-risk.
 
