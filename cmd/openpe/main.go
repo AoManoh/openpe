@@ -27,6 +27,13 @@ import (
 	"github.com/AoManoh/openpe/internal/providers/openai"
 )
 
+// Version is the build identifier exposed via `openpe --version`. The
+// default "dev" matches `go install ./cmd/openpe` users who do not pass
+// ldflags; release builds should override it with the git tag / commit:
+//
+//	go build -ldflags "-X main.Version=v0.2.0" ./cmd/openpe
+var Version = "dev"
+
 type providerFactory func(openai.Config) (enhancer.Provider, error)
 type commandRunner func(ctx context.Context, name string, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error
 
@@ -52,6 +59,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, new
 		return runWindsurf(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "-h", "--help", "help":
 		printUsage(stdout)
+		return 0
+	case "-v", "--version", "version":
+		fmt.Fprintf(stdout, "openpe %s\n", Version)
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
