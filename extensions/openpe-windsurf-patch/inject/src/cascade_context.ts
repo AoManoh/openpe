@@ -106,9 +106,16 @@ const STEP_TEXT_TRUNCATE = 4000;
 //     trajectory full of giant code blocks) from dwarfing the actual
 //     prompt the user is enhancing. Oldest messages are dropped first
 //     so the most recent context always survives.
-const DEFAULT_MAX_MESSAGES = 32;
-const DEFAULT_MAX_CHARS_PER_MESSAGE = 6000;
-const DEFAULT_MAX_TOTAL_CHARS = 80_000;
+// Exported so `applyHistoryBudget` callers (and tests) can reference the
+// canonical budget shape without recomputing the three integers. The
+// patch installer / hook adapter / dialog NEVER overrides these in the
+// production wire path — they are pure collector-layer empirical
+// tuning, not user-facing knobs. The user-facing token budget is the
+// separate consumer-layer knob `enhancer.Request.Options.MaxContextTokens`
+// (Go side), see AGENTS.md and README §5 "消费层 vs 采集层".
+export const DEFAULT_MAX_MESSAGES = 32;
+export const DEFAULT_MAX_CHARS_PER_MESSAGE = 6000;
+export const DEFAULT_MAX_TOTAL_CHARS = 80_000;
 // describeHistory preview width — small enough to be a sanity peek,
 // large enough to recognise the conversation. Never grows beyond this.
 const PREVIEW_CHARS = 80;
@@ -203,20 +210,92 @@ export function getRecentHistoryWithMeta(
   maxCharsPerMessage: number = DEFAULT_MAX_CHARS_PER_MESSAGE,
   maxTotalChars: number = DEFAULT_MAX_TOTAL_CHARS,
 ): HistoryMeta {
-  const empty: HistoryMeta = {
-    messages: [],
-    source: cachedMessages.length ? historySource : "none",
-    totalChars: 0,
-    roles: { user: 0, assistant: 0 },
-  };
-  if (!cachedMessages.length) return empty;
+  if (!cachedMessages.length) {
+    return {
+      messages: [],
+      source: "none",
+      totalChars: 0,
+      roles: { user: 0, assistant: 0 },
+    };
+  }
   const limit = Math.max(0, maxMessages | 0);
-  if (limit === 0) return empty;
-  const charCap = Math.max(0, maxCharsPerMessage | 0);
-  const totalCap = Math.max(0, maxTotalChars | 0);
+  if (limit === 0) {
+    // Preserve the historical "source label survives even when caller
+    // asked for 0 messages" contract — callers like describeHistory
+    // distinguish "no cache" (source=none) from "cache exists but
+    // budget=0" (source=latest_trajectory).
+    return {
+      messages: [],
+      source: historySource,
+      totalChars: 0,
+      roles: { user: 0, assistant: 0 },
+    };
+  }
+  const trimmed = applyHistoryBudget(cachedMessages, {
+    maxMessages,
+    maxCharsPerMessage,
+    maxTotalChars,
+  });
+  return {
+    messages: trimmed.messages,
+    source: historySource,
+    totalChars: trimmed.totalChars,
+    roles: trimmed.roles,
+  };
+}
 
-  // First pass: tail-slice + per-message truncate.
-  const tail = cachedMessages.slice(-limit);
+/**
+ * Pure budget enforcement for a cached message array.
+ *
+ * Extracted from ``getRecentHistoryWithMeta`` so the two-pass shrinking
+ * algorithm (tail-slice + per-message truncate, then total-budget
+ * oldest-drop) can be unit-tested without driving the IndexedDB hook,
+ * the protobuf parser, or the boot lifecycle. The wrapper above still
+ * owns:
+ *   - "no cached messages" / "limit=0" early-returns whose source label
+ *     depends on module-private state (``cachedMessages``/``historySource``),
+ *   - merging the watcher-owned ``source`` field into the returned
+ *     ``HistoryMeta`` so consumers always see one consistent label.
+ *
+ * Returns a plain shape (no ``source``) because the source label is a
+ * watcher concern, not a budget concern; tests should not have to
+ * fabricate a source to verify budgeting.
+ *
+ * Defaults to ``DEFAULT_HISTORY_BUDGET`` (the production three constants
+ * 32 / 6000 / 80000) so a caller that just wants "enforce the canonical
+ * budget on this array" needs no parameters.
+ */
+export interface HistoryBudget {
+  maxMessages: number;
+  maxCharsPerMessage: number;
+  maxTotalChars: number;
+}
+
+export const DEFAULT_HISTORY_BUDGET: HistoryBudget = {
+  maxMessages: DEFAULT_MAX_MESSAGES,
+  maxCharsPerMessage: DEFAULT_MAX_CHARS_PER_MESSAGE,
+  maxTotalChars: DEFAULT_MAX_TOTAL_CHARS,
+};
+
+export function applyHistoryBudget(
+  messages: readonly CascadeMessage[],
+  budget: HistoryBudget = DEFAULT_HISTORY_BUDGET,
+): {
+  messages: CascadeMessage[];
+  totalChars: number;
+  roles: { user: number; assistant: number };
+} {
+  const limit = Math.max(0, budget.maxMessages | 0);
+  if (limit === 0 || messages.length === 0) {
+    return { messages: [], totalChars: 0, roles: { user: 0, assistant: 0 } };
+  }
+  const charCap = Math.max(0, budget.maxCharsPerMessage | 0);
+  const totalCap = Math.max(0, budget.maxTotalChars | 0);
+
+  // First pass: tail-slice + per-message truncate. Tail-slice keeps the
+  // freshest turns; per-message truncate caps individual giants (e.g.
+  // tool output dumps) so they cannot consume the whole budget alone.
+  const tail = messages.slice(-limit);
   const truncated: CascadeMessage[] = tail.map((m) => ({
     role: m.role,
     content: charCap > 0 ? truncate(m.content, charCap) : m.content,
@@ -224,7 +303,9 @@ export function getRecentHistoryWithMeta(
 
   // Second pass: enforce total budget by dropping oldest first. Keep
   // dropping until total <= cap or only one message remains (we always
-  // ship at least the most recent turn if there is any).
+  // ship at least the most recent turn if there is any), matching the
+  // "freshest context always survives" invariant documented on
+  // getRecentHistoryWithMeta.
   if (totalCap > 0) {
     let total = truncated.reduce((s, m) => s + m.content.length, 0);
     while (total > totalCap && truncated.length > 1) {
@@ -242,12 +323,7 @@ export function getRecentHistoryWithMeta(
     else assistant++;
   }
 
-  return {
-    messages: truncated,
-    source: historySource,
-    totalChars,
-    roles: { user, assistant },
-  };
+  return { messages: truncated, totalChars, roles: { user, assistant } };
 }
 
 /**
