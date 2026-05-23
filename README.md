@@ -33,19 +33,23 @@ openpe -h
 
 ### 2. 配置 OpenAI-compatible endpoint
 
-推荐放在 `~/.config/openpe/.env`（hook 默认从这里加载）：
+**只需 3 个必填变量即可启动**。推荐放在 `~/.config/openpe/.env`（hook 默认从这里加载）：
 
 ```bash
 mkdir -p ~/.config/openpe
 cat > ~/.config/openpe/.env <<'EOF'
+# 必填 1：OpenAI-compatible 网关 base URL（无默认值，必须显式填写）
 OPENPE_BASE_URL=https://api.openai.com
+# 必填 2：对应网关的 API key
 OPENPE_API_KEY=replace-with-your-api-key
+# 必填 3：模型名，如 gpt-4o-mini / qwen-max / deepseek-chat
 OPENPE_MODEL=gpt-4o-mini
-OPENPE_LANGUAGE=zh
 EOF
 ```
 
-`OPENPE_BASE_URL` 支持 OpenAI 官方、阿里云、火山引擎、Openace/Grok2api 等任意 OpenAI-compatible 网关；带或不带 `/v1` 结尾都可以。
+其他字段（语言、超时、缓存路径、Openace、server token 等）都有合理默认，**不填也能跑**；完整可选项见 [服务配置 · 环境变量](#环境变量) 或 [`.env.example`](.env.example)。
+
+> `OPENPE_BASE_URL` 请明确填你实际使用的网关地址——openPE **没有**内置默认 OpenAI 官方 URL，例中的 `https://api.openai.com` 只是占位例。支持阿里云 DashScope、火山引擎、自建网关等任意 OpenAI-compatible 地址；带或不带 `/v1` 结尾都可以。
 
 验证 endpoint 连通：
 
@@ -63,12 +67,31 @@ openpe claude hook install     # → ~/.claude/settings.json
 openpe windsurf hook install   # → ~/.codeium/windsurf/hooks.json
 ```
 
-> Codex 装完还需要在 TUI 内执行 `/hooks` 并 trust；Windsurf 装完建议重启 IDE。详见 [客户端配置](#客户端配置)。
+> Codex 装完还需要在 TUI 内执行 `/hooks` 并 trust；Windsurf 装完建议重启 IDE。详见 [客户端配置参考](#客户端配置参考)。
 
 ### 4. 在客户端对话框输入 `pe <你的需求>`
 
+触发关键字接受 3 种格式（任选其一）：
+
 ```text
 pe 帮我把这个 Go 测试改成 table-driven
+pe:帮我把这个 Go 测试改成 table-driven
+pe：帮我把这个 Go 测试改成 table-driven
+```
+
+`pe:` / `pe：` 半角/全角冒号都识别，方便中文输入法下不切换标点。
+
+实际触发演示（一行原始 prompt → 增强后的可粘贴版本）：
+
+```text
+[你输入]   pe 帮我把这个 Go 测试改成 table-driven
+[stderr]   ✅ 已生成并复制增强提示词到剪贴板，请粘贴使用
+           (cached: ~/.cache/openpe/<client>/last-prompt.txt)
+[Ctrl+V]   请将以下 Go 测试改写为 table-driven 风格：
+           - 保留原有断言语义；
+           - 覆盖现有所有边界条件，新增 cases 至少涵盖
+             nil / 空 / 正常 / error 4 类输入；
+           - 验证：go test -v -run <TestName> ./path/to/pkg
 ```
 
 openPE 会阻断这条原始消息（**不会**发给 LLM），把增强结果复制到系统剪贴板，并给出短状态。
@@ -88,50 +111,99 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 1. `OPENPE_ENV_FILE` 指向的文件（hook 安装时自动注入，见各客户端段）。
 2. 当前工作目录下的 `.env`（裸 CLI 和 server 启动时读取）。
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `OPENPE_BASE_URL` | `https://api.openai.com` | OpenAI-compatible host；带或不带 `/v1` 均可 |
-| `OPENPE_API_KEY` | （必填） | API key |
-| `OPENPE_MODEL` | （必填） | 模型名，如 `gpt-4o-mini`、`qwen-max`、`gpt-5.5` |
-| `OPENPE_LANGUAGE` | `zh` | hook 终端反馈语言：`zh` / `en` |
-| `OPENPE_TIMEOUT` | `60s` | 单次 provider 调用超时（Go duration） |
-| `OPENPE_LISTEN_ADDR` | `127.0.0.1:18980` | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost` |
-| `OPENPE_SERVER_TOKEN` | 空 | 可选 HTTP bearer token；绑定非 loopback 地址时必填 |
-| `OPENPE_SERVER_CORS_ORIGINS` | 空 | 可选 CORS Origin allowlist，逗号分隔；空值禁用 CORS |
-| `OPENPE_SERVER_LIFECYCLE_ENABLED` | `false` | 是否写入本地 server descriptor，供 IDE 注入安装器发现 endpoint/token |
-| `OPENPE_SERVER_DESCRIPTOR_FILE` | `~/.config/openpe/server.json` | lifecycle descriptor 路径覆盖，仅在 lifecycle 启用时使用 |
-| `OPENPE_CACHE_DIR` | `os.UserCacheDir()/openpe`（Linux 通常 `~/.cache/openpe`） | hook 预览与纯文本缓存根目录 |
-| `OPENPE_COPY_COMMAND` | 自动探测 | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`） |
-| `OPENPE_DISABLE_OSC52_CLIPBOARD` | `false` | 禁用 OSC52 剪贴板兜底 |
-| `OPENPE_OSC52_TTY` | `/dev/tty` | OSC52 写入目标 TTY 路径 |
-| `OPENPE_CLAUDE_PROMPT_FALLBACK` | `true` | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制 |
-| `OPENPE_WINDSURF_PROMPT_FALLBACK` | `false` | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长 |
-| `OPENPE_ENV_FILE` | hook 安装时注入 | hook 子进程加载的 dotenv 文件路径 |
-| `OPENPE_CODEX_HISTORY_ENABLED` | `false` | 是否允许 Codex hook 读取本机 Codex session 历史并注入 `Request.History` |
-| `OPENPE_CODEX_HOME` | `CODEX_HOME` 或 `~/.codex` | Codex 本地数据目录，仅在 Codex history 启用时使用 |
-| `OPENPE_CODEX_HISTORY_MAX_MESSAGES` | `12` | Codex session history 注入的最近消息数上限 |
-| `OPENPE_CODEX_HISTORY_MAX_CHARS` | `12000` | Codex session history 注入的字符预算上限 |
-| `OPENPE_CLAUDE_TRANSCRIPT_ENABLED` | `false` | 是否允许 Claude hook 读取 Claude Code 提供的 `transcript_path` 并注入 `Request.History` |
-| `OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES` | `12` | Claude transcript 注入的最近消息数上限 |
-| `OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS` | `12000` | Claude transcript 注入的字符预算上限 |
-| `OPENPE_OPENACE_ENABLED` | `false` | 是否启用 Openace 代码检索上下文 |
-| `OPENPE_OPENACE_ADDR` | `127.0.0.1:8765` | Openace daemon 地址；也可沿用 `OPENACE_DAEMON_ADDR` |
-| `OPENPE_OPENACE_TOKEN` | 空 | Openace daemon token；也可沿用 `OPENACE_DAEMON_TOKEN` |
-| `OPENPE_OPENACE_PROVIDER_PROFILE_ID` | 空 | 可选 ACE provider profile |
-| `OPENPE_OPENACE_MAX_OUTPUT_LENGTH` | `12000` | 单次 Openace 检索结果上限 |
-| `OPENPE_OPENACE_TIMEOUT` | `30s` | 单次 Openace daemon HTTP 调用超时 |
-| `OPENPE_OPENACE_MAX_RETRIES` | `2` | 临时错误最大重试次数，实际总尝试次数为 `1 + max_retries` |
-| `OPENPE_OPENACE_RETRY_BASE_DELAY` | `250ms` | Openace 重试指数退避起始延迟 |
-| `OPENPE_OPENACE_RETRY_MAX_DELAY` | `2s` | Openace 单次重试最大等待 |
-| `OPENPE_OPENACE_RETRY_JITTER` | `100ms` | Openace 重试抖动上限 |
+按“是否必填”分为 3 类。**只要填必填那 3 个就能启动**；其它都是可选。
 
-`.env.example` 含常用模板，可 `cp .env.example ~/.config/openpe/.env` 后改值。
+#### 必填（3 个）
+
+| 变量                | 说明                                                                                                                               |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENPE_BASE_URL` | OpenAI-compatible 网关 base URL。**无默认值，必须显式填写**；带或不带 `/v1` 均可。改成阿里云 / 火山引擎 / 自建网关都可以。 |
+| `OPENPE_API_KEY`  | 对应 base URL 的 API key。                                                                                                         |
+| `OPENPE_MODEL`    | 模型名，如 `gpt-5.4-mini` / `qwen-max` / `deepseek-chat` / `gpt-5.5` 。                                                    |
+
+#### 可选（有默认值，按需覆盖）
+
+| 变量                                | 默认                         | 说明                                                                                    |
+| ----------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------- |
+| `OPENPE_LANGUAGE`                 | `zh`                       | hook 终端反馈语言：`zh` / `en`                                                      |
+| `OPENPE_TIMEOUT`                  | `60s`                      | 单次 provider 调用超时（Go duration）                                                   |
+| `OPENPE_LISTEN_ADDR`              | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost` |
+| `OPENPE_CACHE_DIR`                | `~/.cache/openpe`（Linux） | hook 预览与纯文本缓存根目录                                                             |
+| `OPENPE_COPY_COMMAND`             | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）                         |
+| `OPENPE_DISABLE_OSC52_CLIPBOARD`  | `false`                    | 禁用 OSC52 剪贴板兜底                                                                   |
+| `OPENPE_OSC52_TTY`                | `/dev/tty`                 | OSC52 写入目标 TTY 路径                                                                 |
+| `OPENPE_CLAUDE_PROMPT_FALLBACK`   | `true`                     | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制                   |
+| `OPENPE_WINDSURF_PROMPT_FALLBACK` | `false`                    | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长          |
+| `OPENPE_ENV_FILE`                 | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                       |
+
+#### 按需启用（高级 / 实验性 / 有前置依赖）
+
+<details>
+<summary><b>Codex / Claude 对话 session 读取（<u>默认已启用</u>）</b></summary>
+
+openPE 默认读取当前 Codex / Claude Code 对话上下文，启用满血提示词增强。文件缺失或 `cwd` 不一致时自动 skip，不会出错。仅在需要显式关闭时才需配置下面变量。
+
+| 变量                                      | 默认                           | 说明                                                                                |
+| ----------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------- |
+| `OPENPE_CODEX_HISTORY_ENABLED`          | `true`                       | 是否读取本机 Codex session 历史并注入 `Request.History`；设为 `false` 关闭      |
+| `OPENPE_CODEX_HOME`                     | `CODEX_HOME` 或 `~/.codex` | Codex 本地数据目录                                                                  |
+| `OPENPE_CODEX_HISTORY_MAX_MESSAGES`     | `12`                         | Codex session history 注入的最近消息数上限                                          |
+| `OPENPE_CODEX_HISTORY_MAX_CHARS`        | `12000`                      | Codex session history 注入的字符预算上限                                            |
+| `OPENPE_CLAUDE_TRANSCRIPT_ENABLED`      | `true`                       | 是否读取 Claude `transcript_path` 并注入 `Request.History`；设为 `false` 关闭 |
+| `OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES` | `12`                         | Claude transcript 注入的最近消息数上限                                              |
+| `OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS`    | `12000`                      | Claude transcript 注入的字符预算上限                                                |
+
+</details>
+
+<details>
+<summary><b>Openace 代码检索上下文（默认关闭，有前置依赖）</b></summary>
+
+详见 [Openace 代码检索上下文](#openace-代码检索上下文)（含前置依赖说明）。
+
+| 变量                                   | 默认               | 说明                                                        |
+| -------------------------------------- | ------------------ | ----------------------------------------------------------- |
+| `OPENPE_OPENACE_ENABLED`             | `false`          | 是否启用 Openace 代码检索上下文（启用前须确认 daemon 在跑） |
+| `OPENPE_OPENACE_ADDR`                | `127.0.0.1:8765` | Openace daemon 地址；也可沿用 `OPENACE_DAEMON_ADDR`       |
+| `OPENPE_OPENACE_TOKEN`               | 空                 | Openace daemon token；也可沿用 `OPENACE_DAEMON_TOKEN`     |
+| `OPENPE_OPENACE_PROVIDER_PROFILE_ID` | 空                 | 可选 ACE provider profile                                   |
+| `OPENPE_OPENACE_MAX_OUTPUT_LENGTH`   | `12000`          | 单次 Openace 检索结果上限                                   |
+| `OPENPE_OPENACE_TIMEOUT`             | `30s`            | 单次 Openace daemon HTTP 调用超时                           |
+| `OPENPE_OPENACE_MAX_RETRIES`         | `2`              | 临时错误最大重试次数，实际总尝试次数为 `1 + max_retries`  |
+| `OPENPE_OPENACE_RETRY_BASE_DELAY`    | `250ms`          | Openace 重试指数退避起始延迟                                |
+| `OPENPE_OPENACE_RETRY_MAX_DELAY`     | `2s`             | Openace 单次重试最大等待                                    |
+| `OPENPE_OPENACE_RETRY_JITTER`        | `100ms`          | Openace 重试抖动上限                                        |
+
+</details>
+
+<details>
+<summary><b>openpe-server 高级选项（bearer auth / CORS / lifecycle）</b></summary>
+
+仅 [HTTP 与裸 CLI 调试入口](#http-与裸-cli-调试入口) 和 [Windsurf bundle patch](#windsurf-bundle-patch实验性) 需要。
+
+| 变量                                | 默认                             | 说明                                                                              |
+| ----------------------------------- | -------------------------------- | --------------------------------------------------------------------------------- |
+| `OPENPE_SERVER_TOKEN`             | 空                               | HTTP bearer token；绑定非 loopback 地址时必填；patch 方案推荐固定 token           |
+| `OPENPE_SERVER_CORS_ORIGINS`      | 空                               | CORS Origin allowlist，逗号分隔；空值禁用 CORS                                    |
+| `OPENPE_SERVER_LIFECYCLE_ENABLED` | `false`                        | 是否写 server descriptor 供 IDE installer 发现 endpoint/token；patch 方案必须启用 |
+| `OPENPE_SERVER_DESCRIPTOR_FILE`   | `~/.config/openpe/server.json` | lifecycle descriptor 路径覆盖                                                     |
+
+</details>
+
+完整可选字段参考 [`.env.example`](.env.example)；必填只有 3 个，不要被表中的字段数量吓到。
 
 ### Openace 代码检索上下文
 
-Openace 是**可选** context provider，**不是 openPE 的必选依赖**——未启用时 openPE 走完整的 prompt rewrite 流程，只是 `context.retrieval` 为空。引入它的目的是：让 prompt enhancement 阶段能在用户允许的范围内基于代码事实做更准确的改写——包括项目设计理念、技术决策、历史上下文、ADR/决策文章和关键调用链等——而不是把 openPE 的核心能力绑定到 Openace。
+[Openace](https://github.com/AoManoh/openace-mcp) 是**可选** context provider，**不是 openPE 的必选依赖**——未启用时 openPE 走完整的 prompt rewrite 流程，只是 `context.retrieval` 为空。引入它的目的是：让 prompt enhancement 阶段能在用户允许的范围内基于代码事实做更准确的改写——包括项目设计理念、技术决策、历史上下文、ADR/决策文章和关键调用链等——而不是把 openPE 的核心能力绑定到 Openace。
 
-启用后，openPE 会在调用 prompt rewrite 模型前，基于 `prompt`、目标客户端、模式和 `cwd` 向本机 Openace daemon `POST /v1/retrieve` 发起一次代码检索，并把返回内容写入 canonical request 的 `context.retrieval`。如果调用方已经显式传入 `context.retrieval`，openPE 不会重复检索。
+#### 前置依赖（启用前请确认 3 项缺一不可）
+
+1. **本机已安装并运行 `openace-mcp` daemon**（默认监听 `127.0.0.1:8765`）。项目主页：https://github.com/AoManoh/openace-mcp。
+2. **至少有一个 AI 客户端已接入该 MCP 服务**（Claude Code / Codex / Windsurf 等）。这是为了确保 Openace 已为当前代码域建索引，否则 openPE 发起检索返回为空。
+3. **确认 8765 端口可联** ： `ss -tlnp | grep ':8765 '` 或 `curl -s http://127.0.0.1:8765/health`（如 daemon 提供）。不可联时不要启用，openPE 会返回明确错误而不静默降级。
+
+三项都满足后，才设置 `OPENPE_OPENACE_ENABLED=true` 启用。
+
+#### 启用例
 
 ```bash
 OPENPE_OPENACE_ENABLED=true
@@ -139,13 +211,24 @@ OPENPE_OPENACE_ADDR=127.0.0.1:8765
 openpe enhance --prompt "帮我修复 provider 超时重试" --cwd /path/to/repo
 ```
 
+启用后，openPE 会在调用 prompt rewrite 模型前，基于 `prompt`、目标客户端、模式和 `cwd` 向本机 Openace daemon `POST /v1/retrieve` 发起一次代码检索，并把返回内容写入 canonical request 的 `context.retrieval`。如果调用方已经显式传入 `context.retrieval`，openPE 不会重复检索。
+
 Openace 临时错误只会有限重试：HTTP `408`、`429`、`499`、`5xx`、网络超时和短暂连接错误会按指数退避加抖动重试；`400`、`401`、`403`、`404` 等配置、权限或请求错误不会重试。超过最大重试次数后，openPE 返回清晰错误，不静默降级为无检索上下文。
 
-## 客户端配置
+## 客户端配置参考
 
-所有客户端都以 hook 形式接入；安装一次后在客户端对话框输入 `pe <内容>` 即可触发。
+openPE 支持 **3 种 hook 方案** 和 **1 种实验性 patch 方案**：
 
-### Codex CLI
+| 方案  | 客户端           | 推荐度      | 入口                                                         |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------ |
+| hook  | Codex CLI        | ✅ 推荐     | [Codex CLI hook](#codex-cli-hook)                               |
+| hook  | Claude Code      | ✅ 推荐     | [Claude Code hook](#claude-code-hook)                           |
+| hook  | Windsurf Cascade | ✅ 推荐     | [Windsurf Cascade hook](#windsurf-cascade-hook)                 |
+| patch | Windsurf Cascade | ⚠️ 实验性 | [Windsurf bundle patch（实验性）](#windsurf-bundle-patch实验性) |
+
+hook 方案安装一次后在客户端对话框输入 `pe <内容>` 即可触发；patch 方案则通过 Cascade 输入框旁的按钮触发。
+
+### Codex CLI hook
 
 已验证 Codex CLI `0.132.0`。
 
@@ -163,25 +246,29 @@ openpe codex hook install --env-file /absolute/path/to/.env
 openpe codex hook install --dry-run
 ```
 
-| 选项 | 默认 | 说明 |
-|---|---|---|
-| `--scope` | `user` | `user` → 写 `~/.codex/hooks.json`；`project` → 写 `<cwd>/.codex/hooks.json` |
-| `--path` | 自动 | 显式 hooks.json 路径（覆盖 scope 推断） |
-| `--env-file` | user 模式：`~/.config/openpe/.env`；project 模式：`<cwd>/.env` | hook 子进程加载的 dotenv |
-| `--openpe-bin` | `PATH` 中的 `openpe` 或当前可执行文件 | hook 命令中的 openpe binary 绝对路径 |
-| `--hook-timeout` | `120` | Codex hook 超时秒数 |
+| 选项               | 默认                                                               | 说明                                                                                  |
+| ------------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `--scope`        | `user`                                                           | `user` → 写 `~/.codex/hooks.json`；`project` → 写 `<cwd>/.codex/hooks.json` |
+| `--path`         | 自动                                                               | 显式 hooks.json 路径（覆盖 scope 推断）                                               |
+| `--env-file`     | user 模式：`~/.config/openpe/.env`；project 模式：`<cwd>/.env` | hook 子进程加载的 dotenv                                                              |
+| `--openpe-bin`   | `PATH` 中的 `openpe` 或当前可执行文件                          | hook 命令中的 openpe binary 绝对路径                                                  |
+| `--hook-timeout` | `120`                                                            | Codex hook 超时秒数                                                                   |
+
+触发演示（在 Codex TUI 中输入 `pe <prompt>` 后的反馈）：
+
+![Codex CLI 触发演示](assets/codex-pe-trigger.png)
 
 **关键步骤**：安装或修改后，在 Codex TUI 内执行 `/hooks`，review 并 trust 这个 hook。**Codex 会忽略未信任的 hook**。
 
 **关键注意事项**：
 
-- Codex hook 输入里的 `cwd` 来自当前 Codex session，影响 enhancer 推断项目。处理 openPE 自己时请从 `/home/oh/projects/openPE` 启动 Codex，或用 `codex -C /home/oh/projects/openPE`。
-- Codex session history 默认不读取。若要让 `pe` 理解当前对话里的“选项一”“星桥方案”等引用，可在 hook dotenv 中设置 `OPENPE_CODEX_HISTORY_ENABLED=true`。openPE 会用当前 `pe` 原文从 `~/.codex/history.jsonl` 反查 session id，再读取对应 rollout JSONL 的最近 user/assistant 消息，填入 `enhancer.Request.History`；若无法唯一匹配或 `cwd` 不一致，则不注入历史。
+- Codex hook 输入里的 `cwd` 来自当前 Codex session，影响 enhancer 推断项目。处理 跨域项目时，请注意工作区路径为跨域项目路径，如 `~/projects/xxx` 。
+- **Codex session history 默认读取**（启用满血提示词增强）。openPE 用当前 `pe` 原文从 `~/.codex/history.jsonl` 反查 session id，再读取对应 rollout JSONL 的最近 user/assistant 消息，填入 `enhancer.Request.History`，让 `pe` 能理解对话里的“选项一”“星桥方案”等引用。若无法唯一匹配或 `cwd` 不一致，会自动 skip，不会报错。如需关闭，在 hook dotenv 设置 `OPENPE_CODEX_HISTORY_ENABLED=false`。
 - Codex TUI 把 captured hook feedback 压成单行，stderr 只输出短状态。完整预览见 [调用方式](#调用方式) 中的 `openpe codex hook last`。
 - 同时安装 user + project hook 会触发两次执行；openPE 在 project hook 安装器中会检测 user hook 并自动跳过去重。
 - Codex CLI `0.132.0` 的 `/` 菜单只枚举内置命令，不会列出 `~/.codex/prompts/*.md` 或自定义 commands；openPE 当前**不规划** `/pe` slash command，正式入口保持 hook 触发。
 
-### Claude Code
+### Claude Code hook
 
 已验证 Claude Code CLI `2.1.146`。
 
@@ -199,32 +286,27 @@ openpe claude hook install --path /absolute/path/to/settings.json
 openpe claude hook install --dry-run
 ```
 
-| 选项 | 默认 | 说明 |
-|---|---|---|
-| `--path` | `~/.claude/settings.json` | Claude settings 路径 |
-| `--env-file` | `~/.config/openpe/.env` | hook 子进程加载的 dotenv |
-| `--openpe-bin` | `PATH` 中的 `openpe` | hook 命令中的 openpe binary 绝对路径 |
-| `--hook-timeout` | `120` | Claude hook 超时秒数 |
+| 选项               | 默认                        | 说明                                 |
+| ------------------ | --------------------------- | ------------------------------------ |
+| `--path`         | `~/.claude/settings.json` | Claude settings 路径                 |
+| `--env-file`     | `~/.config/openpe/.env`   | hook 子进程加载的 dotenv             |
+| `--openpe-bin`   | `PATH` 中的 `openpe`    | hook 命令中的 openpe binary 绝对路径 |
+| `--hook-timeout` | `120`                     | Claude hook 超时秒数                 |
+
+触发演示（在 Claude Code 中输入 `pe <prompt>` 后的 blocked feedback）：
+
+![Claude Code 触发演示](assets/claude-pe-trigger.png)
 
 **关键步骤**：安装后重启 Claude Code 让设置生效。
 
 **关键注意事项**：
 
-- Claude transcript 默认不读取。若要让 `pe` 理解当前 Claude Code 对话里的“选项一”“方案A”等引用，可在 hook dotenv 中设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=true`。openPE 只读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`；若 transcript 缺失、不可读或其中 `cwd` 与 hook 当前 `cwd` 不一致，则不注入历史。
+- **Claude transcript 默认读取**（启用满血提示词增强）。openPE 读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`，让 `pe` 能理解当前 Claude Code 对话里的“选项一”“方案A”等引用。若 transcript 缺失、不可读或 `cwd` 不一致，会自动 skip，不会报错。如需关闭，在 hook dotenv 设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=false`。
 - Claude Code 的 hook 子进程可能无法访问系统剪贴板或 `/dev/tty`。当增强成功但剪贴板交付失败时，openPE 默认会在 Claude 可见的 blocked feedback 中追加完整增强 prompt 的 Markdown 代码块；用户可直接复制该代码块，或继续使用 `openpe claude hook last --prompt` / `last-prompt.txt` 兜底。
 - Claude Code `--print` headless 模式会执行 hook，但**不像交互式 TUI 一样稳定展示被阻断 feedback**；调试请用交互式模式。
-- Claude Code 自身调哪个模型由 Claude Code 决定，openPE 只负责增强 prompt。若想让 Claude Code 走 Anthropic-compatible 第三方网关：
-
-  ```bash
-  export ANTHROPIC_BASE_URL="https://your-anthropic-compatible-host"
-  export ANTHROPIC_API_KEY="your-api-key"
-  export ANTHROPIC_MODEL="your-model"
-  claude --model your-model
-  ```
-
 - Claude Code CLI `2.1.146` 暴露的 `--effort` 取值是 `low` / `medium` / `high`；1M context window 属于上游模型/网关能力，不是 openPE hook 能强制开启的选项。
 
-### Windsurf Cascade
+### Windsurf Cascade hook
 
 ```bash
 # 全局安装（推荐）
@@ -240,12 +322,16 @@ openpe windsurf hook install --env-file /absolute/path/to/.env
 openpe windsurf hook install --dry-run
 ```
 
-| 选项 | 默认 | 说明 |
-|---|---|---|
-| `--scope` | `user` | `user` → 写 `~/.codeium/windsurf/hooks.json`；`project` → 写 `<cwd>/.windsurf/hooks.json` |
-| `--path` | 自动 | 显式 hooks.json 路径（覆盖 scope 推断） |
-| `--env-file` | user 模式：`~/.config/openpe/.env`；project 模式：`<cwd>/.env` | hook 子进程加载的 dotenv |
-| `--openpe-bin` | `PATH` 中的 `openpe` | hook 命令中的 openpe binary 绝对路径 |
+| 选项             | 默认                                                               | 说明                                                                                                |
+| ---------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `--scope`      | `user`                                                           | `user` → 写 `~/.codeium/windsurf/hooks.json`；`project` → 写 `<cwd>/.windsurf/hooks.json` |
+| `--path`       | 自动                                                               | 显式 hooks.json 路径（覆盖 scope 推断）                                                             |
+| `--env-file`   | user 模式：`~/.config/openpe/.env`；project 模式：`<cwd>/.env` | hook 子进程加载的 dotenv                                                                            |
+| `--openpe-bin` | `PATH` 中的 `openpe`                                           | hook 命令中的 openpe binary 绝对路径                                                                |
+
+触发演示（在 Windsurf Cascade 中输入 `pe <prompt>` 后的反馈）：
+
+![Windsurf Cascade hook 触发演示](assets/windsurf-pe-trigger.png)
 
 **关键步骤**：安装后**重启 Windsurf 或重新打开当前 workspace** 让 hook 生效。
 
@@ -254,26 +340,27 @@ openpe windsurf hook install --dry-run
 - Windsurf 公开 hook 协议仅证明可阻断原 prompt，**无法替换 Cascade 输入框内容**。openPE 因此采用"阻断 + 缓存 + 复制"模式。
 - Windsurf hook 子进程**没有控制 TTY**，OSC52 剪贴板兜底**必然失败**。本地命令（`wl-copy` / `xclip` / `pbcopy` / `clip.exe`）可用时复制仍能成功；不可用时按 stderr 提示从 `last-prompt.txt` 文件取回。详见 [注意事项与已知限制](#注意事项与已知限制)。
 
-### VSIX 编辑器命令路径（已删除）
+### Windsurf bundle patch（实验性）
 
-曾经有一个 VS Code / Windsurf / Cursor 兼容的 VSIX 编辑器命令插件（`extensions/vscode-openpe/`），通过命令面板和右键菜单触发增强。该路径已在 `extensions/openpe-windsurf-patch/` 注入方案落地后**整目录删除**。
+`extensions/openpe-windsurf-patch/` 是独立的 bundle patcher，修改 Windsurf Electron bundle，在 Cascade 输入框旁注入「openPE logo」增强按钮。点击按钮直接把当前对话框 prompt 发到本地 `openpe-server` 改写并写回输入框，**无需手动复制粘贴**。
 
-删除原因：
+**前置依赖**（与 hook 不同，patch 需要多一个启动中的 server 进程）：
 
-- VSIX 通过命令面板 / 右键菜单 / 编辑器选区触发，**无法注入或替换** IDE 原生 Chat / Composer / Cascade 的提交内容；增强结果只能复制到剪贴板、展示在 webview 或写回普通编辑器。
-- 受 VS Code Extension API 边界限制，**没有公开通道**能写入 IDE 私有聊天输入框，用户仍需手动复制粘贴。
-- 注入方案（见下一节 [Windsurf 实验性 openPE logo 按钮集成](#windsurf-实验性-openpe-logo-按钮集成)）已经证实可以**直接在 Cascade 输入框旁加按钮、把增强结果写回输入框**，覆盖 VSIX 路径的核心使用场景且 UX 显著更好。
-- 终端 CLI 用户继续走 hook 方案（`openpe codex|claude|windsurf hook install`），不需要任何 IDE 插件。
+1. 拉取本仓库源码（`git clone https://github.com/AoManoh/openpe.git`）。
+2. `go install ./cmd/openpe-server`（构建 `openpe-server` binary。如未装可参考 [快速开始 step 1](#1-构建并安装-binary)）。
+3. 配好 `~/.config/openpe/.env`（至少 3 项必填，见 [step 2](#2-配置-openai-compatible-endpoint)）。
+4. Python 3.10+ （运行 installer）。
+5. 启动带 lifecycle + CORS 的 `openpe-server`（下面命令）。
 
-历史源码可通过 `git log -- extensions/vscode-openpe/` 查阅。
+> ⚠️ **实验性方案**：存在 EULA、签名、升级覆盖和私有 DOM 选择器风险；不能接受风险请用 [Windsurf Cascade hook](#windsurf-cascade-hook)。
+>
+> **平台**：仅 Windows 本地端到端验证完成；macOS/Linux 有 installer 路径探测但未端到端验证；**Remote 场景请在本机进行 patch 注入**（Windsurf IDE 在本机运行，remote Linux 服务器找不到本地 bundle，所以只能本机 IDE 注入后，再使用）。
 
-### Windsurf 实验性 openPE logo 按钮集成
+注入成功并重启后，Cascade 输入区右下角出现 openPE 按钮：
 
-`extensions/openpe-windsurf-patch/` 是独立的实验性 bundle patcher，会修改 Windsurf Electron bundle，在 Cascade 输入区旁注入 openPE logo Enhance 按钮。按钮 SVG 图案已 inline 到 `inject/src/button.ts`，注入 payload 完全自包含，不依赖任何外部 SVG 文件。它不是默认推荐路径，存在 EULA、签名、升级覆盖和私有 DOM 选择器风险；不能接受这些风险时，请改用 `openpe windsurf hook install` hook 方案。
+![Windsurf bundle patch 按钮位置](assets/windsurf-button.png)
 
-> **平台验证状态**：当前**只在 Windows 本地 Windsurf 端到端验证过**。`installer/paths.py` 的代码层面对 macOS（`/Applications/Windsurf.app`）和 Linux（`/opt/Windsurf` 等）都有路径探测分支，但**尚未做端到端验证**，相关 codesign / 权限 / DOM 适配可能需要进一步调整。**Remote 场景明确不支持**——Windsurf IDE 在 Windows/macOS 本地运行，remote Linux 服务器找不到本地 IDE bundle，无法完成注入。
-
-按钮路径依赖本地 `openpe-server`：
+按钮路径依赖本地 `openpe-server` 持续运行：
 
 ```bash
 OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
@@ -282,33 +369,35 @@ OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
 openpe-server
 ```
 
-安装器会读取 `~/.config/openpe/server.json`，把当前 `baseUrl` 和 bearer token 快照进 Windsurf bundle。若使用 lifecycle 自动生成的临时 token，`openpe-server` 每次重启后 token 都会变化，已安装按钮会变成旧 token 并出现 401 / fetch 失败。推荐生成一次固定的本地 `OPENPE_SERVER_TOKEN` 并写入 user 级 env；若使用临时 token，则每次重启 server 后重新运行 `python3 -m installer install --i-accept-experimental-risk`。
+**关键步骤**：
 
-排障入口：
+1. 确保 `openpe-server` 正在运行（建议固定 `OPENPE_SERVER_TOKEN`，避免临时 token 重启变化导致按钮 401）。
+2. `cd extensions/openpe-windsurf-patch && python3 -m installer install --i-accept-experimental-risk`
+3. 重启 Windsurf，看到按钮即注入成功。
+4. 在 Cascade 输入 prompt → 点按钮 → 增强结果自动回填到输入框，无需手动 Ctrl+V。
+
+**排障入口**：
 
 ```bash
 cd extensions/openpe-windsurf-patch
-python3 -m installer status
-python3 -m installer doctor --app-dir /path/to/Windsurf
+python3 -m installer status                              # 检查注入状态 + bundle 一致性
+python3 -m installer doctor --app-dir /path/to/Windsurf  # 路径/codesign/DOM 适配诊断
 ```
 
-输出中的 `button config: stale` 表示按钮内嵌配置与当前 server descriptor 不一致；重启 `openpe-server` 时沿用同一个 `OPENPE_SERVER_TOKEN`，或重新安装 patch 刷新内嵌配置。更多说明见 [extensions/openpe-windsurf-patch/README.md](extensions/openpe-windsurf-patch/README.md)。
+输出 `button config: stale` 表示按钮内嵌 token 与当前 server descriptor 不一致；重启 `openpe-server` 时沿用相同 `OPENPE_SERVER_TOKEN`，或重新 install 刷新内嵌配置。
 
-按钮路径会通过 `inject/src/cascade_context.ts` 观察 Windsurf renderer 的 IndexedDB，把当前 Cascade trajectory 的多轮上下文按 best-effort 抓出来，作为 `history` 字段塞进本地 `POST /v1/prompt-enhance` 请求，让 enhancer 拿到比"只看本轮 prompt"更完整的对话上下文。Phase 5 bring-up（2026-05-22）已经证实 Cascade 客户端**不存**多轮完整 transcript——IDB 里只有当前 in-flight 一个 trajectory，`SendUserCascadeMessage` RPC 请求体每轮也只有 ~458 字节 IDs + 新 turn——所以 inject 层只能给到当前 trajectory 级别的历史，**不是** Codex `~/.codex/history.jsonl` 或 Claude Code `transcript_path` 那种完整 session 级别。完整数据源对比、隐私契约和未来 streaming response tap 调查方向，见 [extensions/openpe-windsurf-patch/README.md § 注意事项与已知限制](extensions/openpe-windsurf-patch/README.md#注意事项与已知限制) 与 [extensions/openpe-windsurf-patch/docs/architecture.md](extensions/openpe-windsurf-patch/docs/architecture.md)。
-
-安装时加 `--debug` 可以打开诊断模式：inject 层会在 `window.__openpeDebug` 上挂只读的 shape-only 查询接口（`describeContext()` / `describeHistory()`，只暴露 count、role 分布、80 字符 preview，**绝不**暴露完整 message body、token 或 `Authorization` header），方便在 DevTools 内确认 history 是否成功抓到、来源标签（`latest_trajectory` / `none`）是否正确。默认（不带 `--debug`）该命名空间不挂载、`cascade_context` watcher 内部也不输出诊断日志，与之前行为保持完全静默。
+> 按钮路径会通过 `inject/src/cascade_context.ts` 观察 Cascade IndexedDB，把当前 trajectory 作为 history 字段注入到 enhancer 请求；但 Cascade 客户端不持久化多轮完整 transcript，因此只能拿到当前 in-flight trajectory 级别的历史，**不是** Codex `history.jsonl` 或 Claude `transcript_path` 那种完整 session 级别。安装时加 `--debug` 可启用 `window.__openpeDebug` 只读 shape-only 诊断接口。完整数据源契约、隐私边界与诊断说明见 [extensions/openpe-windsurf-patch/README.md](extensions/openpe-windsurf-patch/README.md)。
 
 ## 调用方式
 
 ### 基本流程
 
-在任意已装 hook 的客户端对话框输入：
+在任意已装 hook 的客户端对话框输入（3 种触发格式：`pe xxx` / `pe: xxx` / `pe： xxx`，见 [快速开始 step 4](#4-在客户端对话框输入-pe-你的需求)）：
 
 ```text
 pe 帮我把当前文件的 if-else 改成 early return
 ```
 
-- 触发关键字只接受 `pe`（兼容 `pe:` / `pe：` 作为分隔符）。
 - openPE 阻断这条原始消息，**不会**发给 LLM；增强结果通过剪贴板交付。
 - stderr 给出短状态，说明复制是否成功、缓存文件在哪。
 
@@ -455,24 +544,24 @@ client / hook / HTTP
 
 主要模块：
 
-| 路径 | 职责 |
-|---|---|
-| `cmd/openpe` | CLI 入口；正式路径是 `<client> hook install`，裸命令仅用于测试 |
-| `cmd/openpe-server` | HTTP server 入口，暴露 `POST /v1/prompt-enhance` 和 `GET /healthz` |
-| `internal/enhancer` | 核心 prompt rewrite 服务、canonical Request / Response 类型 |
-| `internal/context/openace` | 可选 Openace daemon 检索 provider，负责 query 组织、结果格式化和临时错误重试 |
-| `internal/providers/openai` | 最小 OpenAI-compatible `/v1/chat/completions` provider |
-| `internal/adapters/codex` | Codex `UserPromptSubmit` hook 适配 |
-| `internal/adapters/claude` | Claude Code `UserPromptSubmit` hook 适配 |
-| `internal/adapters/windsurf` | Windsurf Cascade `pre_user_prompt` hook 适配 |
-| `internal/adapters/manual` | `pe` 关键字解析 |
-| `internal/adapters/clipboard` | 剪贴板复制 + OSC52 兜底 |
-| `internal/adapters/preview` | Markdown 预览包装 |
-| `internal/adapters/delivery` | 剪贴板复制 + 双缓存（Markdown 预览 + 纯文本）+ 失败 UX 文案的统一交付层，三方 hook 共用 |
-| `internal/config` | `.env` 与环境变量读取 |
-| `internal/server` | HTTP API、bearer 鉴权、CORS 中间件、`/v1/info` 端点、lifecycle descriptor |
-| `internal/integration` | IDE patch installer 与 openpe-server 的握手契约：`LocalServerDescriptor`、token 工具、`BundlePatcher` |
-| `extensions/openpe-windsurf-patch` | **实验性** Windsurf bundle 注入式安装器（独立 MIT 子项目，默认禁用，用户自担风险） |
+| 路径                                 | 职责                                                                                                      |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `cmd/openpe`                       | CLI 入口；正式路径是 `<client> hook install`，裸命令仅用于测试                                          |
+| `cmd/openpe-server`                | HTTP server 入口，暴露 `POST /v1/prompt-enhance` 和 `GET /healthz`                                    |
+| `internal/enhancer`                | 核心 prompt rewrite 服务、canonical Request / Response 类型                                               |
+| `internal/context/openace`         | 可选 Openace daemon 检索 provider，负责 query 组织、结果格式化和临时错误重试                              |
+| `internal/providers/openai`        | 最小 OpenAI-compatible `/v1/chat/completions` provider                                                  |
+| `internal/adapters/codex`          | Codex `UserPromptSubmit` hook 适配                                                                      |
+| `internal/adapters/claude`         | Claude Code `UserPromptSubmit` hook 适配                                                                |
+| `internal/adapters/windsurf`       | Windsurf Cascade `pre_user_prompt` hook 适配                                                            |
+| `internal/adapters/manual`         | `pe` 关键字解析                                                                                         |
+| `internal/adapters/clipboard`      | 剪贴板复制 + OSC52 兜底                                                                                   |
+| `internal/adapters/preview`        | Markdown 预览包装                                                                                         |
+| `internal/adapters/delivery`       | 剪贴板复制 + 双缓存（Markdown 预览 + 纯文本）+ 失败 UX 文案的统一交付层，三方 hook 共用                   |
+| `internal/config`                  | `.env` 与环境变量读取                                                                                   |
+| `internal/server`                  | HTTP API、bearer 鉴权、CORS 中间件、`/v1/info` 端点、lifecycle descriptor                               |
+| `internal/integration`             | IDE patch installer 与 openpe-server 的握手契约：`LocalServerDescriptor`、token 工具、`BundlePatcher` |
+| `extensions/openpe-windsurf-patch` | **实验性** Windsurf bundle 注入式安装器（独立 MIT 子项目，默认禁用，用户自担风险）                  |
 
 ### 增强契约（开发者参考）
 

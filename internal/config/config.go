@@ -136,7 +136,11 @@ func Load() Config {
 		},
 		Codex: CodexConfig{
 			History: CodexHistoryConfig{
-				Enabled:     boolFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_ENABLED", fileEnv), false),
+				// Default true: enable full prompt-enhancement context by reading
+				// the current Codex session history. The codexhistory provider
+				// silently skips when ~/.codex/history.jsonl / rollout file is
+				// missing or cwd mismatches, so this is safe by default.
+				Enabled:     boolFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_ENABLED", fileEnv), true),
 				Home:        valueFromAnyEnv([]string{"OPENPE_CODEX_HOME", "CODEX_HOME"}, fileEnv),
 				MaxMessages: intFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_MAX_MESSAGES", fileEnv), DefaultCodexHistoryMaxMessages),
 				MaxChars:    intFromValue(valueFromEnv("OPENPE_CODEX_HISTORY_MAX_CHARS", fileEnv), DefaultCodexHistoryMaxChars),
@@ -144,7 +148,11 @@ func Load() Config {
 		},
 		Claude: ClaudeConfig{
 			Transcript: ClaudeTranscriptConfig{
-				Enabled:     boolFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_ENABLED", fileEnv), false),
+				// Default true: enable full prompt-enhancement context by reading
+				// Claude Code's transcript_path. The claudetranscript provider
+				// silently skips when transcript is missing or cwd mismatches,
+				// so this is safe by default.
+				Enabled:     boolFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_ENABLED", fileEnv), true),
 				MaxMessages: intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES", fileEnv), DefaultClaudeTranscriptMaxMessages),
 				MaxChars:    intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS", fileEnv), DefaultClaudeTranscriptMaxChars),
 			},
