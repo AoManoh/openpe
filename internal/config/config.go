@@ -26,6 +26,17 @@ const (
 
 	DefaultClaudeTranscriptMaxMessages = 12
 	DefaultClaudeTranscriptMaxChars    = 12000
+
+	// DefaultMaxContextTokens is the global token budget applied to every
+	// outbound enhancer.Request via Options.MaxContextTokens. Zero means
+	// "no budget" — enhancer.assemblePrompt skips its section-level
+	// truncator entirely, matching the pre-budget behaviour. Setting a
+	// positive value (via OPENPE_MAX_CONTEXT_TOKENS) lets every caller
+	// path (codex / claude / windsurf hooks, future patch inject, future
+	// IDE clients) share a single user-facing knob that controls the
+	// total prompt size handed to the LLM provider, regardless of which
+	// collector populated history / context.files / context.retrieval.
+	DefaultMaxContextTokens = 0
 )
 
 type Config struct {
@@ -35,11 +46,21 @@ type Config struct {
 	ListenAddr string
 	Timeout    time.Duration
 	Language   string
-	Openace    OpenaceConfig
-	Codex      CodexConfig
-	Claude     ClaudeConfig
-	Delivery   DeliveryConfig
-	Server     ServerConfig
+	// MaxContextTokens is the consumer-layer global token budget. Each
+	// caller path (codex / claude / windsurf hook, future patch inject)
+	// forwards this value into enhancer.Request.Options.MaxContextTokens,
+	// where enhancer.assemblePrompt applies section-level truncation
+	// preserving required sections (original prompt, target client,
+	// workspace, enhancement contract, final instruction) and shrinking
+	// optional sections (history, rules, guidelines, context.files,
+	// context.retrieval). Zero (the default) keeps the historical
+	// "no budget" behaviour so this field is purely additive.
+	MaxContextTokens int
+	Openace          OpenaceConfig
+	Codex            CodexConfig
+	Claude           ClaudeConfig
+	Delivery         DeliveryConfig
+	Server           ServerConfig
 }
 
 type CodexConfig struct {
@@ -116,12 +137,13 @@ func Load() Config {
 	}
 	fileEnv := loadDotEnv(envFile)
 	return Config{
-		BaseURL:    valueFromEnv("OPENPE_BASE_URL", fileEnv),
-		APIKey:     valueFromEnv("OPENPE_API_KEY", fileEnv),
-		Model:      valueFromEnv("OPENPE_MODEL", fileEnv),
-		ListenAddr: valueOrDefault("OPENPE_LISTEN_ADDR", fileEnv, DefaultListenAddr),
-		Timeout:    durationFromValue(valueFromEnv("OPENPE_TIMEOUT", fileEnv), DefaultTimeout),
-		Language:   normalizeLanguage(valueOrDefault("OPENPE_LANGUAGE", fileEnv, DefaultLanguage)),
+		BaseURL:          valueFromEnv("OPENPE_BASE_URL", fileEnv),
+		APIKey:           valueFromEnv("OPENPE_API_KEY", fileEnv),
+		Model:            valueFromEnv("OPENPE_MODEL", fileEnv),
+		ListenAddr:       valueOrDefault("OPENPE_LISTEN_ADDR", fileEnv, DefaultListenAddr),
+		Timeout:          durationFromValue(valueFromEnv("OPENPE_TIMEOUT", fileEnv), DefaultTimeout),
+		Language:         normalizeLanguage(valueOrDefault("OPENPE_LANGUAGE", fileEnv, DefaultLanguage)),
+		MaxContextTokens: intFromValue(valueFromEnv("OPENPE_MAX_CONTEXT_TOKENS", fileEnv), DefaultMaxContextTokens),
 		Openace: OpenaceConfig{
 			Enabled:           boolFromValue(valueFromEnv("OPENPE_OPENACE_ENABLED", fileEnv), false),
 			Addr:              valueOrDefaultFromAny([]string{"OPENPE_OPENACE_ADDR", "OPENACE_DAEMON_ADDR"}, fileEnv, DefaultOpenaceAddr),

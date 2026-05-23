@@ -29,6 +29,12 @@ type HookOptions struct {
 	Language string
 	Timeout  time.Duration
 	History  []enhancer.Message
+	// MaxContextTokens forwards the consumer-layer global token budget
+	// (config.Config.MaxContextTokens, sourced from
+	// OPENPE_MAX_CONTEXT_TOKENS) into enhancer.Request.Options. Zero
+	// means "no budget" so this field is purely additive — callers that
+	// do not set it preserve the historical unbounded behaviour.
+	MaxContextTokens int
 }
 
 type HookOutput struct {
@@ -78,6 +84,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		CWD:     cwd,
 		Mode:    valueOrDefault(opts.Mode, "agent"),
 		History: opts.History,
+		Options: enhancer.Options{MaxContextTokens: opts.MaxContextTokens},
 	})
 	if err != nil {
 		return HookOutput{}, err

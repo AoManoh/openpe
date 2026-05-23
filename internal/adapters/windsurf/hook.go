@@ -32,6 +32,18 @@ type HookOptions struct {
 	CWD      string
 	Language string
 	Timeout  time.Duration
+	// MaxContextTokens forwards the consumer-layer global token budget
+	// (config.Config.MaxContextTokens, sourced from
+	// OPENPE_MAX_CONTEXT_TOKENS) into enhancer.Request.Options. Zero
+	// means "no budget" so this field is purely additive — callers that
+	// do not set it preserve the historical unbounded behaviour.
+	// Windsurf hook has no History field because Cascade exposes no
+	// public file-based session log to the hook subprocess (see
+	// cascade_context.ts in the patch sub-project for the renderer-side
+	// best-effort path); MaxContextTokens still applies to any rules /
+	// guidelines / context.files / context.retrieval that future caller
+	// paths attach to the request.
+	MaxContextTokens int
 }
 
 type HookOutput struct {
@@ -77,10 +89,11 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		defer cancel()
 	}
 	resp, err := service.Enhance(ctx, enhancer.Request{
-		Prompt: rawPrompt,
-		Client: valueOrDefault(opts.Client, "windsurf"),
-		CWD:    cwd,
-		Mode:   valueOrDefault(opts.Mode, "cascade"),
+		Prompt:  rawPrompt,
+		Client:  valueOrDefault(opts.Client, "windsurf"),
+		CWD:     cwd,
+		Mode:    valueOrDefault(opts.Mode, "cascade"),
+		Options: enhancer.Options{MaxContextTokens: opts.MaxContextTokens},
 	})
 	if err != nil {
 		return HookOutput{}, err

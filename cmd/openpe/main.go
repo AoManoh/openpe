@@ -397,13 +397,14 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
 	}
 	output, err := codexadapter.HandleHook(context.Background(), service, input, codexadapter.HookOptions{
-		Client:   *client,
-		Mode:     *mode,
-		Auto:     *auto,
-		CWD:      overrideCWD,
-		Language: cfg.Language,
-		Timeout:  timeoutOrDefault(*timeout),
-		History:  history,
+		Client:           *client,
+		Mode:             *mode,
+		Auto:             *auto,
+		CWD:              overrideCWD,
+		Language:         cfg.Language,
+		Timeout:          timeoutOrDefault(*timeout),
+		History:          history,
+		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, err.Error(), cfg.Language))
@@ -589,12 +590,13 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 		return 2
 	}
 	output, err := claudeadapter.HandleHook(context.Background(), service, input, claudeadapter.HookOptions{
-		Client:   *client,
-		Mode:     *mode,
-		CWD:      overrideCWD,
-		Language: cfg.Language,
-		Timeout:  timeoutOrDefault(*timeout),
-		History:  history,
+		Client:           *client,
+		Mode:             *mode,
+		CWD:              overrideCWD,
+		Language:         cfg.Language,
+		Timeout:          timeoutOrDefault(*timeout),
+		History:          history,
+		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
@@ -767,11 +769,12 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newPro
 		return 2
 	}
 	output, err := windsurfadapter.HandleHook(context.Background(), service, input, windsurfadapter.HookOptions{
-		Client:   *client,
-		Mode:     *mode,
-		CWD:      overrideCWD,
-		Language: cfg.Language,
-		Timeout:  timeoutOrDefault(*timeout),
+		Client:           *client,
+		Mode:             *mode,
+		CWD:              overrideCWD,
+		Language:         cfg.Language,
+		Timeout:          timeoutOrDefault(*timeout),
+		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
