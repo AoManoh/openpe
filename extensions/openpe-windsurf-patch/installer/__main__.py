@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -136,6 +137,26 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     install.add_argument(
+        "--max-context-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "consumer-layer token budget for prompt enhancement. Snapshotted "
+            "into the bundle as `globalThis.__openpe.maxContextTokens` and "
+            "forwarded by the inject layer to /v1/prompt-enhance via "
+            "Options.MaxContextTokens (json: max_context_tokens). The server "
+            "applies a ~4-char-per-token approximation to shrink retrieval / "
+            "history sections; required sections always survive. Default: "
+            "fall back to OPENPE_MAX_CONTEXT_TOKENS env (mirrors the hook "
+            "adapter convention); if both unset, send no budget (server uses "
+            "0 = no shrinking). Pass an explicit 0 to override env=non-zero "
+            "and disable shrinking. Note: this is NOT the cascade history "
+            "collector budget (32 msg / 6000 char/msg / 80000 char total) — "
+            "those are empirical collector-layer tuning, not configurable."
+        ),
+    )
+    install.add_argument(
         "--i-accept-experimental-risk",
         action="store_true",
         help="acknowledge the EULA / user-assumes-risk disclaimer non-interactively",
@@ -185,11 +206,56 @@ def _load_inject_payload() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def _resolve_max_context_tokens(cli_value: Optional[int]) -> Optional[int]:
+    """Resolve the consumer-layer token budget from CLI flag or env var.
+
+    Resolution rules (CLI wins to honour the principle of least surprise
+    for the user actively typing ``--max-context-tokens``):
+
+    1. If ``cli_value`` is not None (i.e. the user passed
+       ``--max-context-tokens N`` — including ``--max-context-tokens 0``),
+       return ``max(0, cli_value)``. ``0`` explicitly means "no budget"
+       (Go side treats ``MaxContextTokens=0`` as "do not shrink").
+    2. Else read ``OPENPE_MAX_CONTEXT_TOKENS`` from the environment.
+       Empty / unset → return None (no field emitted in the bootstrap,
+       so the inject layer omits the wire field, matching omitempty on
+       the Go ``Options.MaxContextTokens`` JSON tag).
+    3. Else parse as int. Non-int / negative → warn to stderr and return
+       None (mirrors Go's "ignore invalid env, keep default" behaviour
+       documented in ``internal/config/config.go``).
+
+    Returns:
+        Optional[int]: positive int → emit, 0 → emit (explicit disable),
+        None → omit field entirely.
+    """
+    if cli_value is not None:
+        return max(0, int(cli_value))
+    raw = os.environ.get("OPENPE_MAX_CONTEXT_TOKENS", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError:
+        sys.stderr.write(
+            f"openpe-windsurf-patch: ignoring invalid OPENPE_MAX_CONTEXT_TOKENS={raw!r} "
+            "(must be a non-negative integer); falling back to no budget.\n"
+        )
+        return None
+    if parsed < 0:
+        sys.stderr.write(
+            f"openpe-windsurf-patch: ignoring negative OPENPE_MAX_CONTEXT_TOKENS={parsed} "
+            "(must be >= 0); falling back to no budget.\n"
+        )
+        return None
+    return parsed
+
+
 def _build_payload_prelude(
     descriptor: LocalServerDescriptor,
     descriptor_path: Optional[Path] = None,
     fs_probe: bool = False,
     debug: bool = False,
+    max_context_tokens: Optional[int] = None,
 ) -> str:
     """Render the ``globalThis.__openpe`` bootstrap injected before inject.js.
 
@@ -204,6 +270,16 @@ def _build_payload_prelude(
     (lifecycle auto-generated)`` mode), re-run ``installer install`` so
     the bundle picks up the fresh token. ``uninstall`` byte-restores the
     pre-install bundle.
+
+    The ``max_context_tokens`` argument is the consumer-layer token
+    budget resolved by :func:`_resolve_max_context_tokens`. We only
+    embed the field when it's a positive int — matching the Go side's
+    ``json:"max_context_tokens,omitempty"`` so a value of 0 stays
+    indistinguishable from absent on the wire (both mean "no shrinking"
+    on the server). When the user explicitly passes
+    ``--max-context-tokens 0`` we still omit it because the on-wire
+    semantics are identical and the smaller bootstrap is cheaper to
+    re-render on every Windsurf launch.
     """
     config = {
         "baseUrl": descriptor.base_url,
@@ -216,6 +292,8 @@ def _build_payload_prelude(
         config["fsProbe"] = True
     if debug:
         config["debug"] = True
+    if max_context_tokens is not None and max_context_tokens > 0:
+        config["maxContextTokens"] = int(max_context_tokens)
     return (
         "/* === OPENPE-BOOTSTRAP === */\n"
         "/* rewritten by installer at install time; do not edit by hand */\n"
@@ -370,7 +448,19 @@ def _cmd_install(args: argparse.Namespace) -> int:
             "  run `npm install && npm run build` inside inject/ (Phase 4 task).\n"
         )
         return EXIT_INJECT_PAYLOAD_MISSING
+    max_context_tokens = _resolve_max_context_tokens(args.max_context_tokens)
     if args.dry_run:
+        if max_context_tokens is None:
+            budget_label = "none (server default = no shrinking)"
+        elif max_context_tokens == 0:
+            budget_label = "0 (explicit disable; same wire effect as none)"
+        else:
+            source = (
+                "CLI --max-context-tokens"
+                if args.max_context_tokens is not None
+                else "OPENPE_MAX_CONTEXT_TOKENS env"
+            )
+            budget_label = f"{max_context_tokens} (from {source})"
         sys.stdout.write(
             f"DRY RUN — would patch:\n"
             f"  bundle:  {paths.bundle_file}\n"
@@ -379,6 +469,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             f"  payload: {payload_path} ({payload_path.stat().st_size} bytes)\n"
             f"  fs probe: {'yes' if args.fs_probe else 'no'}\n"
             f"  debug:    {'yes' if args.debug else 'no'}\n"
+            f"  max ctx tokens: {budget_label}\n"
             f"  codesign: {'yes (macOS)' if is_macos() else 'no (non-macOS)'}\n"
         )
         return EXIT_OK
@@ -406,6 +497,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             descriptor_path=descriptor_path if args.fs_probe else None,
             fs_probe=args.fs_probe,
             debug=args.debug,
+            max_context_tokens=max_context_tokens,
         )
         payload_text = payload_path.read_text(encoding="utf-8")
         inject_bundle(paths.bundle_file, prelude + payload_text)

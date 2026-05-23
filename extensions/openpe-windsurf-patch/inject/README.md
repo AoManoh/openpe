@@ -134,3 +134,39 @@ python3 -m installer install --i-accept-experimental-risk --debug
 ```
 
 跟 `--fs-probe` 互相独立，可以叠加传。
+
+## 消费层 token 预算 (`maxContextTokens`)
+
+`window.__openpe.maxContextTokens` 是 installer 在 `install` 时按
+`--max-context-tokens N` 或 `OPENPE_MAX_CONTEXT_TOKENS` 环境变量
+快照进 bundle 的可选字段（仅当 > 0 时 embed，匹配 Go `omitempty` 语义）。
+
+`auth.ts` 解析该字段时只接受**有限正数**：
+
+- `undefined` / 不存在 → 不下行到 server，按 server 默认行为（不收缩）。
+- 正整数 → 写入 `enhancePrompt` 的 `options.max_context_tokens`，server
+  按 ~4 字符/token 近似把 retrieval / history section 收缩到预算之内。
+- `0` / 负数 / `Infinity` / `NaN` / 非数字 → 静默忽略；保守的回退确保
+  hand-edit 的 bundle 不会产生意外行为。
+
+`dialog.ts` 在每次 enhance 时透传该字段。完整跨语言契约：
+
+```
+installer/__main__.py::_resolve_max_context_tokens
+  → installer/__main__.py::_build_payload_prelude
+  → globalThis.__openpe.maxContextTokens  (snapshot at install)
+  → inject/src/auth.ts::OpenpeConfig.maxContextTokens  (parse)
+  → inject/src/dialog.ts                                (forward)
+  → inject/src/client.ts::EnhanceRequest.options.max_context_tokens  (POST body, snake_case)
+  → internal/enhancer/types.go::Options.MaxContextTokens  (Go server)
+```
+
+字段名故意做了 camelCase（`window.__openpe`）→ snake_case（POST body）
+的双重表示：前者匹配 JS 习惯 + 已有 bootstrap config 风格；后者匹配
+Go 的 `json:"max_context_tokens,omitempty"` tag，server 端无需额外
+remapping。`tests/client.test.ts` 用 snake_case 断言锁定 wire 契约——
+任何意外的 camelCase 回归会立刻 fail。
+
+这是**消费层** token 预算；不要与 `cascade_context.ts::DEFAULT_HISTORY_BUDGET`
+里硬编码的 32 / 6000 / 80000 **采集层**常量混淆——后者是基于真实 Windsurf
+trajectory 经验调优的常量，不暴露成可配。

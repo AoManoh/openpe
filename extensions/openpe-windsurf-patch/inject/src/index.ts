@@ -36,6 +36,12 @@ declare global {
       fsProbe?: boolean;
       debug?: boolean;
       version?: string;
+      // Consumer-layer token budget. Snapshotted by the installer from
+      // ``--max-context-tokens`` / ``OPENPE_MAX_CONTEXT_TOKENS``;
+      // forwarded by the inject layer to ``options.max_context_tokens``
+      // on every enhance request. See OpenpeConfig docstring in
+      // ``auth.ts`` for the full lifecycle.
+      maxContextTokens?: number;
     };
     __openpeInjected?: boolean;
     /**

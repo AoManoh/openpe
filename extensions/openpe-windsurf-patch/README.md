@@ -191,6 +191,45 @@ P3 descriptor-read 试验需要带 `--fs-probe` 安装；先用
 敏感的 descriptor 元信息和 renderer 能否通过 Node `fs` 读到 0600
 descriptor 的状态；它还没改 token 传输方式。
 
+### 消费层 token 预算 (`--max-context-tokens` / `OPENPE_MAX_CONTEXT_TOKENS`)
+
+按钮路径和 Codex / Claude hook 路径都共享 openPE server 端的同一个 prompt
+增强管线，所以也共享同一个**消费层** token 预算旋钮——配置后
+server 会按 ~4 字符/token 近似把 retrieval / history section 收缩到预算
+之内，必需 section 永远保留。
+
+按钮路径用安装时快照模型（不是运行时读取），所以预算在 `install` 时被
+embed 到 bundle bootstrap：
+
+```bash
+# 显式 CLI
+python3 -m installer install --i-accept-experimental-risk --max-context-tokens 8000
+
+# 或者用与 hook 路径一致的环境变量
+OPENPE_MAX_CONTEXT_TOKENS=8000 \
+python3 -m installer install --i-accept-experimental-risk
+
+# 显式禁用（即使 env=非零）：传 0
+python3 -m installer install --i-accept-experimental-risk --max-context-tokens 0
+```
+
+解析优先级：CLI flag 优先于环境变量；都未设 → 不在 wire 上发送
+`options.max_context_tokens` 字段（server 按默认行为，不收缩）；非法 /
+负值 → stderr warning 并视作未设。`install --dry-run` 会回显已解析的预算
+来源（CLI / env / 缺省）。
+
+修改预算需要重跑 `install` 让 bundle bootstrap 重新快照；运行时无法在
+不重装的情况下修改。
+
+注意区分**消费层** vs **采集层**：
+
+- **消费层**（这里描述的 `--max-context-tokens`）是面向用户的 token 预算，
+  统一控制 server prompt 拼装。
+- **采集层**——cascade trajectory history 抓取的 32 条消息 / 6000 字符每
+  条 / 80000 字符总预算——是基于真实 Windsurf trajectory 经验调优的常量，
+  硬编码在 `inject/src/cascade_context.ts::DEFAULT_HISTORY_BUDGET`，**不
+  暴露成可配**。改这三个值需要修改源码并重新构建 inject payload。
+
 ## 测试
 
 ```bash

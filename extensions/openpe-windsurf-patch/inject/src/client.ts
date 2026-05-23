@@ -16,12 +16,28 @@ export interface EnhanceMessage {
   content: string;
 }
 
+/**
+ * Wire-level options block; mirrors the Go ``enhancer.Options`` struct
+ * (``internal/enhancer/types.go``). Field names use snake_case to match
+ * the Go JSON tags exactly so the server unmarshals the body without a
+ * remapping layer.
+ *
+ * Only the consumer-layer ``max_context_tokens`` is currently
+ * surfaced — ``return_metadata`` is server-default off and the dialog
+ * has no metadata UI today. Extend this interface when adding a new
+ * consumer-facing knob.
+ */
+export interface EnhanceOptions {
+  max_context_tokens?: number;
+}
+
 export interface EnhanceRequest {
   prompt: string;
   client?: string;
   mode?: string;
   cwd?: string;
   history?: EnhanceMessage[];
+  options?: EnhanceOptions;
 }
 
 export interface EnhanceResponse {
@@ -71,6 +87,12 @@ export async function enhancePrompt(
       // future enhancer.Request validators.
       ...(body.history && body.history.length > 0
         ? { history: body.history }
+        : {}),
+      // Only attach options when at least one field is set; matches the
+      // Go side's ``omitempty`` so an absent options block stays
+      // wire-equivalent to ``{}``.
+      ...(body.options && Object.keys(body.options).length > 0
+        ? { options: body.options }
         : {}),
     }),
     signal,

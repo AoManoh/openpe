@@ -144,6 +144,15 @@ export async function runAutoEnhance(
     const resp = await enhancePrompt(config, {
       prompt: original,
       history: historyMeta.messages,
+      // Consumer-layer token budget; absent → omit on the wire (server
+      // default = no shrinking). When the installer was run with
+      // ``--max-context-tokens N`` or with ``OPENPE_MAX_CONTEXT_TOKENS``
+      // set, ``getConfig()`` surfaces the positive int here and we
+      // forward it via ``options.max_context_tokens`` so the server
+      // shrinks retrieval / history sections to fit.
+      ...(config.maxContextTokens
+        ? { options: { max_context_tokens: config.maxContextTokens } }
+        : {}),
     });
     // Snapshot BEFORE writing back / showing toasts so the inspection
     // surface is populated even if the editor write path or the toast
