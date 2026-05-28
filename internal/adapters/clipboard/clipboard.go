@@ -1,8 +1,10 @@
 package clipboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -10,14 +12,16 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 const defaultTimeout = 2 * time.Second
 const osc52MaxBytes = 100 * 1024
 
 type commandSpec struct {
-	name string
-	args []string
+	name         string
+	args         []string
+	stdinUTF16LE bool
 }
 
 type Options struct {
@@ -78,8 +82,9 @@ func CopyWithOptions(ctx context.Context, text string, opts Options) (string, er
 }
 
 func runShellCommand(ctx context.Context, command string, text string) error {
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Stdin = strings.NewReader(text)
+	shell, args := shellCommand(command)
+	cmd := exec.CommandContext(ctx, shell, args...)
+	cmd.Stdin = bytes.NewReader(commandInput(commandUsesClipExe(command), text))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
@@ -87,9 +92,16 @@ func runShellCommand(ctx context.Context, command string, text string) error {
 	return nil
 }
 
+func shellCommand(command string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "cmd.exe", []string{"/C", command}
+	}
+	return "sh", []string{"-c", command}
+}
+
 func runCommand(ctx context.Context, spec commandSpec, text string) error {
 	cmd := exec.CommandContext(ctx, spec.name, spec.args...)
-	cmd.Stdin = strings.NewReader(text)
+	cmd.Stdin = bytes.NewReader(commandInput(spec.stdinUTF16LE, text))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
@@ -123,12 +135,66 @@ func candidates() []commandSpec {
 	case "darwin":
 		return []commandSpec{{name: "pbcopy"}}
 	case "windows":
-		return []commandSpec{{name: "clip.exe"}}
+		return []commandSpec{{name: "clip.exe", stdinUTF16LE: true}}
 	default:
-		return []commandSpec{
+		specs := []commandSpec{
 			{name: "wl-copy"},
 			{name: "xclip", args: []string{"-selection", "clipboard"}},
 			{name: "xsel", args: []string{"--clipboard", "--input"}},
 		}
+		if isWSL() {
+			specs = append(specs, commandSpec{name: "clip.exe", stdinUTF16LE: true})
+		}
+		return specs
 	}
+}
+
+func commandInput(stdinUTF16LE bool, text string) []byte {
+	if stdinUTF16LE {
+		return utf16LEWithBOM(text)
+	}
+	return []byte(text)
+}
+
+func commandUsesClipExe(command string) bool {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return false
+	}
+	return isClipExeName(fields[0])
+}
+
+func isClipExeName(name string) bool {
+	name = strings.Trim(strings.TrimSpace(name), `"'`)
+	name = strings.TrimRight(name, `/\`)
+	if name == "" {
+		return false
+	}
+	if idx := strings.LastIndexAny(name, `/\`); idx >= 0 {
+		name = name[idx+1:]
+	}
+	return strings.EqualFold(name, "clip.exe")
+}
+
+func utf16LEWithBOM(text string) []byte {
+	encoded := utf16.Encode([]rune(text))
+	out := make([]byte, 2+len(encoded)*2)
+	out[0] = 0xff
+	out[1] = 0xfe
+	for i, value := range encoded {
+		binary.LittleEndian.PutUint16(out[2+i*2:], value)
+	}
+	return out
+}
+
+func isWSL() bool {
+	if os.Getenv("WSL_INTEROP") != "" || os.Getenv("WSL_DISTRO_NAME") != "" {
+		return true
+	}
+	data, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	version := strings.ToLower(string(data))
+	return strings.Contains(version, "microsoft") || strings.Contains(version, "wsl")
 }
