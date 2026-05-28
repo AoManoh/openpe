@@ -16,6 +16,27 @@ coverage/
 .cache/
 .turbo/
 
+# Python local/build artefacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local test / coverage outputs
+*.out
+*.prof
+*.cover
+*.coverprofile
+
 # Runtime logs
 *.log
 npm-debug.log*
@@ -27,12 +48,23 @@ pnpm-debug.log*
 # Reusable public automation should live under the owning skill directory.
 /scripts/
 
+# Local validation assets
+*_test.go
+**/tests/
+*.test.*
+*.spec.*
+__snapshots__/
+**/__snapshots__/
+
 # Private governance outputs and local knowledge assets.
 /docs/
+**/docs/
 
 # Go build outputs left at repo root by `go build` without -o.
 # The published install path is `go install ./cmd/...`, which writes to
 # $GOPATH/bin instead, so repo-root .exe files are always local artefacts.
+/openpe
+/openpe-server
 /openpe.exe
 /openpe-server.exe
 /openpe*.exe~

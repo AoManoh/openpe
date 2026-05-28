@@ -1,0 +1,32 @@
+# Normalize text files so Windows/WSL checkouts do not create whole-file diffs.
+* text=auto eol=lf
+
+# Shell and source files must stay LF for Unix tooling and Go/Node/Python.
+*.go text eol=lf
+*.py text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+
+# Windows launchers are intentionally CRLF in the working tree.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets are never line-ending normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.exe binary
