@@ -60,13 +60,57 @@ type retrieveRequest struct {
 }
 
 type retrieveResponse struct {
-	Text              string
+	Text              string `json:"text,omitempty"`
 	ProviderProfileID string `json:"provider_profile_id,omitempty"`
-	CheckpointID      string
-	FileCount         int
-	Uploaded          int
-	Added             int
-	Deleted           int
+	CheckpointID      string `json:"checkpoint_id,omitempty"`
+	FileCount         int    `json:"file_count,omitempty"`
+	Uploaded          int    `json:"uploaded,omitempty"`
+	Added             int    `json:"added,omitempty"`
+	Deleted           int    `json:"deleted,omitempty"`
+}
+
+func (r *retrieveResponse) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Text                    string `json:"text"`
+		TextLegacy              string `json:"Text"`
+		ProviderProfileID       string `json:"provider_profile_id"`
+		ProviderProfileIDLegacy string `json:"ProviderProfileID"`
+		CheckpointID            string `json:"checkpoint_id"`
+		CheckpointIDLegacy      string `json:"CheckpointID"`
+		FileCount               int    `json:"file_count"`
+		FileCountLegacy         int    `json:"FileCount"`
+		Uploaded                int    `json:"uploaded"`
+		UploadedLegacy          int    `json:"Uploaded"`
+		Added                   int    `json:"added"`
+		AddedLegacy             int    `json:"Added"`
+		Deleted                 int    `json:"deleted"`
+		DeletedLegacy           int    `json:"Deleted"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.Text = firstNonEmpty(raw.Text, raw.TextLegacy)
+	r.ProviderProfileID = firstNonEmpty(raw.ProviderProfileID, raw.ProviderProfileIDLegacy)
+	r.CheckpointID = firstNonEmpty(raw.CheckpointID, raw.CheckpointIDLegacy)
+	r.FileCount = firstNonZero(raw.FileCount, raw.FileCountLegacy)
+	r.Uploaded = firstNonZero(raw.Uploaded, raw.UploadedLegacy)
+	r.Added = firstNonZero(raw.Added, raw.AddedLegacy)
+	r.Deleted = firstNonZero(raw.Deleted, raw.DeletedLegacy)
+	return nil
+}
+
+func firstNonEmpty(primary, fallback string) string {
+	if primary != "" {
+		return primary
+	}
+	return fallback
+}
+
+func firstNonZero(primary, fallback int) int {
+	if primary != 0 {
+		return primary
+	}
+	return fallback
 }
 
 type statusError struct {

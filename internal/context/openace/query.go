@@ -3,6 +3,7 @@ package openace
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/AoManoh/openpe/internal/enhancer"
 )
@@ -65,8 +66,18 @@ func writeQueryList(b *strings.Builder, title string, values []string) {
 
 func trimQueryValue(value string) string {
 	value = strings.TrimSpace(value)
-	if len(value) <= maxQueryFieldChars {
+	if utf8.RuneCountInString(value) <= maxQueryFieldChars {
 		return value
 	}
-	return value[:maxQueryFieldChars] + "\n[openPE: query field truncated]"
+	var b strings.Builder
+	b.Grow(maxQueryFieldChars)
+	count := 0
+	for _, r := range value {
+		if count >= maxQueryFieldChars {
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	return b.String() + "\n[openPE: query field truncated]"
 }
