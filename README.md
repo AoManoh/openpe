@@ -129,7 +129,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_TIMEOUT`                  | `60s`                      | 单次 provider 调用超时（Go duration）                                                   |
 | `OPENPE_LISTEN_ADDR`              | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost` |
 | `OPENPE_CACHE_DIR`                | `~/.cache/openpe`（Linux） | hook 预览与纯文本缓存根目录                                                             |
-| `OPENPE_COPY_COMMAND`             | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）                         |
+| `OPENPE_COPY_COMMAND`             | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）。原生 Windows 用 `cmd.exe /C` 执行，POSIX/WSL 用 `sh -c` 执行；命令首段为 `clip.exe` 时会自动转为 UTF-16LE，避免 Windows 中文乱码 |
 | `OPENPE_DISABLE_OSC52_CLIPBOARD`  | `false`                    | 禁用 OSC52 剪贴板兜底                                                                   |
 | `OPENPE_OSC52_TTY`                | `/dev/tty`                 | OSC52 写入目标 TTY 路径                                                                 |
 | `OPENPE_CLAUDE_PROMPT_FALLBACK`   | `true`                     | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制                   |
@@ -202,7 +202,7 @@ openPE 默认读取当前 Codex / Claude Code 对话上下文，启用满血提�
 
 1. **本机已安装并运行 `openace-mcp` daemon**（默认监听 `127.0.0.1:8765`）。项目主页：https://github.com/AoManoh/openace-mcp。
 2. **至少有一个 AI 客户端已接入该 MCP 服务**（Claude Code / Codex / Windsurf 等）。这是为了确保 Openace 已为当前代码域建索引，否则 openPE 发起检索返回为空。
-3. **确认 8765 端口可联** ： `ss -tlnp | grep ':8765 '` 或 `curl -s http://127.0.0.1:8765/health`（如 daemon 提供）。不可联时不要启用，openPE 会返回明确错误而不静默降级。
+3. **确认 8765 端口可联** ： `ss -tlnp | grep ':8765 '` 或 `curl -s http://127.0.0.1:8765/healthz`（如 daemon 提供）。不可联时不要启用，openPE 会返回明确错误而不静默降级。
 
 三项都满足后，才设置 `OPENPE_OPENACE_ENABLED=true` 启用。
 
@@ -215,6 +215,19 @@ openpe enhance --prompt "帮我修复 provider 超时重试" --cwd /path/to/repo
 ```
 
 启用后，openPE 会在调用 prompt rewrite 模型前，基于 `prompt`、目标客户端、模式和 `cwd` 向本机 Openace daemon `POST /v1/retrieve` 发起一次代码检索，并把返回内容写入 canonical request 的 `context.retrieval`。如果调用方已经显式传入 `context.retrieval`，openPE 不会重复检索。
+
+#### 启用范围（一处开关覆盖四条路径）
+
+`OPENPE_OPENACE_ENABLED=true` 是**一处全局开关**，所有走 openPE `enhancer.Service` 的入口都会尝试使用同一套 Openace provider，无需各路径单独配置；实际发起代码检索还要求本次请求带有非空 `Request.CWD`：
+
+| 入口 | 触发方式 | 启用条件 |
+| ---- | -------- | -------- |
+| 裸 CLI | `openpe enhance --prompt ...` | 当前 shell 环境 `OPENPE_OPENACE_ENABLED=true` |
+| Codex / Claude / Windsurf hook | IDE 对话框输入 `pe <内容>` | hook dotenv（默认 `~/.config/openpe/.env`）含 `OPENPE_OPENACE_ENABLED=true` |
+| HTTP API | 任何外部进程 `POST /v1/prompt-enhance` | `openpe-server` 启动时所在 shell 含 `OPENPE_OPENACE_ENABLED=true` |
+| Windsurf patch 按钮 | Cascade 工具栏点击 openPE logo | 由上一行同款 `openpe-server` 共享；但当前 inject 请求尚未传 workspace `cwd`，因此 Openace 代码检索会被 server 跳过，直到按钮路径补齐 workspace CWD |
+
+Openace provider 由处理请求的进程在启动或构造 service 时注入：CLI / hook 子进程读取自己的环境变量，HTTP 与 Windsurf patch 按钮路径读取 `openpe-server` 启动时的环境变量。换言之：**只要负责处理某次请求的进程（CLI 子进程 / hook 子进程 / openpe-server 主进程）在自己的环境里看见 `OPENPE_OPENACE_ENABLED=true`，且本次请求带有非空 `Request.CWD`**，Openace 检索就会自动注入到 `context.retrieval`。检索请求会把 `Request.Client`、`Request.Mode` 和 `Request.CWD` 一并写入 `information_request`，其中代码库定位仍以 `Request.CWD` 作为 daemon 检索目录；不同入口如果传入不同 `cwd`、history 或环境变量，结果不保证逐字节相同。
 
 Openace 临时错误只会有限重试：HTTP `408`、`429`、`499`、`5xx`、网络超时和短暂连接错误会按指数退避加抖动重试；`400`、`401`、`403`、`404` 等配置、权限或请求错误不会重试。超过最大重试次数后，openPE 返回清晰错误，不静默降级为无检索上下文。
 
@@ -352,7 +365,7 @@ openpe windsurf hook install --dry-run
 1. 拉取本仓库源码（`git clone https://github.com/AoManoh/openpe.git`）。
 2. `go install ./cmd/openpe-server`（构建 `openpe-server` binary。如未装可参考 [快速开始 step 1](#1-构建并安装-binary)）。
 3. 配好 `~/.config/openpe/.env`（至少 3 项必填，见 [step 2](#2-配置-openai-compatible-endpoint)）。
-4. Python 3.10+ （运行 installer）。
+4. Python 3.8+ （运行 installer）。
 5. 启动带 lifecycle + CORS 的 `openpe-server`（下面命令）。
 
 > ⚠️ **实验性方案**：存在 EULA、签名、升级覆盖和私有 DOM 选择器风险；不能接受风险请用 [Windsurf Cascade hook](#windsurf-cascade-hook)。
@@ -516,7 +529,7 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 
 - **OSC52 在 IDE 子进程必然失败**：Windsurf、Cursor、VS Code 等 IDE 拉起 hook 子进程时不分配控制 TTY，OSC52 兜底会以 `open /dev/tty: no such device or address` 失败。这是协议与进程模型的硬限制，openPE 无法在自己侧修复。
 - **Linux 纯 TTY / 远程 SSH 下系统剪贴板工具不可用**：`XDG_SESSION_TYPE=tty` 或 X server 不可达时 `xclip` / `xsel` 报 `Can't open display`；缺 `WAYLAND_DISPLAY` 时 `wl-copy` 不可用。此时复制必然失败，按 stderr 提示从 `last-prompt.txt` 取回。
-- **macOS / Windows / 桌面 Linux 完整会话**：`pbcopy` / `clip.exe` / `wl-copy` / `xclip` 默认可用，复制稳定。
+- **macOS / Windows / 桌面 Linux 完整会话**：`pbcopy` / `clip.exe` / `wl-copy` / `xclip` 默认可用，复制稳定。原生 Windows 下自定义 `OPENPE_COPY_COMMAND` 通过 `cmd.exe /C` 执行；POSIX/WSL 下通过 `sh -c` 执行。WSL 中若使用 `/mnt/c/Windows/System32/clip.exe` 或 `clip.exe`，openPE 会把 UTF-8 增强结果转为 `clip.exe` 需要的 UTF-16LE stdin；如果 `OPENPE_COPY_COMMAND` 包了一层自定义脚本，脚本自身需要保留 Unicode 编码。
 - **Claude 交互式兜底**：Claude Code 会展示被阻断 hook 的 stderr。openPE 默认利用这一点，在 Claude 剪贴板失败时直接显示完整增强 prompt，避免用户必须另开终端执行 `last --prompt`。
 - **强警告文案**：失败时 stderr 会明确说明"剪贴板未更新，请勿直接粘贴旧内容"。**看到这句不要按 Ctrl+V**，先复制 Claude feedback 中的增强 prompt，或按 stderr 指示从缓存文件取回。
 
@@ -605,9 +618,9 @@ go vet ./...
 go build ./cmd/openpe ./cmd/openpe-server
 ```
 
-### 项目治理参考
+### 本地治理参考
 
-让 AI 继续协作开发时，建议先读：
+让 AI 在本机继续协作开发时，建议先读这些私有治理资产；它们不属于公共仓库交付面：
 
 - `AGENTS.md`：项目定位、架构边界、事实源和治理规则的权威入口。
 - `skills/*/SKILL.md` 与 `skills/*/SPEC.md`：对应场景的执行流程和产物规范。
@@ -615,7 +628,7 @@ go build ./cmd/openpe ./cmd/openpe-server
 
 约束：
 
-- 所有 openPE 相关文档、日志和治理产物必须写入 `/home/oh/projects/openPE` 下的对应路径，不得误写到其它项目。
-- `docs/`、`.codex/`、`.augmentignore`、`.env` 等本地资产默认不提交。
+- 所有 openPE 相关文档、日志和治理产物必须写入当前项目根目录下的对应路径；项目根以 `AGENTS.md` 所在目录为准，不得误写到其它项目。
+- `AGENTS.md`、`skills/`、`docs/`、`.codex/`、`.augmentignore`、`.env`、本地测试与验证资产等默认不提交。
 - README 只记录当前已实现或已验证的能力；实验方案、失败路径和未来方向必须明确标注。
 - 涉及架构、provider、adapter、context pipeline 的修改，应先说明取舍、边界和验证方式。

@@ -14,8 +14,8 @@
 > 2. **代码签名风险** — 在 macOS 上，重签修补后的 bundle 会使 Apple
 >    notarization 失效；Gatekeeper 可能拒绝启动 IDE，直到手动移除
 >    quarantine 属性。
-> 3. **绕过 checksum** — `product.json` 会被修改以满足 Electron 的资源
->    完整性校验；这会**仅**禁用修补文件这一项安全网。
+> 3. **修改 checksum 基线** — `product.json` 会被修改以满足 Electron 的资源
+>    完整性校验；修补文件的校验值会变成 openPE 注入后的 bundle 值。
 > 4. **升级脆弱性** — Windsurf 每次更新都会覆盖修补后的 bundle；你
 >    必须在每次 IDE 升级后重新跑 `install`。之前的备份会保留，但
 >    可能与新版 IDE 不匹配。
@@ -72,16 +72,23 @@
   installer 会读 `~/.config/openpe/server.json` 拿到 loopback base URL 和
   bearer token，再把它们快照进修补后的 bundle。
 
+  注意：这个 token 快照会写入 Windsurf 的 `workbench.desktop.main.js`，该
+  bundle 通常是 0644 或等价的本机可读文件。请只把 server 暴露在 loopback，
+  并把 CORS 限定为 `null,app://windsurf`；如果你轮换
+  `OPENPE_SERVER_TOKEN`，需要重新运行 `install` 刷新 bundle 里的快照。
+  若怀疑本机 token 泄漏，先停止 server、轮换 token，再 uninstall/reinstall
+  或干净重装 Windsurf。
+
 ## 当前状态
 
 - **现状**：`status`、`install`、`uninstall`、`doctor` 都是真实可用的命令。
   `install` 会解析 Windsurf bundle、通过 `GET /v1/info` 校验本地
   `openpe-server` descriptor、备份 bundle 和 `product.json`、注入构建好的
-  `inject/dist/inject.js` payload 和 `globalThis.__openpe` bootstrap、移除
-  bundle 的 checksum 条目、并在 macOS 上重签 app。
+  `inject/dist/inject.js` payload 和 `globalThis.__openpe` bootstrap、更新
+  bundle 的 checksum 条目为修补后的值、并在 macOS 上重签 app。
 - 注入的 payload 会监听 Cascade 工具栏、添加 openPE logo 按钮、调本地
-  `POST /v1/prompt-enhance`、预览原文/增强文本、并尽力把增强后的
-  prompt 写回 Cascade 输入框。
+  `POST /v1/prompt-enhance`、用 toast 展示执行状态、并尽力把增强后的
+  prompt 写回 Cascade 输入框；写回失败时回退到剪贴板。
 - **平台端到端验证状态**：目前**只在 Windows 本地 Windsurf 上验证过完整
   install → 按钮注入 → 增强 → 回填 → uninstall 流程**。`installer/paths.py`
   代码层面对 macOS（`/Applications/Windsurf.app`）和 Linux（`/opt/Windsurf`
@@ -126,9 +133,9 @@ codex CLI / Claude CLI 级别的完整历史上下文。
 这个限制是**可观测**的，不是被掩盖的：用 `--debug` 安装后，
 `window.__openpeDebug.describeHistory()` 会显示 `source:
 'latest_trajectory' | 'none'` 以及形状级统计（counts、roles、80 字符
-preview）。完整调查日志见 `inject/README.md` § "Dev/test 诊断网关
-(`--debug`)" 和 `docs/architecture.md` § "Best-effort 抓取范围与 IDB
-拓扑"。
+preview）。调试入口见 `inject/README.md` § "Dev/test 诊断网关
+(`--debug`)"；公开 README 只保留可复现的结论，原始调查日志属于本地私有
+治理资产。
 
 ### 后续调查方向 — 通过 daemon 响应流榨出 full session
 
@@ -143,9 +150,9 @@ shape 不变，server、hook adapter、enhancer 都不需要改。
 
 回收到有意义多轮数据的概率估计**偏低**（daemon 是 server-stateful 的，
 没有任何架构动机往每轮响应里塞自己已有的状态），所以它停留在 open
-investigation，**没有**进入计划阶段。后人接手时建议先看
-`docs/architecture.md` 里 IDB topology 和 `SendUserCascadeMessage`
-body-shape 探针的原始记录，避免把同一批死胡同再趟一遍。
+investigation，**没有**进入计划阶段。后人接手时应先重新用 DevTools
+验证 IDB topology 和 `SendUserCascadeMessage` body-shape，避免把同一批
+死胡同再趟一遍。
 
 ## 使用方式
 
@@ -156,7 +163,9 @@ OPENPE_SERVER_LIFECYCLE_ENABLED=true \
 OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
 openpe-server
 
-# 2. 修改 TypeScript 源码后，重新构建 inject payload。
+# 2. 源码目录运行时，修改 TypeScript 源码后必须重新构建 inject payload。
+#    通过 Python package 安装时，构建包会把已生成的 inject/dist/inject.js
+#    放入 package data；如果缺失，installer 会明确报错。
 cd extensions/openpe-windsurf-patch/inject
 npm install
 npm run build
@@ -171,12 +180,14 @@ python3 -m installer install --i-accept-experimental-risk
 为了能日常稳定使用，请**不要**每次启动 server 都重新生成
 `OPENPE_SERVER_TOKEN`。生成一次后放在用户级 openPE env 文件或 shell
 profile 里复用，这样已经安装的按钮在 `openpe-server` 重启后仍然保持鉴
-权有效。如果浏览器 console 报 CORS 错误，在 Windsurf DevTools 里看请求
-的 `Origin`，把这个精确 origin 加到 `OPENPE_SERVER_CORS_ORIGINS`。
+权有效。`OPENPE_SERVER_CORS_ORIGINS` 必须精确包含 `null` 和
+`app://windsurf`，大小写也要一致；installer 会按 Go server 的精确匹配
+语义校验。如果浏览器 console 报 CORS 错误，在 Windsurf DevTools 里看
+请求的 `Origin`，把这个精确 origin 加到 `OPENPE_SERVER_CORS_ORIGINS`。
 
 安装后重启 Windsurf。openPE logo 按钮应该出现在 Cascade submit 控件旁
-边。点它、查看增强后的 prompt、用 `Apply to input`。如果 Windsurf 改了
-私有 DOM 导致按钮不出现，见 `inject/README.md`，扩充
+边。点它后会直接调用本地 server，并尽力把增强后的 prompt 写回 Cascade
+输入框；写回失败时会复制到剪贴板。如果 Windsurf 改了私有 DOM 导致按钮不出现，见 `inject/README.md`，扩充
 `findCascadeToolbar()` / `SUBMIT_BUTTON_SELECTORS` 后重新构建
 `inject/dist/inject.js`，再重跑 `install`。
 
@@ -230,6 +241,38 @@ python3 -m installer install --i-accept-experimental-risk --max-context-tokens 0
   硬编码在 `inject/src/cascade_context.ts::DEFAULT_HISTORY_BUDGET`，**不
   暴露成可配**。改这三个值需要修改源码并重新构建 inject payload。
 
+### Openace 代码检索上下文（按钮路径当前需要 workspace CWD）
+
+按钮路径走的是本地 `openpe-server` 的 `POST /v1/prompt-enhance`，与
+CLI / hook 入口共享同一套 `enhancer.Service` 构造逻辑。Openace context
+provider 在处理请求的进程启动或构造 service 时注入，所以按钮路径无需
+patch installer 侧再配置任何 Openace 相关变量；但是否真的发起代码检索，
+还取决于按钮请求是否带有非空 workspace `cwd`。
+
+例：
+
+```bash
+# 启动 openpe-server 时显式启用 Openace（installer 不感知此变量）
+OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
+OPENPE_SERVER_LIFECYCLE_ENABLED=true \
+OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
+OPENPE_OPENACE_ENABLED=true \
+OPENPE_OPENACE_ADDR=127.0.0.1:8765 \
+openpe-server
+```
+
+前提：本机 `openace-mcp` daemon 已运行且 8765 端口可联。详见主仓
+README § "[Openace 代码检索上下文](../../README.md#openace-代码检索上下文)" 的前置依赖清单。
+
+`enhancer.Service` 只有在请求带有非空 `Request.CWD` 时才会向 Openace
+daemon `POST /v1/retrieve` 检索一次，并把结果写入
+`Request.Context.Retrieval`。当前按钮 inject 层还没有可靠获取 Cascade
+workspace 路径，因此发给 server 的 `cwd` 为空；这意味着即使
+`openpe-server` 启用了 Openace，按钮路径也会按“无 workspace”处理并跳过
+代码检索。后续若补齐 workspace CWD 传递，Openace query 会把
+`Request.Client`、`Request.Mode` 和 `Request.CWD` 一并写入
+`information_request`，其中代码库定位仍以 `Request.CWD` 作为 daemon 检索目录。
+
 ## 测试
 
 ```bash
@@ -240,10 +283,12 @@ python3 -m unittest discover -v tests
 
 ## 架构
 
-见 [`docs/architecture.md`](docs/architecture.md)。简要：installer 实现了主
-openPE 仓库 `internal/integration/` 包定义的 `Injector` 和
-`BundlePatcher` 契约，所以同样的模式可以通过新增同级子项目复用到未
-来的 IDE（Cursor、VS Code Composer）。
+简要：installer 用 Python 复刻主 openPE 仓库 `internal/integration/`
+包定义的 `Injector` 和 `BundlePatcher` 契约；bundle patch、checksum
+更新、回滚、codesign、descriptor handshake、inject payload 查找都收敛在
+`installer/` 下。未来如需支持其它 IDE（Cursor、VS Code Composer），应
+新增同级子项目，而不是把 IDE 私有 DOM、安装路径或签名规则塞回主 Go
+core。
 
 ## 许可证
 
