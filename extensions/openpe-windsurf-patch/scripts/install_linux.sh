@@ -45,6 +45,7 @@ done
 
 if [ "$NEED_SUDO" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
   echo "▸ Windsurf is installed under a system path; re-running under sudo."
+  cd "$SUBPROJECT_DIR"
   exec sudo -E python3 -m installer install "$@"
 fi
 

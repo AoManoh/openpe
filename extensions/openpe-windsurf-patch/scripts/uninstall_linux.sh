@@ -26,6 +26,7 @@ done
 
 if [ "$NEED_SUDO" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
   echo "▸ Re-running under sudo for system-path Windsurf install."
+  cd "$SUBPROJECT_DIR"
   exec sudo -E python3 -m installer uninstall "$@"
 fi
 

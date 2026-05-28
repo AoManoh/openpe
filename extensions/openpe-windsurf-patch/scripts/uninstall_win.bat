@@ -1,5 +1,7 @@
 @echo off
 REM Double-click launcher for openpe-windsurf-patch uninstall on Windows.
+REM This script does not perform UAC elevation; use an Administrator terminal
+REM if your Windsurf install is under a protected system directory.
 
 setlocal enableextensions
 

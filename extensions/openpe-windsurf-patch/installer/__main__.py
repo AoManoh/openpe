@@ -6,7 +6,7 @@ on top of the Phase 2-3 modules:
 * :mod:`installer.paths` — Windsurf install discovery
 * :mod:`installer.handshake` — local openpe-server descriptor + /v1/info
 * :mod:`installer.bundle` — marker injection + backup / restore
-* :mod:`installer.checksum` — product.json integrity bypass
+* :mod:`installer.checksum` — product.json integrity checksum update
 * :mod:`installer.codesign` — macOS ad-hoc re-signing
 
 The EULA / user-assumes-risk disclaimer is enforced at the CLI boundary;
@@ -18,9 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import site
 import sys
+import sysconfig
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import __version__
 from .bundle import (
@@ -45,6 +48,7 @@ from .handshake import (
     LocalServerDescriptor,
     default_descriptor_path,
     read_descriptor,
+    validate_windsurf_cors,
     verify_server,
 )
 from .paths import WindsurfPaths, resolve_paths
@@ -60,7 +64,7 @@ proceeding you acknowledge that you have read the README and accept:
   • Possible EULA violation — Windsurf / Codeium may suspend your account
     or refuse support for a patched install.
   • Code-signing invalidation on macOS (Gatekeeper may refuse to launch).
-  • Disabled checksum integrity check for the patched file only.
+  • Modified checksum baseline for the patched file only.
   • Upgrade fragility — every Windsurf update overwrites the patch.
   • No warranty whatsoever.
 
@@ -201,9 +205,36 @@ def _subproject_root() -> Path:
 
 
 def _load_inject_payload() -> Optional[Path]:
-    """Locate the built inject.js payload (Phase 4 artefact)."""
-    candidate = _subproject_root() / "inject" / "dist" / "inject.js"
-    return candidate if candidate.is_file() else None
+    """Locate the built inject.js payload from source or package data."""
+    for candidate in _inject_payload_candidates():
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _inject_payload_candidates() -> List[Path]:
+    candidates = [_subproject_root() / "inject" / "dist" / "inject.js"]
+    data_roots = [
+        sysconfig.get_paths().get("data", "").strip(),
+        getattr(site, "USER_BASE", "").strip(),
+    ]
+    seen = {str(candidates[0])}
+    for data_root in data_roots:
+        if not data_root:
+            continue
+        candidate = (
+            Path(data_root)
+            / "share"
+            / "openpe-windsurf-patch"
+            / "inject"
+            / "dist"
+            / "inject.js"
+        )
+        if str(candidate) in seen:
+            continue
+        candidates.append(candidate)
+        seen.add(str(candidate))
+    return candidates
 
 
 def _resolve_max_context_tokens(cli_value: Optional[int]) -> Optional[int]:
@@ -433,19 +464,26 @@ def _cmd_install(args: argparse.Namespace) -> int:
         return EXIT_DESCRIPTOR_ERROR
     descriptor_path = default_descriptor_path()
     try:
-        verify_server(descriptor)
+        info = verify_server(descriptor)
+        validate_windsurf_cors(info)
     except HandshakeError as exc:
         sys.stderr.write(
             f"openpe-windsurf-patch: cannot reach openpe-server: {exc}\n"
-            "  is openpe-server actually running, and does the descriptor's bearer token match?\n"
+            "  is openpe-server actually running, does the descriptor's bearer token match,\n"
+            "  and did you start it with OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf?\n"
         )
         return EXIT_HANDSHAKE_ERROR
     payload_path = _load_inject_payload()
     if payload_path is None:
+        candidate_lines = "\n".join(
+            f"  - {candidate}" for candidate in _inject_payload_candidates()
+        )
         sys.stderr.write(
             "openpe-windsurf-patch: inject payload missing.\n"
-            f"  expected file: {_subproject_root() / 'inject' / 'dist' / 'inject.js'}\n"
-            "  run `npm install && npm run build` inside inject/ (Phase 4 task).\n"
+            "  searched:\n"
+            f"{candidate_lines}\n"
+            "  source checkout: run `npm install && npm run build` inside inject/.\n"
+            "  packaged install: rebuild/reinstall the wheel with inject/dist/inject.js included.\n"
         )
         return EXIT_INJECT_PAYLOAD_MISSING
     max_context_tokens = _resolve_max_context_tokens(args.max_context_tokens)
@@ -482,16 +520,34 @@ def _cmd_install(args: argparse.Namespace) -> int:
         already_patched = has_marker(paths.bundle_file)
     except BundleError:
         already_patched = False
+    rollback_tmp: Optional[tempfile.TemporaryDirectory] = None
+    rollback_bundle: Optional[Path] = None
+    rollback_product: Optional[Path] = None
     try:
+        rollback_tmp = tempfile.TemporaryDirectory(prefix="openpe-windsurf-patch-rollback-")
+        rollback_dir = Path(rollback_tmp.name)
+        rollback_bundle = backup_bundle(paths.bundle_file, rollback_dir)
+        rollback_product = backup_product_json(paths.product_file, rollback_dir)
         if already_patched:
+            existing_bundle_backup = _find_latest_backup(paths.backup_dir, paths.bundle_file.name)
+            existing_product_backup = _find_latest_backup(paths.backup_dir, paths.product_file.name)
+            if existing_bundle_backup is None or existing_product_backup is None:
+                sys.stderr.write(
+                    "openpe-windsurf-patch: bundle is already patched but no complete backup exists.\n"
+                    f"  searched: {paths.backup_dir}\n"
+                    "  refusing to refresh because a failed install could not be rolled back safely.\n"
+                )
+                if rollback_tmp is not None:
+                    rollback_tmp.cleanup()
+                return EXIT_NO_BACKUP
             sys.stderr.write(
                 "  ▸ bundle already patched; reusing the existing backup\n"
             )
         else:
-            bundle_backup = backup_bundle(paths.bundle_file, paths.backup_dir)
-            product_backup = backup_product_json(paths.product_file, paths.backup_dir)
-            sys.stderr.write(f"  ✓ backup bundle  → {bundle_backup}\n")
-            sys.stderr.write(f"  ✓ backup product → {product_backup}\n")
+            permanent_bundle_backup = backup_bundle(paths.bundle_file, paths.backup_dir)
+            permanent_product_backup = backup_product_json(paths.product_file, paths.backup_dir)
+            sys.stderr.write(f"  ✓ backup bundle  → {permanent_bundle_backup}\n")
+            sys.stderr.write(f"  ✓ backup product → {permanent_product_backup}\n")
         prelude = _build_payload_prelude(
             descriptor,
             descriptor_path=descriptor_path if args.fs_probe else None,
@@ -515,8 +571,11 @@ def _cmd_install(args: argparse.Namespace) -> int:
         sys.stderr.write(
             f"  ✓ patched product.json (checksum updated to {new_sum[:12]}...)\n"
         )
-    except (BundleError, ChecksumError) as exc:
+    except (BundleError, ChecksumError, OSError) as exc:
         sys.stderr.write(f"openpe-windsurf-patch: install failed mid-patch: {exc}\n")
+        _rollback_failed_install(paths, rollback_bundle, rollback_product)
+        if rollback_tmp is not None:
+            rollback_tmp.cleanup()
         return EXIT_BUNDLE_ERROR
     if is_macos():
         try:
@@ -525,16 +584,41 @@ def _cmd_install(args: argparse.Namespace) -> int:
         except CodesignError as exc:
             sys.stderr.write(
                 f"openpe-windsurf-patch: codesign failed: {exc}\n"
-                f"  bundle is patched but Gatekeeper will block launch.\n"
-                f"  manual fix: {remove_quarantine_hint(paths.app_root)}\n"
+                f"  manual fix if rollback is incomplete: {remove_quarantine_hint(paths.app_root)}\n"
             )
+            _rollback_failed_install(paths, rollback_bundle, rollback_product)
+            if rollback_tmp is not None:
+                rollback_tmp.cleanup()
             return EXIT_CODESIGN_ERROR
+    if rollback_tmp is not None:
+        rollback_tmp.cleanup()
     sys.stdout.write(
         "openpe-windsurf-patch: install complete.\n"
         "  restart Windsurf to pick up the openPE logo button.\n"
         f"  to revert: python3 -m installer uninstall {('--app-dir ' + args.app_dir) if args.app_dir else ''}\n"
     )
     return EXIT_OK
+
+
+def _rollback_failed_install(
+    paths: WindsurfPaths,
+    bundle_backup: Optional[Path],
+    product_backup: Optional[Path],
+) -> None:
+    """Best-effort rollback for install failures after backups exist."""
+    if bundle_backup is None or product_backup is None:
+        sys.stderr.write("  ! rollback skipped: complete backup pair was not created yet\n")
+        return
+    try:
+        restore_bundle(paths.bundle_file, bundle_backup)
+        sys.stderr.write(f"  ✓ rolled back bundle from {bundle_backup.name}\n")
+    except BundleError as exc:
+        sys.stderr.write(f"  ! rollback failed for bundle: {exc}\n")
+    try:
+        restore_product_json(paths.product_file, product_backup)
+        sys.stderr.write(f"  ✓ rolled back product.json from {product_backup.name}\n")
+    except BundleError as exc:
+        sys.stderr.write(f"  ! rollback failed for product.json: {exc}\n")
 
 
 def _cmd_uninstall(args: argparse.Namespace) -> int:

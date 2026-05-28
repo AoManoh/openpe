@@ -45,3 +45,6 @@ openpe-windsurf-patch = "installer.__main__:main"
 where = ["."]
 include = ["installer*"]
 exclude = ["tests*", "inject*", "docs*", "scripts*"]
+
+[tool.setuptools.data-files]
+"share/openpe-windsurf-patch/inject/dist" = ["inject/dist/inject.js"]

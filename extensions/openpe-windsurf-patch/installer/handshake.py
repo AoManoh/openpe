@@ -16,12 +16,15 @@ import json
 import os
 import stat
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 DEFAULT_DESCRIPTOR_NAME = "server.json"
+WINDSURF_CORS_ORIGINS = ("null", "app://windsurf")
 
 
 class DescriptorError(Exception):
@@ -58,6 +61,7 @@ class LocalServerDescriptor:
     def validate(self) -> None:
         if not self.base_url:
             raise DescriptorError("descriptor: base_url is required")
+        validate_loopback_base_url(self.base_url)
         if not self.token:
             raise DescriptorError("descriptor: token is required")
         if self.pid <= 0:
@@ -65,6 +69,68 @@ class LocalServerDescriptor:
 
     def info_url(self) -> str:
         return self.base_url.rstrip("/") + "/v1/info"
+
+
+def validate_loopback_base_url(base_url: str) -> None:
+    """Reject descriptor URLs that would send the bearer token off-host."""
+    try:
+        parsed = urlparse(base_url.strip())
+    except ValueError as exc:
+        raise DescriptorError(f"descriptor: invalid base_url: {exc}") from exc
+    if parsed.scheme not in {"http", "https"}:
+        raise DescriptorError("descriptor: base_url must use http or https")
+    if not parsed.hostname:
+        raise DescriptorError("descriptor: base_url must include a host")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise DescriptorError(f"descriptor: invalid base_url port: {exc}") from exc
+    if parsed.username or parsed.password:
+        raise DescriptorError("descriptor: base_url must not include credentials")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise DescriptorError(
+            "descriptor: base_url must not include params, query, or fragment"
+        )
+    if parsed.path not in {"", "/"}:
+        raise DescriptorError("descriptor: base_url must not include a path")
+    host = parsed.hostname.strip().lower()
+    if host == "localhost":
+        return
+    try:
+        if ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise DescriptorError("descriptor: base_url must point to a loopback host")
+
+
+def validate_windsurf_cors(info: Dict[str, Any]) -> None:
+    """Ensure the running server allows the injected Electron fetch origin."""
+    if info.get("auth_enabled") is not True:
+        raise HandshakeError(
+            "openpe-server auth is disabled; start it with OPENPE_SERVER_TOKEN set"
+        )
+    if info.get("cors_enabled") is not True:
+        raise HandshakeError(
+            "openpe-server CORS is disabled; start it with "
+            "OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf"
+        )
+    raw_origins = info.get("cors_origins")
+    if not isinstance(raw_origins, list):
+        raise HandshakeError("openpe-server /v1/info did not include cors_origins")
+    origins = {str(origin).strip() for origin in raw_origins if str(origin).strip()}
+    if "*" in origins:
+        raise HandshakeError(
+            "openpe-server CORS wildcard origin is not accepted for Windsurf patch installs"
+        )
+    required_origins = set(WINDSURF_CORS_ORIGINS)
+    missing = sorted(required_origins - origins)
+    if not missing:
+        return
+    required = ", ".join(WINDSURF_CORS_ORIGINS)
+    raise HandshakeError(
+        f"openpe-server CORS origins must exactly include all of: {required}"
+    )
 
 
 def default_descriptor_path() -> Path:
@@ -129,6 +195,10 @@ def verify_server(
     :class:`HandshakeError` on any network, HTTP, or decoding failure so
     callers can surface a single error type.
     """
+    try:
+        descriptor.validate()
+    except DescriptorError as exc:
+        raise HandshakeError(str(exc)) from exc
     req = Request(
         descriptor.info_url(),
         headers={"Authorization": f"Bearer {descriptor.token}"},

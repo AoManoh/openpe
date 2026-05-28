@@ -11,8 +11,10 @@ This module exposes a tiny, well-tested surface for:
 
 * ``find_table`` — locate the checksum table in a parsed ``product.json``;
 * ``get_checksum`` — read the entry for a given relative path;
-* ``patch_product_json`` — update or remove the entry for a path and
-  atomically rewrite the file;
+* ``patch_product_json`` — update the entry for a path and atomically
+  rewrite the file;
+* ``remove_checksum_entry`` — explicitly remove a legacy entry when a
+  caller really wants checksum bypass semantics;
 * ``backup_product_json`` / ``restore_product_json`` — snapshot pre-patch
   state so ``uninstall`` can revert cleanly.
 
@@ -100,15 +102,14 @@ def patch_product_json(
     product_path: Path,
     *,
     bundle_relpath: str = DEFAULT_BUNDLE_RELPATH,
-    new_value: Optional[str] = None,
+    new_value: str,
 ) -> None:
-    """Atomically rewrite ``product.json`` to bypass the integrity check
+    """Atomically rewrite ``product.json`` to keep the integrity table current
     for ``bundle_relpath``.
 
-    When ``new_value`` is ``None`` the entry is removed entirely (Electron
-    skips integrity verification for any path not listed); when ``new_value``
-    is a string the entry is updated in place. If the checksum table does
-    not exist the file is left untouched.
+    Windsurf treats a missing entry as a corrupted install, so callers must
+    provide the recomputed checksum and this helper updates the entry in
+    place. If the checksum table does not exist the file is left untouched.
     """
     product = _load(product_path)
     field = find_table(product)
@@ -116,10 +117,27 @@ def patch_product_json(
         # Nothing to patch — file already accepts any payload.
         return
     table: Dict[str, Any] = product[field]
-    if new_value is None:
-        table.pop(bundle_relpath, None)
-    else:
-        table[bundle_relpath] = new_value
+    table[bundle_relpath] = new_value
+    serialised = json.dumps(product, indent=2, sort_keys=False, ensure_ascii=False)
+    _atomic_write(product_path, serialised.encode("utf-8") + b"\n", mode=0o644)
+
+
+def remove_checksum_entry(
+    product_path: Path,
+    *,
+    bundle_relpath: str = DEFAULT_BUNDLE_RELPATH,
+) -> None:
+    """Explicit legacy bypass helper for hosts that skip missing checksums.
+
+    Do not use this for Windsurf installs: Windsurf 1.110.x surfaces a
+    corrupted-install warning when the patched bundle entry is absent.
+    """
+    product = _load(product_path)
+    field = find_table(product)
+    if field is None:
+        return
+    table: Dict[str, Any] = product[field]
+    table.pop(bundle_relpath, None)
     serialised = json.dumps(product, indent=2, sort_keys=False, ensure_ascii=False)
     _atomic_write(product_path, serialised.encode("utf-8") + b"\n", mode=0o644)
 

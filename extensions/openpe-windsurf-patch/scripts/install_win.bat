@@ -1,8 +1,9 @@
 @echo off
 REM Double-click launcher for the openpe-windsurf-patch installer on Windows.
 REM Validates Python + npm, ensures the inject payload is built, then
-REM re-invokes itself elevated via PowerShell when the target Windsurf
-REM install needs admin rights.
+REM runs the installer from the subproject root. It does not perform UAC
+REM elevation; use an Administrator terminal if your Windsurf install is
+REM under a protected system directory.
 
 setlocal enableextensions enabledelayedexpansion
 
@@ -45,7 +46,9 @@ if not exist "%INJECT_PAYLOAD%" (
 )
 
 echo.
-echo ^>^> Running installer (may prompt for UAC elevation)
+echo ^>^> Running installer
+echo    If the target install is under Program Files, rerun this script from
+echo    an Administrator terminal.
 echo.
 
 cd /d "%SUBPROJECT_DIR%"
