@@ -68,11 +68,23 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 	}
 
 	rolloutPath, err := findRolloutPath(c.home, current.SessionID)
-	if err != nil || rolloutPath == "" {
+	if err != nil {
+		// Genuine failure walking the sessions dir: surface it so callers can
+		// warn the user instead of silently enhancing without history.
+		return Result{SessionID: current.SessionID}, err
+	}
+	if rolloutPath == "" {
+		// No matching rollout file found: nothing to include, not a failure.
 		return Result{SessionID: current.SessionID}, nil
 	}
 	messages, ok, err := readRolloutMessages(rolloutPath, cwd)
-	if err != nil || !ok {
+	if err != nil {
+		// Found the session but could not read/parse its rollout: a real
+		// failure to read the conversation history, not a quiet skip.
+		return Result{SessionID: current.SessionID, RolloutPath: rolloutPath}, err
+	}
+	if !ok {
+		// cwd mismatch: this session belongs to another workspace; skip quietly.
 		return Result{SessionID: current.SessionID, RolloutPath: rolloutPath}, nil
 	}
 	return Result{
@@ -136,6 +148,11 @@ func findRolloutPath(home string, sessionID string) (string, error) {
 		return nil
 	})
 	if err != nil {
+		// An absent sessions directory just means there is no recorded session
+		// to read — that is "no history", not a failure to surface.
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
 		return "", err
 	}
 	return found, nil

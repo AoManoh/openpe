@@ -382,7 +382,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if codexadapter.ShouldSkipDuplicateHook(*hookScope, os.Getenv("OPENPE_ENV_FILE"), effectiveCWD) {
 		return 0
 	}
-	history := codexSessionHistory(input.Prompt, effectiveCWD, cfg)
+	history, histErr := codexSessionHistory(input.Prompt, effectiveCWD, cfg)
 	provider, err := newProvider(openai.Config{
 		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
 		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
@@ -413,6 +413,16 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "codex"))
 		output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("codex"))
 	}
+	// History was enabled but reading it genuinely failed: tell the user so the
+	// result is not mistaken for a history-aware enhancement.
+	if histErr != nil {
+		warn := localizedHistoryReadFailure(histErr, cfg.Language)
+		if output.Decision == "block" {
+			output.Reason = strings.TrimSpace(warn + " " + output.Reason)
+		} else {
+			output.SystemMessage = strings.TrimSpace(warn + " " + output.SystemMessage)
+		}
+	}
 	if output.Decision == "block" && *blockOutput == "stderr" {
 		if *terminalPreview {
 			_ = codexadapter.WriteTerminalPreview(output.TerminalPreview)
@@ -426,19 +436,20 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	return codexadapter.EncodeHookOutputOrFallback(stdout, output)
 }
 
-func codexSessionHistory(prompt string, cwd string, cfg config.Config) []enhancer.Message {
+// codexSessionHistory returns the Codex session history to inject. The error is
+// non-nil only on a genuine read failure (not a quiet "no history available"
+// skip); callers surface it so the user is not misled into thinking the
+// enhancement included history when reading it actually failed.
+func codexSessionHistory(prompt string, cwd string, cfg config.Config) ([]enhancer.Message, error) {
 	if !cfg.Codex.History.Enabled {
-		return nil
+		return nil, nil
 	}
 	result, err := codexhistory.New(codexhistory.Options{
 		Home:        cfg.Codex.History.Home,
 		MaxMessages: cfg.Codex.History.MaxMessages,
 		MaxChars:    cfg.Codex.History.MaxChars,
 	}).Retrieve(prompt, cwd)
-	if err != nil {
-		return nil
-	}
-	return result.Messages
+	return result.Messages, err
 }
 
 func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
@@ -573,7 +584,7 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 		overrideCWD = workingDir
 		effectiveCWD = workingDir
 	}
-	history := claudeTranscriptHistory(input.TranscriptPath, effectiveCWD, cfg)
+	history, histErr := claudeTranscriptHistory(input.TranscriptPath, effectiveCWD, cfg)
 	provider, err := newProvider(openai.Config{
 		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
 		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
@@ -610,22 +621,28 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 	if result.CopyError != nil && cfg.Delivery.ClaudePromptFallback {
 		status = delivery.AppendPromptFallback(status, output.PreviewPrompt, cfg.Language)
 	}
+	// History was enabled but reading it genuinely failed: prepend a warning so
+	// the user is not misled into thinking the enhancement included history.
+	if histErr != nil {
+		status = localizedHistoryReadFailure(histErr, cfg.Language) + "\n" + status
+	}
 	fmt.Fprintln(stderr, status)
 	return 2
 }
 
-func claudeTranscriptHistory(transcriptPath string, cwd string, cfg config.Config) []enhancer.Message {
+// claudeTranscriptHistory returns the Claude transcript history to inject. The
+// error is non-nil only on a genuine read failure (not a quiet "no transcript"
+// skip); the caller surfaces it so a failed read is not mistaken for a
+// history-aware enhancement.
+func claudeTranscriptHistory(transcriptPath string, cwd string, cfg config.Config) ([]enhancer.Message, error) {
 	if !cfg.Claude.Transcript.Enabled {
-		return nil
+		return nil, nil
 	}
 	result, err := claudetranscript.New(claudetranscript.Options{
 		MaxMessages: cfg.Claude.Transcript.MaxMessages,
 		MaxChars:    cfg.Claude.Transcript.MaxChars,
 	}).Retrieve(transcriptPath, cwd)
-	if err != nil {
-		return nil
-	}
-	return result.Messages
+	return result.Messages, err
 }
 
 func runClaudeHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
@@ -1140,6 +1157,16 @@ func localizedInvalidWindsurfHookInput(err error, language string) string {
 		return fmt.Sprintf("openPE skipped prompt enhancement: invalid Windsurf hook input: %v", err)
 	}
 	return fmt.Sprintf("openPE 跳过增强：Windsurf hook 输入无效：%v", err)
+}
+
+// localizedHistoryReadFailure is shown when conversation-history reading was
+// enabled but genuinely failed. It makes the degraded result explicit instead
+// of silently producing a history-less enhancement the user assumes had history.
+func localizedHistoryReadFailure(err error, language string) string {
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE warning: failed to read conversation history (%v); this enhancement does NOT include history context.", err)
+	}
+	return fmt.Sprintf("openPE 提示：读取历史上下文失败（%v），本次增强未包含会话历史。", err)
 }
 
 func localizedEnhanceFailure(message string, language string) string {
