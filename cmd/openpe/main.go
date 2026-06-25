@@ -18,6 +18,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/clipboard"
 	codexadapter "github.com/AoManoh/openpe/internal/adapters/codex"
 	"github.com/AoManoh/openpe/internal/adapters/delivery"
+	devinadapter "github.com/AoManoh/openpe/internal/adapters/devin"
 	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
 	"github.com/AoManoh/openpe/internal/config"
 	claudetranscript "github.com/AoManoh/openpe/internal/context/claudetranscript"
@@ -57,6 +58,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, new
 		return runClaude(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "windsurf":
 		return runWindsurf(args[1:], stdin, stdout, stderr, newProvider, getwd)
+	case "devin":
+		return runDevin(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -874,6 +877,252 @@ func runWindsurfHookInstall(args []string, stdout io.Writer, stderr io.Writer, g
 	return 0
 }
 
+func runDevin(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	if len(args) > 0 && args[0] == "hook" {
+		return runDevinHook(args[1:], stdin, stdout, stderr, newProvider, getwd)
+	}
+	fmt.Fprintf(stderr, "unknown devin command\n")
+	printDevinHookUsage(stderr)
+	return 2
+}
+
+func runDevinHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	if len(args) == 0 {
+		printDevinHookUsage(stderr)
+		return 2
+	}
+	switch args[0] {
+	case "run":
+		return runDevinHookRun(args[1:], stdin, stdout, stderr, newProvider, getwd)
+	case "install":
+		return runDevinHookInstall(args[1:], stdout, stderr, getwd)
+	case "last":
+		return runDevinHookLast(args[1:], stdout, stderr)
+	case "-h", "--help", "help":
+		printDevinHookUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown devin hook command: %s\n", args[0])
+		printDevinHookUsage(stderr)
+		return 2
+	}
+}
+
+func runDevinHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
+	return runDeliveryLast("devin hook last", "devin", args, stdout, stderr)
+}
+
+func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+	cfg := config.Load()
+	fs := flag.NewFlagSet("devin hook run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	client := fs.String("client", "devin", "target client name")
+	mode := fs.String("mode", "agent", "prompt mode")
+	auto := fs.Bool("auto", false, "enhance every prompt and inject it as additional context")
+	blockOutput := fs.String("block-output", "json", "preview block output: json or stderr")
+	terminalPreview := fs.Bool("terminal-preview", envBoolOrDefault("OPENPE_DEVIN_TERMINAL_PREVIEW", false), "experimental: write full Markdown preview directly to /dev/tty when blocking")
+	copyPreview := fs.Bool("copy-preview", envBoolOrDefault("OPENPE_DEVIN_COPY_PREVIEW", false), "copy enhanced prompt to the system clipboard when blocking")
+	hookScope := fs.String("hook-scope", envOrDefault("OPENPE_HOOK_SCOPE", ""), "hook scope for duplicate suppression: user or project")
+	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
+	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
+	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
+	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
+	}
+	input, err := devinadapter.DecodeHookInput(stdin)
+	if err != nil {
+		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.Skip(localizedInvalidDevinHookInput(err, cfg.Language)))
+	}
+	manualTrigger, shouldHandle := devinadapter.ShouldHandleHook(input, *auto)
+	if !shouldHandle {
+		return 0
+	}
+	// A project-scope hook is redundant when a user-scope openPE hook already
+	// exists, so suppress it to avoid enhancing the same prompt twice.
+	if strings.TrimSpace(*hookScope) == "project" && devinadapter.HasUserOpenPEHookConfig() {
+		return 0
+	}
+	// Devin's UserPromptSubmit stdin does not carry cwd; fall back to
+	// DEVIN_PROJECT_DIR (set for command hooks) then the process cwd.
+	overrideCWD := strings.TrimSpace(input.CWD)
+	if overrideCWD == "" {
+		overrideCWD = strings.TrimSpace(os.Getenv("DEVIN_PROJECT_DIR"))
+	}
+	if overrideCWD == "" {
+		workingDir, err := getwd()
+		if err != nil {
+			return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("get cwd: %v", err), cfg.Language))
+		}
+		overrideCWD = workingDir
+	}
+	provider, err := newProvider(openai.Config{
+		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
+		Model:   model.ValueOrDefault(cfg.Model),
+		Timeout: *timeout,
+	})
+	if err != nil {
+		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure provider: %v", err), cfg.Language))
+	}
+	service, err := newEnhancerService(provider, cfg)
+	if err != nil {
+		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+	}
+	output, err := devinadapter.HandleHook(context.Background(), service, input, devinadapter.HookOptions{
+		Client:           *client,
+		Mode:             *mode,
+		Auto:             *auto,
+		CWD:              overrideCWD,
+		Language:         cfg.Language,
+		Timeout:          timeoutOrDefault(*timeout),
+		MaxContextTokens: cfg.MaxContextTokens,
+	})
+	if err != nil {
+		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, err.Error(), cfg.Language))
+	}
+	if output.Decision == "block" && *copyPreview && output.PreviewPrompt != "" {
+		result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "devin"))
+		output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("devin"))
+	}
+	if output.Decision == "block" && *blockOutput == "stderr" {
+		if *terminalPreview {
+			_ = devinadapter.WriteTerminalPreview(output.TerminalPreview)
+		}
+		fmt.Fprintln(stderr, output.Reason)
+		return 2
+	}
+	if output.Decision == "block" && *blockOutput != "json" {
+		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(true, fmt.Sprintf("unsupported block-output %q", *blockOutput), cfg.Language))
+	}
+	return devinadapter.EncodeHookOutputOrFallback(stdout, output)
+}
+
+func runDevinHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
+	fs := flag.NewFlagSet("devin hook install", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	scope := fs.String("scope", "user", "hook scope: user or project")
+	target := fs.String("path", "", "explicit hooks file path (.devin/hooks.v1.json or a devin config.json)")
+	openpeBin := fs.String("openpe-bin", "", "openpe executable path; defaults to PATH lookup")
+	envFile := fs.String("env-file", "", "dotenv file loaded by the hook; defaults to ~/.config/openpe/.env for user hooks or project .env for project hooks")
+	hookTimeout := fs.Int("hook-timeout", 120, "Devin hook timeout in seconds")
+	dryRun := fs.Bool("dry-run", false, "print the merged config without writing it")
+	if ok, code := parseFlagSet(fs, args); !ok {
+		return code
+	}
+	if *hookTimeout <= 0 {
+		fmt.Fprintln(stderr, "hook-timeout must be positive")
+		return 1
+	}
+	hooksPath, err := devinHooksPath(*scope, *target, getwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve devin hooks path: %v\n", err)
+		return 1
+	}
+	bin, err := resolveOpenPEBin(*openpeBin)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve openpe binary: %v\n", err)
+		return 1
+	}
+	hookEnvFile, err := devinHookEnvFile(*scope, *target, *envFile, getwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve hook env file: %v\n", err)
+		return 1
+	}
+	var existing []byte
+	if data, err := os.ReadFile(hooksPath); err == nil {
+		existing = data
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "read devin hooks config: %v\n", err)
+		return 1
+	}
+	command := devinadapter.HookCommandForScope(bin, hookEnvFile, *scope)
+	var merged []byte
+	if devinConfigIsWrapped(hooksPath) {
+		// ~/.config/devin/config.json (or config.local.json): hooks live under
+		// the top-level "hooks" key; preserve all other config.
+		merged, err = devinadapter.MergeConfigHooks(existing, command, *hookTimeout)
+	} else {
+		// .devin/hooks.v1.json: the hooks object is the entire file.
+		merged, err = devinadapter.MergeStandaloneHooks(existing, command, *hookTimeout)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "merge devin hooks config: %v\n", err)
+		return 1
+	}
+	changed := !bytes.Equal(bytes.TrimSpace(existing), bytes.TrimSpace(merged))
+	if *dryRun {
+		_, _ = stdout.Write(merged)
+		return 0
+	}
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "create devin hooks directory: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(hooksPath, merged, 0o644); err != nil {
+		fmt.Fprintf(stderr, "write devin hooks config: %v\n", err)
+		return 1
+	}
+	if changed {
+		fmt.Fprintf(stdout, "installed openPE Devin hook: %s\n", hooksPath)
+	} else {
+		fmt.Fprintf(stdout, "openPE Devin hook already installed: %s\n", hooksPath)
+	}
+	return 0
+}
+
+func devinHooksPath(scope string, target string, getwd func() (string, error)) (string, error) {
+	if strings.TrimSpace(target) != "" {
+		return filepath.Clean(target), nil
+	}
+	switch scope {
+	case "project":
+		cwd, err := getwd()
+		if err != nil {
+			return "", err
+		}
+		return devinadapter.ProjectHooksPath(cwd), nil
+	case "user":
+		path := devinadapter.UserConfigPath()
+		if path == "" {
+			return "", fmt.Errorf("resolve user home directory")
+		}
+		return path, nil
+	default:
+		return "", fmt.Errorf("unsupported scope %q", scope)
+	}
+}
+
+// devinConfigIsWrapped reports whether the target path is a Devin config file
+// (hooks nested under "hooks") rather than a standalone .devin/hooks.v1.json
+// (hooks object is the whole file).
+func devinConfigIsWrapped(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	return base == "config.json" || base == "config.local.json"
+}
+
+func devinHookEnvFile(scope string, target string, value string, getwd func() (string, error)) (string, error) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return filepath.Abs(value)
+	}
+	if scope == "user" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".config", "openpe", ".env"), nil
+	}
+	if strings.TrimSpace(target) != "" {
+		return "", nil
+	}
+	cwd, err := getwd()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cwd, ".env"), nil
+}
+
 func codexHooksPath(scope string, target string, getwd func() (string, error)) (string, error) {
 	if strings.TrimSpace(target) != "" {
 		return filepath.Clean(target), nil
@@ -1080,10 +1329,11 @@ func parseFlagSet(fs *flag.FlagSet, args []string) (bool, int) {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "正式使用：安装 hook 后，在 Codex、Claude Code 或 Windsurf Cascade 对话终端输入 `pe <内容>`。")
+	fmt.Fprintln(w, "正式使用：安装 hook 后，在 Codex、Claude Code、Devin CLI 或 Windsurf Cascade 对话终端输入 `pe <内容>`。")
 	fmt.Fprintln(w, "测试/调试命令：")
 	fmt.Fprintln(w, "  openpe codex hook install [--scope project|user]")
 	fmt.Fprintln(w, "  openpe claude hook install")
+	fmt.Fprintln(w, "  openpe devin hook install [--scope project|user]")
 	fmt.Fprintln(w, "  openpe windsurf hook install [--scope project|user]")
 	fmt.Fprintln(w, "  openpe enhance [--prompt text] [--json] [--client name] [--mode name]")
 	fmt.Fprintln(w, "  openpe codex [--prompt text] [--dry-run] [--codex-arg arg]...")
@@ -1091,6 +1341,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  openpe codex last [--path] [--prompt]")
 	fmt.Fprintln(w, "  openpe claude hook run")
 	fmt.Fprintln(w, "  openpe claude hook last [--path] [--prompt]")
+	fmt.Fprintln(w, "  openpe devin hook run")
+	fmt.Fprintln(w, "  openpe devin hook last [--path] [--prompt]")
 	fmt.Fprintln(w, "  openpe windsurf hook run")
 	fmt.Fprintln(w, "  openpe windsurf hook last [--path] [--prompt]")
 }
@@ -1117,6 +1369,21 @@ func printWindsurfHookUsage(w io.Writer) {
 	fmt.Fprintln(w, "  openpe windsurf hook install [--scope project|user] [--path hooks.json] [--openpe-bin path]")
 	fmt.Fprintln(w, "  openpe windsurf hook run")
 	fmt.Fprintln(w, "  openpe windsurf hook last [--path] [--prompt]")
+}
+
+func printDevinHookUsage(w io.Writer) {
+	fmt.Fprintln(w, "正式使用：安装 hook 后，在 Devin CLI 对话终端输入 `pe <内容>`。")
+	fmt.Fprintln(w, "测试/调试命令：")
+	fmt.Fprintln(w, "  openpe devin hook install [--scope project|user] [--path <file>] [--openpe-bin path]")
+	fmt.Fprintln(w, "  openpe devin hook run")
+	fmt.Fprintln(w, "  openpe devin hook last [--path] [--prompt]")
+}
+
+func localizedInvalidDevinHookInput(err error, language string) string {
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE skipped prompt enhancement: invalid Devin hook input: %v", err)
+	}
+	return fmt.Sprintf("openPE 跳过增强：Devin hook 输入无效：%v", err)
 }
 
 func envOrDefault(name string, fallback string) string {
