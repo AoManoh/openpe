@@ -1,10 +1,10 @@
 # openPE
 
-`openPE`（open prompt-enhancer）是一个本地优先的 prompt 增强工具链。你在 Codex CLI、Claude Code、Windsurf Cascade 中输入 `pe <你的需求>`，openPE 会先调用一次 OpenAI-compatible 模型把原文改写成更适合编码代理执行的 prompt，复制到剪贴板，再让你粘贴、按需编辑、正常发送。
+`openPE`（open prompt-enhancer）是一个本地优先的 prompt 增强工具链。你在 Codex CLI、Claude Code、Devin CLI、Windsurf Cascade 中输入 `pe <你的需求>`，openPE 会先调用一次 OpenAI-compatible 模型把原文改写成更适合编码代理执行的 prompt，复制到剪贴板，再让你粘贴、按需编辑、正常发送。
 
 - **本地优先**：数据流经你自配的 OpenAI-compatible endpoint（OpenAI、阿里云 DashScope、火山引擎、自建网关均可），不经第三方中转。
 - **Hook-first**：通过宿主公开的 `UserPromptSubmit` / `pre_user_prompt` hook 协议接入，不替换、不代理、不劫持其它请求。
-- **统一交付**：一条命令为 Codex / Claude Code / Windsurf 安装 hook，三方共用同一个 enhancer 和缓存模型。
+- **统一交付**：一条命令为 Codex / Claude Code / Devin / Windsurf 安装 hook，四方共用同一个 enhancer 和缓存模型。
 
 ## 为什么需要它
 
@@ -22,8 +22,11 @@
 # 推荐：克隆后本地构建
 git clone https://github.com/AoManoh/openpe.git
 cd openpe
-go install ./cmd/openpe ./cmd/openpe-server   # openpe-server 可选，仅用于 HTTP 调试
+go install ./cmd/openpe            # 主程序：日常只需要它
+go install ./cmd/openpe-server     # 可选：长驻 HTTP 服务，仅自动化 / IDE patch 集成才需要
 ```
+
+> **两个 binary 的定位**：`openpe` 是你唯一需要的主程序——它既是裸 CLI（`openpe enhance ...`），也是安装到 Codex / Claude Code / Devin / Windsurf 后被各自 hook 调用的处理器（`openpe <client> hook run`）。`openpe-server` 是一个**可选的常驻 HTTP 服务**，把同一套增强能力暴露为 `POST /v1/prompt-enhance`，只在你要接入自动化脚本、其它进程，或 Windsurf patch 按钮时才需要；**日常 hook 流程不需要它**，可以跳过第二条命令。
 
 确认 `$GOPATH/bin`（通常 `~/go/bin`）在 `PATH` 中：
 
@@ -64,10 +67,11 @@ openpe enhance --prompt "帮我重构这个 handler"
 ```bash
 openpe codex hook install      # → ~/.codex/hooks.json
 openpe claude hook install     # → ~/.claude/settings.json
+openpe devin hook install      # → ~/.config/devin/config.json
 openpe windsurf hook install   # → ~/.codeium/windsurf/hooks.json
 ```
 
-> Codex 装完还需要在 TUI 内执行 `/hooks` 并 trust；Windsurf 装完建议重启 IDE。详见 [客户端配置参考](#客户端配置参考)。
+> Codex 装完还需要在 TUI 内执行 `/hooks` 并 trust；Devin CLI 可用 `/hooks` 确认已加载；Windsurf 装完建议重启 IDE。详见 [客户端配置参考](#客户端配置参考)。
 
 ### 4. 在客户端对话框输入 `pe <你的需求>`
 
@@ -195,7 +199,9 @@ openPE 默认读取当前 Codex / Claude Code 对话上下文，启用满血提�
 
 完整可选字段参考 [`.env.example`](.env.example)；必填只有 3 个，不要被表中的字段数量吓到。
 
-### Openace 代码检索上下文
+### Openace 代码检索上下文（已废弃，默认关闭）
+
+> **⚠️ 已废弃，不建议启用。** Openace 依赖 Augment Code 的 ACE 能力，而 Augment 已取消对用户友好的 $20 订阅层级——仅为提示词增强而启用 ACE 的代价过高，性价比不再成立。代码保留向后兼容（`OPENPE_OPENACE_ENABLED` 默认 `false`），但默认关闭且不再积极维护；新部署请勿依赖它。下文仅作历史参考。
 
 [Openace](https://github.com/AoManoh/openace-mcp) 是**可选** context provider，**不是 openPE 的必选依赖**——未启用时 openPE 走完整的 prompt rewrite 流程，只是 `context.retrieval` 为空。引入它的目的是：让 prompt enhancement 阶段能在用户允许的范围内基于代码事实做更准确的改写——包括项目设计理念、技术决策、历史上下文、ADR/决策文章和关键调用链等——而不是把 openPE 的核心能力绑定到 Openace。
 
@@ -234,12 +240,13 @@ Openace 临时错误只会有限重试：HTTP `408`、`429`、`499`、`5xx`、�
 
 ## 客户端配置参考
 
-openPE 支持 **3 种 hook 方案** 和 **1 种实验性 patch 方案**：
+openPE 支持 **4 种 hook 方案** 和 **1 种实验性 patch 方案**：
 
 | 方案  | 客户端           | 推荐度      | 入口                                                         |
 | ----- | ---------------- | ----------- | ------------------------------------------------------------ |
 | hook  | Codex CLI        | ✅ 推荐     | [Codex CLI hook](#codex-cli-hook)                               |
 | hook  | Claude Code      | ✅ 推荐     | [Claude Code hook](#claude-code-hook)                           |
+| hook  | Devin CLI        | ✅ 推荐     | [Devin CLI hook](#devin-cli-hook)                               |
 | hook  | Windsurf Cascade | ✅ 推荐     | [Windsurf Cascade hook](#windsurf-cascade-hook)                 |
 | patch | Windsurf Cascade | ⚠️ 实验性 | [Windsurf bundle patch（实验性）](#windsurf-bundle-patch实验性) |
 
@@ -280,7 +287,7 @@ openpe codex hook install --dry-run
 **关键注意事项**：
 
 - Codex hook 输入里的 `cwd` 来自当前 Codex session，影响 enhancer 推断项目。处理 跨域项目时，请注意工作区路径为跨域项目路径，如 `~/projects/xxx` 。
-- **Codex session history 默认读取**（启用满血提示词增强）。openPE 用当前 `pe` 原文从 `~/.codex/history.jsonl` 反查 session id，再读取对应 rollout JSONL 的最近 user/assistant 消息，填入 `enhancer.Request.History`，让 `pe` 能理解对话里的“选项一”“星桥方案”等引用。若无法唯一匹配或 `cwd` 不一致，会自动 skip，不会报错。如需关闭，在 hook dotenv 设置 `OPENPE_CODEX_HISTORY_ENABLED=false`。
+- **Codex session history 默认读取**（启用满血提示词增强）。openPE 用当前 `pe` 原文从 `~/.codex/history.jsonl` 反查 session id，再读取对应 rollout JSONL 的最近 user/assistant 消息，填入 `enhancer.Request.History`，让 `pe` 能理解对话里的“选项一”“星桥方案”等引用。若无法唯一匹配或 `cwd` 不一致，属于“无历史可用”，会自动 skip 且不报错；但若已定位到 session 却读取 rollout 失败（如权限/损坏），会在状态文案里明确提示“读取历史上下文失败”，不会静默当作含历史的增强。如需关闭，在 hook dotenv 设置 `OPENPE_CODEX_HISTORY_ENABLED=false`。
 - Codex TUI 把 captured hook feedback 压成单行，stderr 只输出短状态。完整预览见 [调用方式](#调用方式) 中的 `openpe codex hook last`。
 - 同时安装 user + project hook 会触发两次执行；openPE 在 project hook 安装器中会检测 user hook 并自动跳过去重。
 - Codex CLI `0.132.0` 的 `/` 菜单只枚举内置命令，不会列出 `~/.codex/prompts/*.md` 或自定义 commands；openPE 当前**不规划** `/pe` slash command，正式入口保持 hook 触发。
@@ -318,10 +325,46 @@ openpe claude hook install --dry-run
 
 **关键注意事项**：
 
-- **Claude transcript 默认读取**（启用满血提示词增强）。openPE 读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`，让 `pe` 能理解当前 Claude Code 对话里的“选项一”“方案A”等引用。若 transcript 缺失、不可读或 `cwd` 不一致，会自动 skip，不会报错。如需关闭，在 hook dotenv 设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=false`。
+- **Claude transcript 默认读取**（启用满血提示词增强）。openPE 读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`，让 `pe` 能理解当前 Claude Code 对话里的“选项一”“方案A”等引用。若 transcript 缺失或 `cwd` 不一致，属于“无历史可用”，会自动 skip 且不报错；但若 transcript 存在却读取失败（如权限/损坏），会在状态文案里明确提示“读取历史上下文失败”，不会静默当作含历史的增强。如需关闭，在 hook dotenv 设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=false`。
 - Claude Code 的 hook 子进程可能无法访问系统剪贴板或 `/dev/tty`。当增强成功但剪贴板交付失败时，openPE 默认会在 Claude 可见的 blocked feedback 中追加完整增强 prompt 的 Markdown 代码块；用户可直接复制该代码块，或继续使用 `openpe claude hook last --prompt` / `last-prompt.txt` 兜底。
 - Claude Code `--print` headless 模式会执行 hook，但**不像交互式 TUI 一样稳定展示被阻断 feedback**；调试请用交互式模式。
 - Claude Code CLI `2.1.146` 暴露的 `--effort` 取值是 `low` / `medium` / `high`；1M context window 属于上游模型/网关能力，不是 openPE hook 能强制开启的选项。
+
+### Devin CLI hook
+
+Devin CLI（Windsurf 自 2026-07 起全面切换的终端编码代理）的 hook 格式与 Claude Code 兼容，因此实现方案与 Codex / Claude 一致：拦截 `UserPromptSubmit`、识别 `pe` 触发、增强后阻断原消息并把结果复制到剪贴板。
+
+```bash
+# 全局安装（推荐）→ ~/.config/devin/config.json 的 "hooks" 键
+openpe devin hook install
+
+# 项目级安装 → <项目>/.devin/hooks.v1.json（独立 hooks 文件）
+openpe devin hook install --scope project
+
+# 自定义 dotenv 位置
+openpe devin hook install --env-file /absolute/path/to/.env
+
+# 显式路径（config.json 走 "hooks" 键；其它名按 .devin/hooks.v1.json 独立文件）
+openpe devin hook install --path /absolute/path/to/config.json
+
+# 只预览合并结果，不写盘
+openpe devin hook install --dry-run
+```
+
+| 选项               | 默认                                              | 说明                                                  |
+| ------------------ | ------------------------------------------------- | ----------------------------------------------------- |
+| `--scope`        | `user`                                          | `user` → `~/.config/devin/config.json`；`project` → `.devin/hooks.v1.json` |
+| `--path`         | 由 `--scope` 决定                               | 显式 hooks 文件路径                                   |
+| `--env-file`     | user 用 `~/.config/openpe/.env`；project 用项目 `.env` | hook 子进程加载的 dotenv                              |
+| `--openpe-bin`   | `PATH` 中的 `openpe`                          | hook 命令中的 openpe binary 绝对路径                  |
+| `--hook-timeout` | `120`                                           | Devin hook 超时秒数                                   |
+
+**关键注意事项**：
+
+- 安装后在 Devin CLI 内用 `/hooks` 确认 openPE 的 `UserPromptSubmit` hook 已加载；改动配置后重开会话生效。
+- Devin 也会读取 `~/.claude/` 的 Claude 兼容 hook（默认开启）。如果你已装了 `openpe claude hook`，Devin 可能同时命中两者；只装其一即可，或用 `--scope user`/`project` 区分。
+- 增强结果走「阻断原消息 + 复制到剪贴板」模型：Ctrl+V 粘贴、按需编辑、再发送。剪贴板失败时用 `openpe devin hook last --prompt` 兜底。
+- 暂未读取 Devin 自身的会话历史（Codex/Claude 已支持各自历史注入）；该 history 注入为后续项，当前 Devin 增强不含会话历史，状态文案不会谎称包含。
 
 ### Windsurf Cascade hook
 
