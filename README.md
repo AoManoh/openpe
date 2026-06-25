@@ -135,6 +135,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_CLAUDE_PROMPT_FALLBACK`   | `true`                     | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制                   |
 | `OPENPE_WINDSURF_PROMPT_FALLBACK` | `false`                    | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长          |
 | `OPENPE_ENV_FILE`                 | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                       |
+| `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词 | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。用于自定义改写风格或部署自调版本，无需改代码重新编译 |
 | `OPENPE_MAX_CONTEXT_TOKENS`       | `0`（不限）                  | 全局 token 预算，所有客户端共享；正整数时 enhancer 按 section 级裁剪可选上下文（history / rules / guidelines / context.files / context.retrieval），required section 始终保留 |
 
 > **关于 `OPENPE_MAX_CONTEXT_TOKENS`**：这是 openPE 唯一的"消费层"token 总预算旋钮，一处配置覆盖 codex / claude / windsurf 全部 hook**以及** Windsurf patch 按钮路径（patch 路径走安装时快照，需要重跑 `installer install`；详见 `extensions/openpe-windsurf-patch/README.md` § "消费层 token 预算"）。各采集层自带的 `OPENPE_*_MAX_MESSAGES` / `_MAX_CHARS` 是"采集层"按源数据特性的经验调优（不同源数据格式不同），用于决定**读多少**进 `Request.History`；patch inject 侧 cascade trajectory 抓取的 32 / 6000 / 80000 三常量同属采集层（硬编码不可配，见 `inject/src/cascade_context.ts::DEFAULT_HISTORY_BUDGET`）。`OPENPE_MAX_CONTEXT_TOKENS` 决定**最终送给 LLM 的总 token 上限**，从 token 成本和 provider context window 上限两个角度统一兜底。默认 0 = 不启用预算，保持向后兼容。
