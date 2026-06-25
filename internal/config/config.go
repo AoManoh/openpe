@@ -56,11 +56,17 @@ type Config struct {
 	// context.retrieval). Zero (the default) keeps the historical
 	// "no budget" behaviour so this field is purely additive.
 	MaxContextTokens int
-	Openace          OpenaceConfig
-	Codex            CodexConfig
-	Claude           ClaudeConfig
-	Delivery         DeliveryConfig
-	Server           ServerConfig
+	// SystemPrompt, when non-empty, overrides the enhancer's built-in system
+	// prompt. It is populated from OPENPE_SYSTEM_PROMPT_FILE (file contents,
+	// preferred) or OPENPE_SYSTEM_PROMPT (inline). Empty (the default) keeps
+	// the compiled-in enhancer.defaultSystemPrompt, so this field is purely
+	// additive and lets operators iterate on the prompt without recompiling.
+	SystemPrompt string
+	Openace      OpenaceConfig
+	Codex        CodexConfig
+	Claude       ClaudeConfig
+	Delivery     DeliveryConfig
+	Server       ServerConfig
 }
 
 type CodexConfig struct {
@@ -144,6 +150,7 @@ func Load() Config {
 		Timeout:          durationFromValue(valueFromEnv("OPENPE_TIMEOUT", fileEnv), DefaultTimeout),
 		Language:         normalizeLanguage(valueOrDefault("OPENPE_LANGUAGE", fileEnv, DefaultLanguage)),
 		MaxContextTokens: intFromValue(valueFromEnv("OPENPE_MAX_CONTEXT_TOKENS", fileEnv), DefaultMaxContextTokens),
+		SystemPrompt:     systemPromptFromEnv(fileEnv),
 		Openace: OpenaceConfig{
 			Enabled:           boolFromValue(valueFromEnv("OPENPE_OPENACE_ENABLED", fileEnv), false),
 			Addr:              valueOrDefaultFromAny([]string{"OPENPE_OPENACE_ADDR", "OPENACE_DAEMON_ADDR"}, fileEnv, DefaultOpenaceAddr),
@@ -215,6 +222,23 @@ func splitCSV(value string) []string {
 		return nil
 	}
 	return out
+}
+
+// systemPromptFromEnv resolves an optional system-prompt override. A file path
+// (OPENPE_SYSTEM_PROMPT_FILE) takes precedence over an inline value
+// (OPENPE_SYSTEM_PROMPT) so deployments can ship a prompt file and iterate on it
+// without restarting via env edits. A missing/unreadable/empty file falls back
+// to the inline value, then to "" (meaning: keep the built-in default). The
+// fallback is intentionally lenient to match the rest of this best-effort loader.
+func systemPromptFromEnv(fileEnv map[string]string) string {
+	if path := valueFromEnv("OPENPE_SYSTEM_PROMPT_FILE", fileEnv); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			if s := strings.TrimSpace(string(data)); s != "" {
+				return s
+			}
+		}
+	}
+	return valueFromEnv("OPENPE_SYSTEM_PROMPT", fileEnv)
 }
 
 func valueFromEnv(key string, fileEnv map[string]string) string {

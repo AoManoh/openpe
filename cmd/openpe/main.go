@@ -995,7 +995,7 @@ func runCommand(ctx context.Context, name string, args []string, stdin io.Reader
 
 func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {
 	if !cfg.Openace.Enabled {
-		return enhancer.NewService(provider), nil
+		return enhancer.NewService(provider).WithSystemPrompt(cfg.SystemPrompt), nil
 	}
 	contextProvider, err := openacectx.New(openacectx.Config{
 		DaemonAddr:        cfg.Openace.Addr,
@@ -1011,7 +1011,7 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 	if err != nil {
 		return nil, err
 	}
-	return enhancer.NewServiceWithContext(provider, contextProvider), nil
+	return enhancer.NewServiceWithContext(provider, contextProvider).WithSystemPrompt(cfg.SystemPrompt), nil
 }
 
 func timeoutOrDefault(value time.Duration) time.Duration {
