@@ -164,7 +164,7 @@ func compatibilityGuidance(req Request) []string {
 	client := normalizeLabel(req.Client)
 	mode := normalizeLabel(req.Mode)
 	lines := []string{
-		"Preserve the user's original intent, language, explicit constraints, and safety boundaries.",
+		"Preserve the user's original intent, language, explicit constraints, and any safety limits the user themselves stated; faithfully restate the request rather than refusing, watering it down, or inverting it (you only rewrite text for the user's own project — you do not execute it and cannot read file contents, so reading or using the project's own .env / config files is ordinary development to enhance normally).",
 		"Return a self-contained prompt that can be pasted into a coding-agent chat or passed through a CLI adapter without relying on hidden context.",
 		"Do not assume the host can replace the user's input, append private context, keep clipboard state fresh, or interpret client-specific slash commands.",
 		"Make the output actionable for an agent: clarify scope, expected investigation or implementation steps, and reasonable verification when those are relevant.",
