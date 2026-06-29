@@ -50,9 +50,30 @@ type Metadata struct {
 	Model       string        `json:"model,omitempty"`
 }
 
+// MessageStyle selects how an enhancement request is laid out on the wire.
+type MessageStyle int
+
+const (
+	// StyleFlatten (default) sends [system, user] where the single user message
+	// embeds the conversation history as labeled "[role] content" text. This is
+	// the historical, eval-validated layout.
+	StyleFlatten MessageStyle = iota
+	// StyleHybrid sends [system, prior user/assistant turns..., final user] where
+	// prior conversation is delivered as real chat turns and only the final user
+	// turn carries the rewrite instruction + original prompt. Opt-in until eval
+	// A/B promotes it (OPENPE_MESSAGE_STYLE=hybrid).
+	StyleHybrid
+)
+
+// CompletionRequest is the provider-facing prompt. System is always the first
+// message. When Messages is non-empty it is sent verbatim after System (hybrid
+// multi-turn); otherwise the single User string is sent as one user message
+// (flatten). Keeping both fields preserves backward compatibility for callers
+// and tests that only populate User.
 type CompletionRequest struct {
-	System string
-	User   string
+	System   string
+	User     string
+	Messages []Message
 }
 
 type CompletionResponse struct {

@@ -15,14 +15,26 @@ type promptSection struct {
 	required    bool
 }
 
+// buildUserPrompt assembles the full flatten-style single user message,
+// embedding conversation history as labeled text.
 func buildUserPrompt(req Request) (string, []string, []string, []SectionInfo) {
-	sections := promptSections(req)
+	return buildPrompt(req, true)
+}
+
+// buildTaskPrompt assembles the hybrid-style FINAL user message: every section
+// except conversation history (which is delivered as real prior chat turns).
+func buildTaskPrompt(req Request) (string, []string, []string, []SectionInfo) {
+	return buildPrompt(req, false)
+}
+
+func buildPrompt(req Request, includeHistory bool) (string, []string, []string, []SectionInfo) {
+	sections := promptSections(req, includeHistory)
 	user, infos, warnings := assemblePrompt(sections, req.Options.MaxContextTokens)
 	used := usedContexts(sections, infos)
 	return user, used, warnings, infos
 }
 
-func promptSections(req Request) []promptSection {
+func promptSections(req Request, includeHistory bool) []promptSection {
 	var sections []promptSection
 
 	sections = appendSection(sections, sectionOriginalPrompt, formatSection("Original prompt", req.Prompt), "", true)
@@ -32,12 +44,56 @@ func promptSections(req Request) []promptSection {
 	sections = appendSection(sections, sectionEnhancementContract, formatList("Enhancement contract", compatibilityGuidance(req)), "", true)
 	sections = appendSection(sections, sectionRules, formatList("Rules", req.Rules), "rules", false)
 	sections = appendSection(sections, sectionGuidelines, formatList("Guidelines", req.Guidelines), "guidelines", false)
-	sections = appendSection(sections, sectionHistory, formatHistory(req.History), "history", false)
+	if includeHistory {
+		sections = appendSection(sections, sectionHistory, formatHistory(req.History), "history", false)
+	}
 	sections = appendSection(sections, sectionContextFiles, formatFiles(req.Context.Files), "context.files", false)
 	sections = appendSection(sections, sectionContextRetrieval, formatList("Retrieved context", req.Context.Retrieval), "context.retrieval", false)
 	sections = appendSection(sections, sectionFinalInstruction, "\nRewrite the original prompt now. Return only the enhanced prompt.\n", "", true)
 
 	return sections
+}
+
+// maxHybridTurnChars caps any single prior turn delivered in hybrid mode so one
+// very long message (e.g. a pasted file or a compaction summary) cannot crowd
+// out the rest of the conversation. History is already bounded in aggregate by
+// the collector (MaxMessages/MaxChars); this is a defensive per-message cap.
+const maxHybridTurnChars = 6000
+
+// hybridHistoryTurns converts collected history into real user/assistant chat
+// turns for StyleHybrid: it keeps only user/assistant turns with content, caps
+// each turn, and drops a trailing turn identical to the current prompt so the
+// model is never asked to "rewrite" against the prompt itself.
+func hybridHistoryTurns(history []Message, currentPrompt string) []Message {
+	currentPrompt = strings.TrimSpace(currentPrompt)
+	turns := make([]Message, 0, len(history))
+	for _, m := range history {
+		role := strings.TrimSpace(m.Role)
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		content := strings.TrimSpace(m.Content)
+		if content == "" {
+			continue
+		}
+		if runeLen(content) > maxHybridTurnChars {
+			content = truncateRunes(content, maxHybridTurnChars)
+		}
+		turns = append(turns, Message{Role: role, Content: content})
+	}
+	if n := len(turns); n > 0 && turns[n-1].Role == "user" && turns[n-1].Content == currentPrompt {
+		turns = turns[:n-1]
+	}
+	return turns
+}
+
+func prependUnique(values []string, value string) []string {
+	for _, v := range values {
+		if v == value {
+			return values
+		}
+	}
+	return append([]string{value}, values...)
 }
 
 func appendSection(sections []promptSection, name string, content string, usedContext string, required bool) []promptSection {

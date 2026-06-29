@@ -63,13 +63,20 @@ func New(cfg Config) (*Client, error) {
 }
 
 func (c *Client) Complete(ctx context.Context, req enhancer.CompletionRequest) (enhancer.CompletionResponse, error) {
+	messages := []chatMessage{{Role: "system", Content: req.System}}
+	if len(req.Messages) > 0 {
+		// Hybrid multi-turn: send prior conversation as real chat turns.
+		for _, m := range req.Messages {
+			messages = append(messages, chatMessage{Role: m.Role, Content: m.Content})
+		}
+	} else {
+		// Flatten: a single user message carrying the assembled prompt.
+		messages = append(messages, chatMessage{Role: "user", Content: req.User})
+	}
 	payload := chatCompletionRequest{
-		Model: c.model,
-		Messages: []chatMessage{
-			{Role: "system", Content: req.System},
-			{Role: "user", Content: req.User},
-		},
-		Stream: false,
+		Model:    c.model,
+		Messages: messages,
+		Stream:   false,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
