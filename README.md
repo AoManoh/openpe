@@ -1,15 +1,15 @@
 # openPE
 
-`openPE`（open prompt-enhancer）是一个本地优先的 prompt 增强工具链。你在 Codex CLI、Claude Code、Devin CLI、Windsurf Cascade 中输入 `pe <你的需求>`，openPE 会先调用一次 OpenAI-compatible 模型把原文改写成更适合编码代理执行的 prompt，复制到剪贴板，再让你粘贴、按需编辑、正常发送。
+`openPE`（open prompt-enhancer）是一个本地优先的 prompt 增强工具链。你在 Codex CLI、Claude Code、Devin CLI、Devin Local（原 Windsurf Cascade）中输入 `pe <你的需求>`，openPE 会先调用一次 OpenAI-compatible 模型把原文改写成更适合编码代理执行的 prompt：在 Codex / Claude Code / Windsurf 下复制到剪贴板供你粘贴、按需编辑、再发送；在 **Devin** 下直接作为附加上下文无感注入，代理按增强版执行（详见 [Devin CLI hook](#devin-cli-hook)）。
 
 - **本地优先**：数据流经你自配的 OpenAI-compatible endpoint（OpenAI、阿里云 DashScope、火山引擎、自建网关均可），不经第三方中转。
 - **Hook-first**：通过宿主公开的 `UserPromptSubmit` / `pre_user_prompt` hook 协议接入，不替换、不代理、不劫持其它请求。
-- **统一交付**：一条命令为 Codex / Claude Code / Devin / Windsurf 安装 hook，四方共用同一个 enhancer 和缓存模型。
+- **统一交付**：一条命令为 Codex / Claude Code /Devin（原 Windsurf）安装 hook，共用同一个 enhancer 和缓存模型。
 
 ## 为什么需要它
 
 - 你写的原始 prompt 经常缺少上下文、约束或验证期望，导致 coding agent 走偏。
-- 你已经在用 Codex / Claude Code / Windsurf，不想换主力工具，只想给输入加一层"自动改写"。
+- 你已经在用 Codex / Claude Code / Devin（原 Windsurf），不想换主力工具，只想给输入加一层"自动改写"。
 - 你想自己决定改写质量与成本，不被任何厂商的私有 prompt 绑死。
 
 ## 快速开始
@@ -26,7 +26,7 @@ go install ./cmd/openpe            # 主程序：日常只需要它
 go install ./cmd/openpe-server     # 可选：长驻 HTTP 服务，仅自动化 / IDE patch 集成才需要
 ```
 
-> **两个 binary 的定位**：`openpe` 是你唯一需要的主程序——它既是裸 CLI（`openpe enhance ...`），也是安装到 Codex / Claude Code / Devin / Windsurf 后被各自 hook 调用的处理器（`openpe <client> hook run`）。`openpe-server` 是一个**可选的常驻 HTTP 服务**，把同一套增强能力暴露为 `POST /v1/prompt-enhance`，只在你要接入自动化脚本、其它进程，或 Windsurf patch 按钮时才需要；**日常 hook 流程不需要它**，可以跳过第二条命令。
+> **两个 binary 的定位**：`openpe` 是你唯一需要的主程序——它既是裸 CLI（`openpe enhance ...`），也是安装到 Codex / Claude Code / Devin / Windsurf 后被各自 hook 调用的处理器（`openpe <client> hook run`）。`openpe-server` 是一个**可选的常驻 HTTP 服务**，把同一套增强能力暴露为 `POST /v1/prompt-enhance`，只在你要接入自动化脚本、其它进程，或 Devin（原 Windsurf） patch 按钮时才需要；**日常 hook 流程不需要它**，可以跳过第二条命令。
 
 确认 `$GOPATH/bin`（通常 `~/go/bin`）在 `PATH` 中：
 
@@ -45,8 +45,8 @@ cat > ~/.config/openpe/.env <<'EOF'
 OPENPE_BASE_URL=https://api.openai.com
 # 必填 2：对应网关的 API key
 OPENPE_API_KEY=replace-with-your-api-key
-# 必填 3：模型名，如 gpt-4o-mini / qwen-max / deepseek-chat
-OPENPE_MODEL=gpt-4o-mini
+# 必填 3：模型名，如 gpt-5.4-mini / qwen3.7-max / deepseek-v4-pro
+OPENPE_MODEL=gpt-5.4-mini
 EOF
 ```
 
@@ -102,6 +102,8 @@ openPE 会阻断这条原始消息（**不会**发给 LLM），把增强结果�
 
 **直接 Ctrl+V 粘贴到原输入框，按需编辑，再发送即可。**
 
+> 上述「阻断 + 剪贴板」是 Codex / Claude Code / Windsurf 的流程。**Devin 例外**：Devin 原生消费附加上下文，openPE 会把增强结果直接注入、代理自动按增强版执行，无需 Ctrl+V；见 [Devin CLI hook](#devin-cli-hook)。
+
 > 若 stderr 显示"剪贴板未更新"——见 [注意事项与已知限制](#注意事项与已知限制)。
 
 ## 服务配置
@@ -127,20 +129,22 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 
 #### 可选（有默认值，按需覆盖）
 
-| 变量                                | 默认                         | 说明                                                                                    |
-| ----------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------- |
-| `OPENPE_LANGUAGE`                 | `zh`                       | hook 终端反馈语言：`zh` / `en`                                                      |
-| `OPENPE_TIMEOUT`                  | `60s`                      | 单次 provider 调用超时（Go duration）                                                   |
-| `OPENPE_LISTEN_ADDR`              | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost` |
-| `OPENPE_CACHE_DIR`                | `~/.cache/openpe`（Linux） | hook 预览与纯文本缓存根目录                                                             |
-| `OPENPE_COPY_COMMAND`             | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）。原生 Windows 用 `cmd.exe /C` 执行，POSIX/WSL 用 `sh -c` 执行；命令首段为 `clip.exe` 时会自动转为 UTF-16LE，避免 Windows 中文乱码 |
-| `OPENPE_DISABLE_OSC52_CLIPBOARD`  | `false`                    | 禁用 OSC52 剪贴板兜底                                                                   |
-| `OPENPE_OSC52_TTY`                | `/dev/tty`                 | OSC52 写入目标 TTY 路径                                                                 |
-| `OPENPE_CLAUDE_PROMPT_FALLBACK`   | `true`                     | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制                   |
-| `OPENPE_WINDSURF_PROMPT_FALLBACK` | `false`                    | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长          |
-| `OPENPE_ENV_FILE`                 | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                       |
-| `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词 | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。用于自定义改写风格或部署自调版本，无需改代码重新编译 |
-| `OPENPE_MAX_CONTEXT_TOKENS`       | `0`（不限）                  | 全局 token 预算，所有客户端共享；正整数时 enhancer 按 section 级裁剪可选上下文（history / rules / guidelines / context.files / context.retrieval），required section 始终保留 |
+| 变量                                                     | 默认                         | 说明                                                                                                                                                                                                    |
+| -------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENPE_LANGUAGE`                                      | `zh`                       | hook 终端反馈语言：`zh` / `en`                                                                                                                                                                      |
+| `OPENPE_TIMEOUT`                                       | `60s`                      | 单次 provider 调用超时（Go duration）                                                                                                                                                                   |
+| `OPENPE_LISTEN_ADDR`                                   | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost`                                                                                                                 |
+| `OPENPE_CACHE_DIR`                                     | `~/.cache/openpe`（Linux） | hook 预览与纯文本缓存根目录                                                                                                                                                                             |
+| `OPENPE_COPY_COMMAND`                                  | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）。原生 Windows 用 `cmd.exe /C` 执行，POSIX/WSL 用 `sh -c` 执行；命令首段为 `clip.exe` 时会自动转为 UTF-16LE，避免 Windows 中文乱码 |
+| `OPENPE_DISABLE_OSC52_CLIPBOARD`                       | `false`                    | 禁用 OSC52 剪贴板兜底                                                                                                                                                                                   |
+| `OPENPE_OSC52_TTY`                                     | `/dev/tty`                 | OSC52 写入目标 TTY 路径                                                                                                                                                                                 |
+| `OPENPE_CLAUDE_PROMPT_FALLBACK`                        | `true`                     | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制                                                                                                                                   |
+| `OPENPE_WINDSURF_PROMPT_FALLBACK`                      | `false`                    | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长                                                                                                                          |
+| `OPENPE_ENV_FILE`                                      | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                                                                                                                                       |
+| `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词               | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。用于自定义改写风格或部署自调版本，无需改代码重新编译                                         |
+| `OPENPE_MAX_CONTEXT_TOKENS`                            | `0`（不限）                | 全局 token 预算，所有客户端共享；正整数时 enhancer 按 section 级裁剪可选上下文（history / rules / guidelines / context.files / context.retrieval），required section 始终保留                           |
+| `OPENPE_HOOK_DEDUP_ENABLED`                            | `true`                     | 跨适配器去重总开关，仅在 Devin 下生效：Devin 会同时加载 devin/claude/windsurf 三类 hook，开启后同一条 `pe` 只增强一次（详见 [Devin CLI hook](#devin-cli-hook)）；设 `false` 关闭                       |
+| `OPENPE_HOOK_DEDUP_WINDOW`                             | `5s`                       | 去重时间窗（Go duration）：判定「同一条 prompt 的兄弟 hook」的新鲜度窗口，需略大于 hook 间毫秒级调度间隔、又小于有意重试间隔，默认 `5s` 足够                                                          |
 
 > **关于 `OPENPE_MAX_CONTEXT_TOKENS`**：这是 openPE 唯一的"消费层"token 总预算旋钮，一处配置覆盖 codex / claude / windsurf 全部 hook**以及** Windsurf patch 按钮路径（patch 路径走安装时快照，需要重跑 `installer install`；详见 `extensions/openpe-windsurf-patch/README.md` § "消费层 token 预算"）。各采集层自带的 `OPENPE_*_MAX_MESSAGES` / `_MAX_CHARS` 是"采集层"按源数据特性的经验调优（不同源数据格式不同），用于决定**读多少**进 `Request.History`；patch inject 侧 cascade trajectory 抓取的 32 / 6000 / 80000 三常量同属采集层（硬编码不可配，见 `inject/src/cascade_context.ts::DEFAULT_HISTORY_BUDGET`）。`OPENPE_MAX_CONTEXT_TOKENS` 决定**最终送给 LLM 的总 token 上限**，从 token 成本和 provider context window 上限两个角度统一兜底。默认 0 = 不启用预算，保持向后兼容。
 
@@ -227,12 +231,12 @@ openpe enhance --prompt "帮我修复 provider 超时重试" --cwd /path/to/repo
 
 `OPENPE_OPENACE_ENABLED=true` 是**一处全局开关**，所有走 openPE `enhancer.Service` 的入口都会尝试使用同一套 Openace provider，无需各路径单独配置；实际发起代码检索还要求本次请求带有非空 `Request.CWD`：
 
-| 入口 | 触发方式 | 启用条件 |
-| ---- | -------- | -------- |
-| 裸 CLI | `openpe enhance --prompt ...` | 当前 shell 环境 `OPENPE_OPENACE_ENABLED=true` |
-| Codex / Claude / Windsurf hook | IDE 对话框输入 `pe <内容>` | hook dotenv（默认 `~/.config/openpe/.env`）含 `OPENPE_OPENACE_ENABLED=true` |
-| HTTP API | 任何外部进程 `POST /v1/prompt-enhance` | `openpe-server` 启动时所在 shell 含 `OPENPE_OPENACE_ENABLED=true` |
-| Windsurf patch 按钮 | Cascade 工具栏点击 openPE logo | 由上一行同款 `openpe-server` 共享；但当前 inject 请求尚未传 workspace `cwd`，因此 Openace 代码检索会被 server 跳过，直到按钮路径补齐 workspace CWD |
+| 入口                           | 触发方式                                 | 启用条件                                                                                                                                               |
+| ------------------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 裸 CLI                         | `openpe enhance --prompt ...`          | 当前 shell 环境 `OPENPE_OPENACE_ENABLED=true`                                                                                                        |
+| Codex / Claude / Windsurf hook | IDE 对话框输入 `pe <内容>`             | hook dotenv（默认 `~/.config/openpe/.env`）含 `OPENPE_OPENACE_ENABLED=true`                                                                        |
+| HTTP API                       | 任何外部进程 `POST /v1/prompt-enhance` | `openpe-server` 启动时所在 shell 含 `OPENPE_OPENACE_ENABLED=true`                                                                                  |
+| Windsurf patch 按钮            | Cascade 工具栏点击 openPE logo           | 由上一行同款 `openpe-server` 共享；但当前 inject 请求尚未传 workspace `cwd`，因此 Openace 代码检索会被 server 跳过，直到按钮路径补齐 workspace CWD |
 
 Openace provider 由处理请求的进程在启动或构造 service 时注入：CLI / hook 子进程读取自己的环境变量，HTTP 与 Windsurf patch 按钮路径读取 `openpe-server` 启动时的环境变量。换言之：**只要负责处理某次请求的进程（CLI 子进程 / hook 子进程 / openpe-server 主进程）在自己的环境里看见 `OPENPE_OPENACE_ENABLED=true`，且本次请求带有非空 `Request.CWD`**，Openace 检索就会自动注入到 `context.retrieval`。检索请求会把 `Request.Client`、`Request.Mode` 和 `Request.CWD` 一并写入 `information_request`，其中代码库定位仍以 `Request.CWD` 作为 daemon 检索目录；不同入口如果传入不同 `cwd`、history 或环境变量，结果不保证逐字节相同。
 
@@ -332,7 +336,7 @@ openpe claude hook install --dry-run
 
 ### Devin CLI hook
 
-Devin CLI（Windsurf 自 2026-07 起全面切换的终端编码代理）的 hook 格式与 Claude Code 兼容，因此实现方案与 Codex / Claude 一致：拦截 `UserPromptSubmit`、识别 `pe` 触发、增强后阻断原消息并把结果复制到剪贴板。
+Devin CLI（Windsurf 自 2026-07 起全面切换的终端编码代理）的 hook 格式与 Claude Code 兼容。与 Codex / Claude / Windsurf 的「阻断 + 剪贴板」模型不同，Devin 原生支持把 `additionalContext` 注入对话，所以 openPE 的 Devin hook 走**无感注入**：识别 `pe` 触发、增强后把结果作为附加上下文注入，代理直接按增强版执行，无需手动粘贴。
 
 ```bash
 # 全局安装（推荐）→ ~/.config/devin/config.json 的 "hooks" 键
@@ -351,19 +355,23 @@ openpe devin hook install --path /absolute/path/to/config.json
 openpe devin hook install --dry-run
 ```
 
-| 选项               | 默认                                              | 说明                                                  |
-| ------------------ | ------------------------------------------------- | ----------------------------------------------------- |
-| `--scope`        | `user`                                          | `user` → `~/.config/devin/config.json`；`project` → `.devin/hooks.v1.json` |
-| `--path`         | 由 `--scope` 决定                               | 显式 hooks 文件路径                                   |
-| `--env-file`     | user 用 `~/.config/openpe/.env`；project 用项目 `.env` | hook 子进程加载的 dotenv                              |
-| `--openpe-bin`   | `PATH` 中的 `openpe`                          | hook 命令中的 openpe binary 绝对路径                  |
-| `--hook-timeout` | `120`                                           | Devin hook 超时秒数                                   |
+| 选项               | 默认                                                       | 说明                                                                                 |
+| ------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `--scope`        | `user`                                                   | `user` → `~/.config/devin/config.json`；`project` → `.devin/hooks.v1.json` |
+| `--path`         | 由 `--scope` 决定                                        | 显式 hooks 文件路径                                                                  |
+| `--env-file`     | user 用 `~/.config/openpe/.env`；project 用项目 `.env` | hook 子进程加载的 dotenv                                                             |
+| `--openpe-bin`   | `PATH` 中的 `openpe`                                   | hook 命令中的 openpe binary 绝对路径                                                 |
+| `--hook-timeout` | `120`                                                    | Devin hook 超时秒数                                                                  |
+
+触发演示（在 Devin Cli 中输入 `pe <prompt>` 后的反馈）：
+![Devin CLI 触发演示](assets/devin-pe-trigger.png)
 
 **关键注意事项**：
 
 - 安装后在 Devin CLI 内用 `/hooks` 确认 openPE 的 `UserPromptSubmit` hook 已加载；改动配置后重开会话生效。
-- Devin 也会读取 `~/.claude/` 的 Claude 兼容 hook（默认开启）。如果你已装了 `openpe claude hook`，Devin 可能同时命中两者；只装其一即可，或用 `--scope user`/`project` 区分。
-- 增强结果走「阻断原消息 + 复制到剪贴板」模型：Ctrl+V 粘贴、按需编辑、再发送。剪贴板失败时用 `openpe devin hook last --prompt` 兜底。
+- **Devin 是 hook 聚合器**：它一次性加载自己（`~/.config/devin/config.json`）、Claude Code（`~/.claude/*`）和 Windsurf（`~/.codeium/windsurf/hooks.json`）的 `UserPromptSubmit` hook。也就是说你只要在其中**任意一个**客户端装了 openPE，Devin 里就能用 `pe`；若同时装了多个，一次 `pe` 会触发多个 openPE hook。
+- openPE 对此做了两层处理，无需你手动取舍：(1) **跨适配器去重**——同一条 prompt 只由最先触发的 hook 增强一次，其余直接放行（见 `OPENPE_HOOK_DEDUP_*`）；(2) **宿主感知渲染**——被 Devin 调起的 Claude/Windsurf hook 会自动改用 Devin 的 JSON 注入输出，而不是它们原生的 `exit 2 + 剪贴板`（后者会被 Devin 误判为空的 “Prompt blocked:”）。所以装一个或装多个，行为都是「恰好增强一次并注入」。
+- 这两层只在 `DEVIN_PROJECT_DIR` 存在（即真的跑在 Devin 里）时生效；Codex / Claude Code / Windsurf 各自原生使用时行为完全不变。
 - 暂未读取 Devin 自身的会话历史（Codex/Claude 已支持各自历史注入）；该 history 注入为后续项，当前 Devin 增强不含会话历史，状态文案不会谎称包含。
 
 ### Windsurf Cascade hook
