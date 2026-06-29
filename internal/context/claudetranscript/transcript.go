@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/AoManoh/openpe/internal/context/histstatus"
 	"github.com/AoManoh/openpe/internal/enhancer"
 )
 
@@ -25,6 +26,7 @@ type Options struct {
 
 type Result struct {
 	TranscriptPath string
+	Status         histstatus.Status
 	Messages       []enhancer.Message
 }
 
@@ -48,16 +50,29 @@ func New(opts Options) *Collector {
 func (c *Collector) Retrieve(transcriptPath string, cwd string) (Result, error) {
 	transcriptPath = strings.TrimSpace(transcriptPath)
 	if transcriptPath == "" {
-		return Result{}, nil
+		return Result{Status: histstatus.NoSession}, nil
 	}
-	messages, cwdMatched, err := readTranscriptMessages(transcriptPath, cwd)
-	if err != nil || !cwdMatched {
+	if _, err := os.Stat(transcriptPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// No transcript at the hook-provided path: explicit "no history".
+			return Result{TranscriptPath: transcriptPath, Status: histstatus.NoSession}, nil
+		}
 		return Result{TranscriptPath: transcriptPath}, err
 	}
-	return Result{
-		TranscriptPath: transcriptPath,
-		Messages:       limitMessages(messages, c.maxMessages, c.maxChars),
-	}, nil
+	messages, cwdMatched, err := readTranscriptMessages(transcriptPath, cwd)
+	if err != nil {
+		return Result{TranscriptPath: transcriptPath}, err
+	}
+	if !cwdMatched {
+		// Transcript belongs to another workspace.
+		return Result{TranscriptPath: transcriptPath, Status: histstatus.CWDMismatch}, nil
+	}
+	limited := limitMessages(messages, c.maxMessages, c.maxChars)
+	status := histstatus.Found
+	if len(limited) == 0 {
+		status = histstatus.Empty
+	}
+	return Result{TranscriptPath: transcriptPath, Status: status, Messages: limited}, nil
 }
 
 type transcriptEntry struct {

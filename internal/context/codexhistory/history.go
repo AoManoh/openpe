@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/AoManoh/openpe/internal/context/histstatus"
 	"github.com/AoManoh/openpe/internal/enhancer"
 )
 
@@ -28,6 +29,7 @@ type Options struct {
 type Result struct {
 	SessionID   string
 	RolloutPath string
+	Status      histstatus.Status
 	Messages    []enhancer.Message
 }
 
@@ -56,15 +58,19 @@ func New(opts Options) *Collector {
 func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return Result{}, nil
+		return Result{Status: histstatus.NoSession}, nil
 	}
 	entries, currentIndex, err := c.historyEntries(prompt)
-	if err != nil || currentIndex < 0 {
+	if err != nil {
 		return Result{}, err
+	}
+	if currentIndex < 0 {
+		// The current prompt is not in history.jsonl: no session to read.
+		return Result{Status: histstatus.NoSession}, nil
 	}
 	current := entries[currentIndex]
 	if strings.TrimSpace(current.SessionID) == "" {
-		return Result{}, nil
+		return Result{Status: histstatus.NoSession}, nil
 	}
 
 	rolloutPath, err := findRolloutPath(c.home, current.SessionID)
@@ -75,7 +81,7 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 	}
 	if rolloutPath == "" {
 		// No matching rollout file found: nothing to include, not a failure.
-		return Result{SessionID: current.SessionID}, nil
+		return Result{SessionID: current.SessionID, Status: histstatus.NoSession}, nil
 	}
 	messages, ok, err := readRolloutMessages(rolloutPath, cwd)
 	if err != nil {
@@ -84,13 +90,19 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 		return Result{SessionID: current.SessionID, RolloutPath: rolloutPath}, err
 	}
 	if !ok {
-		// cwd mismatch: this session belongs to another workspace; skip quietly.
-		return Result{SessionID: current.SessionID, RolloutPath: rolloutPath}, nil
+		// cwd mismatch: this session belongs to another workspace.
+		return Result{SessionID: current.SessionID, RolloutPath: rolloutPath, Status: histstatus.CWDMismatch}, nil
+	}
+	limited := limitMessages(messages, c.maxMessages, c.maxChars)
+	status := histstatus.Found
+	if len(limited) == 0 {
+		status = histstatus.Empty
 	}
 	return Result{
 		SessionID:   current.SessionID,
 		RolloutPath: rolloutPath,
-		Messages:    limitMessages(messages, c.maxMessages, c.maxChars),
+		Status:      status,
+		Messages:    limited,
 	}, nil
 }
 

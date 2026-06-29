@@ -27,6 +27,16 @@ const (
 	DefaultClaudeTranscriptMaxMessages = 12
 	DefaultClaudeTranscriptMaxChars    = 12000
 
+	DefaultDevinHistoryMaxMessages = 12
+	DefaultDevinHistoryMaxChars    = 12000
+	// DefaultDevinHistoryRecency bounds how recently the located Devin session
+	// must have been active to be reused as context. The Devin UserPromptSubmit
+	// hook carries no session id and the current prompt is not yet in the DB
+	// when the hook fires, so devinhistory locates the session by working
+	// directory + most-recent activity; this window prevents an abandoned older
+	// session in the same directory from leaking stale history into a new one.
+	DefaultDevinHistoryRecency = 2 * time.Hour
+
 	// DefaultHookDedupWindow is the freshness window for the cross-adapter
 	// single-flight de-duplication applied when a host agent (e.g. the Devin
 	// CLI) aggregates UserPromptSubmit hooks from several ecosystems and fires
@@ -62,6 +72,13 @@ type Config struct {
 	// context.retrieval). Zero (the default) keeps the historical
 	// "no budget" behaviour so this field is purely additive.
 	MaxContextTokens int
+	// MessageStyle selects the provider message layout: "flatten" (default —
+	// [system, user] with history embedded as labeled text) or "hybrid"
+	// ([system, prior user/assistant turns, final user task]). Sourced from
+	// OPENPE_MESSAGE_STYLE. Unknown values fall back to "flatten" so the
+	// historical, eval-validated layout stays the default until hybrid is
+	// promoted by eval A/B.
+	MessageStyle string
 	// SystemPrompt, when non-empty, overrides the enhancer's built-in system
 	// prompt. It is populated from OPENPE_SYSTEM_PROMPT_FILE (file contents,
 	// preferred) or OPENPE_SYSTEM_PROMPT (inline). Empty (the default) keeps
@@ -71,6 +88,7 @@ type Config struct {
 	Openace      OpenaceConfig
 	Codex        CodexConfig
 	Claude       ClaudeConfig
+	Devin        DevinConfig
 	Delivery     DeliveryConfig
 	Server       ServerConfig
 	HookDedup    HookDedupConfig
@@ -105,6 +123,22 @@ type ClaudeTranscriptConfig struct {
 	Enabled     bool
 	MaxMessages int
 	MaxChars    int
+}
+
+type DevinConfig struct {
+	History DevinHistoryConfig
+}
+
+// DevinHistoryConfig controls reading the current Devin CLI session from its
+// local SQLite store (~/.local/share/devin/cli/sessions.db) to populate
+// enhancer.Request.History. DBPath empty means the devinhistory collector
+// resolves the platform default. Recency bounds reuse of the located session.
+type DevinHistoryConfig struct {
+	Enabled     bool
+	DBPath      string
+	MaxMessages int
+	MaxChars    int
+	Recency     time.Duration
 }
 
 type DeliveryConfig struct {
@@ -167,6 +201,7 @@ func Load() Config {
 		Timeout:          durationFromValue(valueFromEnv("OPENPE_TIMEOUT", fileEnv), DefaultTimeout),
 		Language:         normalizeLanguage(valueOrDefault("OPENPE_LANGUAGE", fileEnv, DefaultLanguage)),
 		MaxContextTokens: intFromValue(valueFromEnv("OPENPE_MAX_CONTEXT_TOKENS", fileEnv), DefaultMaxContextTokens),
+		MessageStyle:     normalizeMessageStyle(valueFromEnv("OPENPE_MESSAGE_STYLE", fileEnv)),
 		SystemPrompt:     systemPromptFromEnv(fileEnv),
 		Openace: OpenaceConfig{
 			Enabled:           boolFromValue(valueFromEnv("OPENPE_OPENACE_ENABLED", fileEnv), false),
@@ -201,6 +236,19 @@ func Load() Config {
 				Enabled:     boolFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_ENABLED", fileEnv), true),
 				MaxMessages: intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES", fileEnv), DefaultClaudeTranscriptMaxMessages),
 				MaxChars:    intFromValue(valueFromEnv("OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS", fileEnv), DefaultClaudeTranscriptMaxChars),
+			},
+		},
+		Devin: DevinConfig{
+			History: DevinHistoryConfig{
+				// Default true: like codex/claude, read the current Devin session
+				// for context. The devinhistory provider only ever reads the
+				// SQLite store read-only; when the DB / session is absent it
+				// reports an explicit "no history" status (surfaced, not silent).
+				Enabled:     boolFromValue(valueFromEnv("OPENPE_DEVIN_HISTORY_ENABLED", fileEnv), true),
+				DBPath:      valueFromEnv("OPENPE_DEVIN_HISTORY_DB_PATH", fileEnv),
+				MaxMessages: intFromValue(valueFromEnv("OPENPE_DEVIN_HISTORY_MAX_MESSAGES", fileEnv), DefaultDevinHistoryMaxMessages),
+				MaxChars:    intFromValue(valueFromEnv("OPENPE_DEVIN_HISTORY_MAX_CHARS", fileEnv), DefaultDevinHistoryMaxChars),
+				Recency:     durationFromValue(valueFromEnv("OPENPE_DEVIN_HISTORY_RECENCY", fileEnv), DefaultDevinHistoryRecency),
 			},
 		},
 		Delivery: DeliveryConfig{
@@ -339,6 +387,18 @@ func normalizeLanguage(value string) string {
 		return "en"
 	default:
 		return DefaultLanguage
+	}
+}
+
+// normalizeMessageStyle maps OPENPE_MESSAGE_STYLE to "flatten" (default) or
+// "hybrid". Unknown/empty values fall back to "flatten" so the eval-validated
+// layout stays the default until hybrid is explicitly promoted.
+func normalizeMessageStyle(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "hybrid", "multi-turn", "multiturn":
+		return "hybrid"
+	default:
+		return "flatten"
 	}
 }
 

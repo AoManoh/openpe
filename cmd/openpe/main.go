@@ -24,6 +24,8 @@ import (
 	"github.com/AoManoh/openpe/internal/config"
 	claudetranscript "github.com/AoManoh/openpe/internal/context/claudetranscript"
 	codexhistory "github.com/AoManoh/openpe/internal/context/codexhistory"
+	devinhistory "github.com/AoManoh/openpe/internal/context/devinhistory"
+	"github.com/AoManoh/openpe/internal/context/histstatus"
 	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers/openai"
@@ -386,7 +388,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if codexadapter.ShouldSkipDuplicateHook(*hookScope, os.Getenv("OPENPE_ENV_FILE"), effectiveCWD) {
 		return 0
 	}
-	history, histErr := codexSessionHistory(input.Prompt, effectiveCWD, cfg)
+	history, histStatus, histErr := codexSessionHistory(input.Prompt, effectiveCWD, cfg)
 	provider, err := newProvider(openai.Config{
 		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
 		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
@@ -417,14 +419,14 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "codex"))
 		output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("codex"))
 	}
-	// History was enabled but reading it genuinely failed: tell the user so the
-	// result is not mistaken for a history-aware enhancement.
-	if histErr != nil {
-		warn := localizedHistoryReadFailure(histErr, cfg.Language)
+	// Non-silent disclosure: always state whether prior context was included
+	// (and if not, why / or that reading failed), so a history-less result is
+	// never mistaken for a context-aware one.
+	if note := historyDisclosure(history, histStatus, histErr, cfg.Language); note != "" {
 		if output.Decision == "block" {
-			output.Reason = strings.TrimSpace(warn + " " + output.Reason)
+			output.Reason = strings.TrimSpace(note + " " + output.Reason)
 		} else {
-			output.SystemMessage = strings.TrimSpace(warn + " " + output.SystemMessage)
+			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
 		}
 	}
 	if output.Decision == "block" && *blockOutput == "stderr" {
@@ -444,16 +446,16 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 // non-nil only on a genuine read failure (not a quiet "no history available"
 // skip); callers surface it so the user is not misled into thinking the
 // enhancement included history when reading it actually failed.
-func codexSessionHistory(prompt string, cwd string, cfg config.Config) ([]enhancer.Message, error) {
+func codexSessionHistory(prompt string, cwd string, cfg config.Config) ([]enhancer.Message, histstatus.Status, error) {
 	if !cfg.Codex.History.Enabled {
-		return nil, nil
+		return nil, histstatus.Unknown, nil
 	}
 	result, err := codexhistory.New(codexhistory.Options{
 		Home:        cfg.Codex.History.Home,
 		MaxMessages: cfg.Codex.History.MaxMessages,
 		MaxChars:    cfg.Codex.History.MaxChars,
 	}).Retrieve(prompt, cwd)
-	return result.Messages, err
+	return result.Messages, result.Status, err
 }
 
 func runCodexHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
@@ -588,7 +590,7 @@ func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr i
 		overrideCWD = workingDir
 		effectiveCWD = workingDir
 	}
-	history, histErr := claudeTranscriptHistory(input.TranscriptPath, effectiveCWD, cfg)
+	history, histStatus, histErr := claudeTranscriptHistory(input.TranscriptPath, effectiveCWD, cfg)
 	provider, err := newProvider(openai.Config{
 		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
 		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
@@ -631,10 +633,10 @@ func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr i
 	if result.CopyError != nil && cfg.Delivery.ClaudePromptFallback {
 		status = delivery.AppendPromptFallback(status, output.PreviewPrompt, cfg.Language)
 	}
-	// History was enabled but reading it genuinely failed: prepend a warning so
-	// the user is not misled into thinking the enhancement included history.
-	if histErr != nil {
-		status = localizedHistoryReadFailure(histErr, cfg.Language) + "\n" + status
+	// Non-silent disclosure: always state whether prior context was included
+	// (and if not, why / or that reading failed).
+	if note := historyDisclosure(history, histStatus, histErr, cfg.Language); note != "" {
+		status = note + "\n" + status
 	}
 	fmt.Fprintln(stderr, status)
 	return 2
@@ -644,15 +646,32 @@ func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr i
 // error is non-nil only on a genuine read failure (not a quiet "no transcript"
 // skip); the caller surfaces it so a failed read is not mistaken for a
 // history-aware enhancement.
-func claudeTranscriptHistory(transcriptPath string, cwd string, cfg config.Config) ([]enhancer.Message, error) {
+func claudeTranscriptHistory(transcriptPath string, cwd string, cfg config.Config) ([]enhancer.Message, histstatus.Status, error) {
 	if !cfg.Claude.Transcript.Enabled {
-		return nil, nil
+		return nil, histstatus.Unknown, nil
 	}
 	result, err := claudetranscript.New(claudetranscript.Options{
 		MaxMessages: cfg.Claude.Transcript.MaxMessages,
 		MaxChars:    cfg.Claude.Transcript.MaxChars,
 	}).Retrieve(transcriptPath, cwd)
-	return result.Messages, err
+	return result.Messages, result.Status, err
+}
+
+// devinSessionHistory returns the current Devin session history to inject when
+// running under the Devin CLI. Like the codex/claude helpers, the error is
+// non-nil only on a genuine read failure; "no session", "stale" and "empty"
+// are reported via the status so the hook layer surfaces them explicitly.
+func devinSessionHistory(prompt string, cwd string, cfg config.Config) ([]enhancer.Message, histstatus.Status, error) {
+	if !cfg.Devin.History.Enabled {
+		return nil, histstatus.Unknown, nil
+	}
+	result, err := devinhistory.New(devinhistory.Options{
+		DBPath:      cfg.Devin.History.DBPath,
+		MaxMessages: cfg.Devin.History.MaxMessages,
+		MaxChars:    cfg.Devin.History.MaxChars,
+		Recency:     cfg.Devin.History.Recency,
+	}).Retrieve(prompt, cwd)
+	return result.Messages, result.Status, err
 }
 
 func runClaudeHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
@@ -993,6 +1012,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if err != nil {
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
 	}
+	history, histStatus, histErr := devinSessionHistory(input.Prompt, overrideCWD, cfg)
 	output, err := devinadapter.HandleHook(context.Background(), service, input, devinadapter.HookOptions{
 		Client:   *client,
 		Mode:     *mode,
@@ -1000,6 +1020,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		CWD:      overrideCWD,
 		Language: cfg.Language,
 		Timeout:  timeoutOrDefault(*timeout),
+		History:  history,
 		// Default false: hold a manual `pe` for review (block + show the enhanced
 		// prompt) so the user controls what is sent. OPENPE_DEVIN_INJECT=true is
 		// the opt-in "I trust it" mode that injects silently. --auto is inherently
@@ -1012,6 +1033,15 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	}
 	if *copyPreview {
 		output = deliverDevinBlock(cfg, output)
+	}
+	// Non-silent disclosure: state whether prior Devin-session context was
+	// included (block -> Reason, inject/skip -> SystemMessage).
+	if note := historyDisclosure(history, histStatus, histErr, cfg.Language); note != "" {
+		if output.Decision == "block" {
+			output.Reason = strings.TrimSpace(note + " " + output.Reason)
+		} else {
+			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
+		}
 	}
 	if output.Decision == "block" && *blockOutput == "stderr" {
 		if *terminalPreview {
@@ -1053,6 +1083,9 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 	if strings.TrimSpace(cwd) == "" {
 		cwd = strings.TrimSpace(os.Getenv("DEVIN_PROJECT_DIR"))
 	}
+	// Under Devin the context is always the current Devin session (read from
+	// its local SQLite store), regardless of which client's hook fired.
+	history, histStatus, histErr := devinSessionHistory(rawPrompt, cwd, cfg)
 	output, err := devinadapter.HandleHook(context.Background(), service, devinadapter.HookInput{
 		HookEventName: devinadapter.UserPromptSubmit,
 		Prompt:        rawPrompt,
@@ -1062,6 +1095,7 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 		Mode:     "agent",
 		Language: cfg.Language,
 		Timeout:  timeoutOrDefault(cfg.Timeout),
+		History:  history,
 		// Same default as the native devin hook: review (block) unless the user
 		// opted into silent injection via OPENPE_DEVIN_INJECT.
 		Inject:           envBoolOrDefault("OPENPE_DEVIN_INJECT", false),
@@ -1071,6 +1105,15 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(true, err.Error(), cfg.Language))
 	}
 	output = deliverDevinBlock(cfg, output)
+	// Non-silent disclosure: state whether prior Devin-session context was
+	// included (block -> Reason, inject/skip -> SystemMessage).
+	if note := historyDisclosure(history, histStatus, histErr, cfg.Language); note != "" {
+		if output.Decision == "block" {
+			output.Reason = strings.TrimSpace(note + " " + output.Reason)
+		} else {
+			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
+		}
+	}
 	return devinadapter.EncodeHookOutputOrFallback(stdout, output)
 }
 
@@ -1351,7 +1394,9 @@ func runCommand(ctx context.Context, name string, args []string, stdin io.Reader
 
 func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {
 	if !cfg.Openace.Enabled {
-		return enhancer.NewService(provider).WithSystemPrompt(cfg.SystemPrompt), nil
+		return enhancer.NewService(provider).
+			WithSystemPrompt(cfg.SystemPrompt).
+			WithMessageStyle(messageStyleFromConfig(cfg)), nil
 	}
 	contextProvider, err := openacectx.New(openacectx.Config{
 		DaemonAddr:        cfg.Openace.Addr,
@@ -1367,7 +1412,16 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 	if err != nil {
 		return nil, err
 	}
-	return enhancer.NewServiceWithContext(provider, contextProvider).WithSystemPrompt(cfg.SystemPrompt), nil
+	return enhancer.NewServiceWithContext(provider, contextProvider).
+		WithSystemPrompt(cfg.SystemPrompt).
+		WithMessageStyle(messageStyleFromConfig(cfg)), nil
+}
+
+func messageStyleFromConfig(cfg config.Config) enhancer.MessageStyle {
+	if strings.EqualFold(strings.TrimSpace(cfg.MessageStyle), "hybrid") {
+		return enhancer.StyleHybrid
+	}
+	return enhancer.StyleFlatten
 }
 
 func timeoutOrDefault(value time.Duration) time.Duration {
@@ -1524,6 +1578,53 @@ func localizedHistoryReadFailure(err error, language string) string {
 		return fmt.Sprintf("openPE warning: failed to read conversation history (%v); this enhancement does NOT include history context.", err)
 	}
 	return fmt.Sprintf("openPE 提示：读取历史上下文失败（%v），本次增强未包含会话历史。", err)
+}
+
+// historyDisclosure renders the single, always-visible line about prior-context
+// for one enhancement. openPE never silently falls back to a history-less
+// enhancement: a genuine read failure is reported as a failure, every
+// not-included reason is named, and a successful include states the count. An
+// empty result means "say nothing" and occurs only when the history feature is
+// disabled (Unknown) — i.e. the user opted out, so silence is correct.
+func historyDisclosure(messages []enhancer.Message, status histstatus.Status, histErr error, language string) string {
+	if histErr != nil {
+		return localizedHistoryReadFailure(histErr, language)
+	}
+	return localizedHistoryNote(status, len(messages), language)
+}
+
+func localizedHistoryNote(status histstatus.Status, count int, language string) string {
+	en := isEnglishLanguage(language)
+	switch status {
+	case histstatus.Found:
+		if en {
+			return fmt.Sprintf("openPE: included %d prior message(s) as conversation context.", count)
+		}
+		return fmt.Sprintf("openPE：已带入 %d 条会话历史作为上下文。", count)
+	case histstatus.NoSession:
+		if en {
+			return "openPE: no prior conversation context found for this workspace; enhanced without history."
+		}
+		return "openPE：未找到本工作区的会话历史，本次未带前文上下文。"
+	case histstatus.Empty:
+		if en {
+			return "openPE: the located session had no reusable conversation; enhanced without history."
+		}
+		return "openPE：会话历史为空，本次未带前文上下文。"
+	case histstatus.Stale:
+		if en {
+			return "openPE: the most recent session is outside the freshness window; enhanced without history."
+		}
+		return "openPE：最近会话已超出时效窗口，本次未带前文上下文。"
+	case histstatus.CWDMismatch:
+		if en {
+			return "openPE: the located session belongs to another workspace; enhanced without history."
+		}
+		return "openPE：会话历史属于其它工作区，本次未带前文上下文。"
+	default:
+		// Unknown: the history feature is disabled — make no claim.
+		return ""
+	}
 }
 
 func localizedEnhanceFailure(message string, language string) string {
