@@ -27,6 +27,12 @@ const (
 	DefaultClaudeTranscriptMaxMessages = 12
 	DefaultClaudeTranscriptMaxChars    = 12000
 
+	// DefaultHookDedupWindow is the freshness window for the cross-adapter
+	// single-flight de-duplication applied when a host agent (e.g. the Devin
+	// CLI) aggregates UserPromptSubmit hooks from several ecosystems and fires
+	// them all for one prompt. See internal/adapters/hookdedup.
+	DefaultHookDedupWindow = 5 * time.Second
+
 	// DefaultMaxContextTokens is the global token budget applied to every
 	// outbound enhancer.Request via Options.MaxContextTokens. Zero means
 	// "no budget" — enhancer.assemblePrompt skips its section-level
@@ -67,6 +73,17 @@ type Config struct {
 	Claude       ClaudeConfig
 	Delivery     DeliveryConfig
 	Server       ServerConfig
+	HookDedup    HookDedupConfig
+}
+
+// HookDedupConfig controls the cross-adapter single-flight de-duplication that
+// prevents a host agent which aggregates hooks from multiple ecosystems (the
+// Devin CLI loads its own, Claude Code, and Windsurf hooks at once) from
+// enhancing the same prompt several times. Enabled by default; the window is
+// the claim freshness used by internal/adapters/hookdedup.
+type HookDedupConfig struct {
+	Enabled bool
+	Window  time.Duration
 }
 
 type CodexConfig struct {
@@ -199,6 +216,13 @@ func Load() Config {
 			CORSOrigins:      splitCSV(valueFromEnv("OPENPE_SERVER_CORS_ORIGINS", fileEnv)),
 			LifecycleEnabled: boolFromValue(valueFromEnv("OPENPE_SERVER_LIFECYCLE_ENABLED", fileEnv), false),
 			DescriptorFile:   valueFromEnv("OPENPE_SERVER_DESCRIPTOR_FILE", fileEnv),
+		},
+		HookDedup: HookDedupConfig{
+			// Default true: a single prompt submitted inside a hook-aggregating
+			// host (Devin) must be enhanced exactly once even when openPE hooks
+			// are installed for several clients at the same time.
+			Enabled: boolFromValue(valueFromEnv("OPENPE_HOOK_DEDUP_ENABLED", fileEnv), true),
+			Window:  durationFromValue(valueFromEnv("OPENPE_HOOK_DEDUP_WINDOW", fileEnv), DefaultHookDedupWindow),
 		},
 	}
 }
