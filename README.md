@@ -143,6 +143,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_ENV_FILE`                                      | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                                                                                                                                       |
 | `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词               | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。用于自定义改写风格或部署自调版本，无需改代码重新编译                                         |
 | `OPENPE_MAX_CONTEXT_TOKENS`                            | `0`（不限）                | 全局 token 预算，所有客户端共享；正整数时 enhancer 按 section 级裁剪可选上下文（history / rules / guidelines / context.files / context.retrieval），required section 始终保留                           |
+| `OPENPE_MESSAGE_STYLE`                                | `flatten`                  | 消息构建结构：`flatten`（默认，`[system, user]`，历史以 `[role] content` 文本嵌入单条 user）或 `hybrid`（`[system, 历史真多轮, 末轮 user 仅含改写指令+原 prompt]`，角色保真/指代更强，系统提示附加「前文仅供参考、勿作答」框架）。`hybrid` 实验性，eval A/B 通过前默认仍为 `flatten`                                  |
 | `OPENPE_HOOK_DEDUP_ENABLED`                            | `true`                     | 跨适配器去重总开关，仅在 Devin 下生效：Devin 会同时加载 devin/claude/windsurf 三类 hook，开启后同一条 `pe` 只增强一次（详见 [Devin CLI hook](#devin-cli-hook)）；设 `false` 关闭                       |
 | `OPENPE_HOOK_DEDUP_WINDOW`                             | `5s`                       | 去重时间窗（Go duration）：判定「同一条 prompt 的兄弟 hook」的新鲜度窗口，需略大于 hook 间毫秒级调度间隔、又小于有意重试间隔，默认 `5s` 足够                                                          |
 
@@ -151,9 +152,9 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 #### 按需启用（高级 / 实验性 / 有前置依赖）
 
 <details>
-<summary><b>Codex / Claude 对话 session 读取（<u>默认已启用</u>）</b></summary>
+<summary><b>Codex / Claude / Devin 对话 session 读取（<u>默认已启用</u>）</b></summary>
 
-openPE 默认读取当前 Codex / Claude Code 对话上下文，启用满血提示词增强。文件缺失或 `cwd` 不一致时自动 skip，不会出错。仅在需要显式关闭时才需配置下面变量。
+openPE 默认读取当前 Codex / Claude Code / Devin 对话上下文，启用满血提示词增强。**非静默**：未找到 session、`cwd` 不一致、超出时效窗口或读取失败时，都会在 hook 反馈里显式提示「本次未带前文上下文（原因）」或「读取历史上下文失败」，绝不静默兜底成无历史增强。仅在需要显式关闭时才需配置下面变量。
 
 | 变量                                      | 默认                           | 说明                                                                                |
 | ----------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------- |
@@ -164,6 +165,11 @@ openPE 默认读取当前 Codex / Claude Code 对话上下文，启用满血提�
 | `OPENPE_CLAUDE_TRANSCRIPT_ENABLED`      | `true`                       | 是否读取 Claude `transcript_path` 并注入 `Request.History`；设为 `false` 关闭 |
 | `OPENPE_CLAUDE_TRANSCRIPT_MAX_MESSAGES` | `12`                         | Claude transcript 注入的最近消息数上限                                              |
 | `OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS`    | `12000`                      | Claude transcript 注入的字符预算上限                                                |
+| `OPENPE_DEVIN_HISTORY_ENABLED`          | `true`                       | 在 Devin 下运行时，是否只读 Devin SQLite 会话库并注入 `Request.History`；设为 `false` 关闭 |
+| `OPENPE_DEVIN_HISTORY_DB_PATH`          | 平台默认                       | Devin `sessions.db` 路径（默认 `~/.local/share/devin/cli/sessions.db`，Windows 为 `%APPDATA%\devin\cli\sessions.db`） |
+| `OPENPE_DEVIN_HISTORY_MAX_MESSAGES`     | `12`                         | Devin session history 注入的最近消息数上限                                          |
+| `OPENPE_DEVIN_HISTORY_MAX_CHARS`        | `12000`                      | Devin session history 注入的字符预算上限                                            |
+| `OPENPE_DEVIN_HISTORY_RECENCY`          | `2h`                         | 定位到的 Devin session 最近活跃须在此时效窗口内才复用，避免注入同目录旧 session 的陈旧历史 |
 
 </details>
 
@@ -291,7 +297,7 @@ openpe codex hook install --dry-run
 **关键注意事项**：
 
 - Codex hook 输入里的 `cwd` 来自当前 Codex session，影响 enhancer 推断项目。处理 跨域项目时，请注意工作区路径为跨域项目路径，如 `~/projects/xxx` 。
-- **Codex session history 默认读取**（启用满血提示词增强）。openPE 用当前 `pe` 原文从 `~/.codex/history.jsonl` 反查 session id，再读取对应 rollout JSONL 的最近 user/assistant 消息，填入 `enhancer.Request.History`，让 `pe` 能理解对话里的“选项一”“星桥方案”等引用。若无法唯一匹配或 `cwd` 不一致，属于“无历史可用”，会自动 skip 且不报错；但若已定位到 session 却读取 rollout 失败（如权限/损坏），会在状态文案里明确提示“读取历史上下文失败”，不会静默当作含历史的增强。如需关闭，在 hook dotenv 设置 `OPENPE_CODEX_HISTORY_ENABLED=false`。
+- **Codex session history 默认读取**（启用满血提示词增强）。openPE 用当前 `pe` 原文从 `~/.codex/history.jsonl` 反查 session id，再读取对应 rollout JSONL 的最近 user/assistant 消息，填入 `enhancer.Request.History`，让 `pe` 能理解对话里的“选项一”“星桥方案”等引用。**非静默**：无法唯一匹配、`cwd` 不一致（无历史可用）或读取 rollout 失败，都会在状态文案里显式提示「本次未带前文上下文（原因）」或「读取历史上下文失败」，绝不静默当作含历史的增强。如需关闭，在 hook dotenv 设置 `OPENPE_CODEX_HISTORY_ENABLED=false`。
 - Codex TUI 把 captured hook feedback 压成单行，stderr 只输出短状态。完整预览见 [调用方式](#调用方式) 中的 `openpe codex hook last`。
 - 同时安装 user + project hook 会触发两次执行；openPE 在 project hook 安装器中会检测 user hook 并自动跳过去重。
 - Codex CLI `0.132.0` 的 `/` 菜单只枚举内置命令，不会列出 `~/.codex/prompts/*.md` 或自定义 commands；openPE 当前**不规划** `/pe` slash command，正式入口保持 hook 触发。
@@ -329,7 +335,7 @@ openpe claude hook install --dry-run
 
 **关键注意事项**：
 
-- **Claude transcript 默认读取**（启用满血提示词增强）。openPE 读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`，让 `pe` 能理解当前 Claude Code 对话里的“选项一”“方案A”等引用。若 transcript 缺失或 `cwd` 不一致，属于“无历史可用”，会自动 skip 且不报错；但若 transcript 存在却读取失败（如权限/损坏），会在状态文案里明确提示“读取历史上下文失败”，不会静默当作含历史的增强。如需关闭，在 hook dotenv 设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=false`。
+- **Claude transcript 默认读取**（启用满血提示词增强）。openPE 读取 Claude hook stdin 中公开提供的 `transcript_path`，提取最近 user/assistant 文本消息并填入 `enhancer.Request.History`，让 `pe` 能理解当前 Claude Code 对话里的“选项一”“方案A”等引用。**非静默**：transcript 缺失、`cwd` 不一致（无历史可用）或读取失败，都会在状态文案里显式提示「本次未带前文上下文（原因）」或「读取历史上下文失败」，绝不静默当作含历史的增强。如需关闭，在 hook dotenv 设置 `OPENPE_CLAUDE_TRANSCRIPT_ENABLED=false`。
 - Claude Code 的 hook 子进程可能无法访问系统剪贴板或 `/dev/tty`。当增强成功但剪贴板交付失败时，openPE 默认会在 Claude 可见的 blocked feedback 中追加完整增强 prompt 的 Markdown 代码块；用户可直接复制该代码块，或继续使用 `openpe claude hook last --prompt` / `last-prompt.txt` 兜底。
 - Claude Code `--print` headless 模式会执行 hook，但**不像交互式 TUI 一样稳定展示被阻断 feedback**；调试请用交互式模式。
 - Claude Code CLI `2.1.146` 暴露的 `--effort` 取值是 `low` / `medium` / `high`；1M context window 属于上游模型/网关能力，不是 openPE hook 能强制开启的选项。
@@ -372,7 +378,7 @@ openpe devin hook install --dry-run
 - **Devin 是 hook 聚合器**：它一次性加载自己（`~/.config/devin/config.json`）、Claude Code（`~/.claude/*`）和 Windsurf（`~/.codeium/windsurf/hooks.json`）的 `UserPromptSubmit` hook。也就是说你只要在其中**任意一个**客户端装了 openPE，Devin 里就能用 `pe`；若同时装了多个，一次 `pe` 会触发多个 openPE hook。
 - openPE 对此做了两层处理，无需你手动取舍：(1) **跨适配器去重**——同一条 prompt 只由最先触发的 hook 增强一次，其余直接放行（见 `OPENPE_HOOK_DEDUP_*`）；(2) **宿主感知渲染**——被 Devin 调起的 Claude/Windsurf hook 会自动改用 Devin 的 JSON 注入输出，而不是它们原生的 `exit 2 + 剪贴板`（后者会被 Devin 误判为空的 “Prompt blocked:”）。所以装一个或装多个，行为都是「恰好增强一次并注入」。
 - 这两层只在 `DEVIN_PROJECT_DIR` 存在（即真的跑在 Devin 里）时生效；Codex / Claude Code / Windsurf 各自原生使用时行为完全不变。
-- 暂未读取 Devin 自身的会话历史（Codex/Claude 已支持各自历史注入）；该 history 注入为后续项，当前 Devin 增强不含会话历史，状态文案不会谎称包含。
+- **Devin session history 默认读取**（启用满血提示词增强）。在 Devin 下运行时，openPE 只读 Devin 的本机 SQLite 会话库（`~/.local/share/devin/cli/sessions.db`），按工作目录 + 最近活跃定位当前 session，沿 `main_chain` 重建最近 user/assistant 历史填入 `enhancer.Request.History`，让 `pe` 能理解 Devin 对话里的前文引用。**非静默**：未找到 session、超出时效窗口（`OPENPE_DEVIN_HISTORY_RECENCY`，默认 2h）或读取失败，都会显式提示，绝不静默兜底成无历史增强。被 Devin 调起的 Claude/Windsurf hook 同样读取的是 Devin 会话历史（而非各自原生来源）。如需关闭，设置 `OPENPE_DEVIN_HISTORY_ENABLED=false`。
 
 ### Windsurf Cascade hook
 
