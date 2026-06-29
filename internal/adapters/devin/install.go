@@ -13,11 +13,13 @@ func HookCommand(bin string, envFile string) string {
 }
 
 // HookCommandForScope builds the shell command Devin runs for the
-// UserPromptSubmit hook. It mirrors the codex adapter's runtime flags: block
-// via stderr (exit 2), no /dev/tty preview, and copy the enhanced prompt to the
-// clipboard so the user pastes it back.
+// UserPromptSubmit hook. It mirrors the Codex adapter's delivery model — block
+// the original message and copy the enhanced prompt to the clipboard for the
+// user to paste/edit/resubmit — so the experience is consistent across clients.
+// The only difference from Codex is the transport: Devin reads the block reason
+// from stdout JSON (the default --block-output=json), not stderr.
 func HookCommandForScope(bin string, envFile string, scope string) string {
-	command := shellQuote(bin) + " devin hook run --block-output=stderr --terminal-preview=false --copy-preview=true"
+	command := shellQuote(bin) + " devin hook run --copy-preview=true --terminal-preview=false"
 	if strings.TrimSpace(scope) != "" {
 		command += " --hook-scope=" + shellQuote(scope)
 	}

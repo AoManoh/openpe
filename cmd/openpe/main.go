@@ -19,6 +19,7 @@ import (
 	codexadapter "github.com/AoManoh/openpe/internal/adapters/codex"
 	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	devinadapter "github.com/AoManoh/openpe/internal/adapters/devin"
+	"github.com/AoManoh/openpe/internal/adapters/hookdedup"
 	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
 	"github.com/AoManoh/openpe/internal/config"
 	claudetranscript "github.com/AoManoh/openpe/internal/context/claudetranscript"
@@ -536,7 +537,7 @@ func runClaudeHook(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 	}
 	switch args[0] {
 	case "run":
-		return runClaudeHookRun(args[1:], stdin, stderr, newProvider, getwd)
+		return runClaudeHookRun(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "install":
 		return runClaudeHookInstall(args[1:], stdout, stderr, getwd)
 	case "last":
@@ -555,7 +556,7 @@ func runClaudeHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
 	return runDeliveryLast("claude hook last", "claude", args, stdout, stderr)
 }
 
-func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
 	cfg := config.Load()
 	fs := flag.NewFlagSet("claude hook run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -602,6 +603,12 @@ func runClaudeHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvi
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure context provider: %v", err), cfg.Language))
 		return 2
+	}
+	// When the Devin CLI imports and runs this Claude hook, render Devin-native
+	// JSON output (de-duplicated against sibling openPE hooks) instead of the
+	// Claude exit-2 + clipboard delivery, which Devin misreads as an empty block.
+	if runningUnderDevin() {
+		return renderDevinHook(cfg, service, input.Prompt, effectiveCWD, stdout)
 	}
 	output, err := claudeadapter.HandleHook(context.Background(), service, input, claudeadapter.HookOptions{
 		Client:           *client,
@@ -728,7 +735,7 @@ func runWindsurfHook(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	}
 	switch args[0] {
 	case "run":
-		return runWindsurfHookRun(args[1:], stdin, stderr, newProvider, getwd)
+		return runWindsurfHookRun(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "install":
 		return runWindsurfHookInstall(args[1:], stdout, stderr, getwd)
 	case "last":
@@ -743,7 +750,7 @@ func runWindsurfHook(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	}
 }
 
-func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
+func runWindsurfHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
 	cfg := config.Load()
 	fs := flag.NewFlagSet("windsurf hook run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -787,6 +794,12 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stderr io.Writer, newPro
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure context provider: %v", err), cfg.Language))
 		return 2
+	}
+	// When the Devin CLI imports and runs this Windsurf hook, render Devin-native
+	// JSON output (de-duplicated against sibling openPE hooks) instead of the
+	// Windsurf exit-2 + clipboard delivery, which Devin misreads as an empty block.
+	if runningUnderDevin() {
+		return renderDevinHook(cfg, service, input.ToolInfo.UserPrompt, input.CWD, stdout)
 	}
 	output, err := windsurfadapter.HandleHook(context.Background(), service, input, windsurfadapter.HookOptions{
 		Client:           *client,
@@ -921,7 +934,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	auto := fs.Bool("auto", false, "enhance every prompt and inject it as additional context")
 	blockOutput := fs.String("block-output", "json", "preview block output: json or stderr")
 	terminalPreview := fs.Bool("terminal-preview", envBoolOrDefault("OPENPE_DEVIN_TERMINAL_PREVIEW", false), "experimental: write full Markdown preview directly to /dev/tty when blocking")
-	copyPreview := fs.Bool("copy-preview", envBoolOrDefault("OPENPE_DEVIN_COPY_PREVIEW", false), "copy enhanced prompt to the system clipboard when blocking")
+	copyPreview := fs.Bool("copy-preview", envBoolOrDefault("OPENPE_DEVIN_COPY_PREVIEW", true), "copy enhanced prompt to the system clipboard when blocking")
 	hookScope := fs.String("hook-scope", envOrDefault("OPENPE_HOOK_SCOPE", ""), "hook scope for duplicate suppression: user or project")
 	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
 	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
@@ -942,6 +955,17 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	// exists, so suppress it to avoid enhancing the same prompt twice.
 	if strings.TrimSpace(*hookScope) == "project" && devinadapter.HasUserOpenPEHookConfig() {
 		return 0
+	}
+	// Cross-adapter single-flight: Devin also imports the Claude- and
+	// Windsurf-format openPE hooks, so a single prompt can fire several openPE
+	// hooks in sequence. The first claims the prompt and enhances it; later
+	// siblings emit a no-op so the prompt is enhanced exactly once.
+	if cfg.HookDedup.Enabled {
+		won, done := hookdedup.Claim(cfg.Delivery.CacheDir, input.Prompt, cfg.HookDedup.Window)
+		if !won {
+			return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.SkipOutput())
+		}
+		defer done()
 	}
 	// Devin's UserPromptSubmit stdin does not carry cwd; fall back to
 	// DEVIN_PROJECT_DIR (set for command hooks) then the process cwd.
@@ -970,20 +994,24 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
 	}
 	output, err := devinadapter.HandleHook(context.Background(), service, input, devinadapter.HookOptions{
-		Client:           *client,
-		Mode:             *mode,
-		Auto:             *auto,
-		CWD:              overrideCWD,
-		Language:         cfg.Language,
-		Timeout:          timeoutOrDefault(*timeout),
+		Client:   *client,
+		Mode:     *mode,
+		Auto:     *auto,
+		CWD:      overrideCWD,
+		Language: cfg.Language,
+		Timeout:  timeoutOrDefault(*timeout),
+		// Default false: hold a manual `pe` for review (block + show the enhanced
+		// prompt) so the user controls what is sent. OPENPE_DEVIN_INJECT=true is
+		// the opt-in "I trust it" mode that injects silently. --auto is inherently
+		// inject — it would be unusable if it blocked every prompt.
+		Inject:           *auto || envBoolOrDefault("OPENPE_DEVIN_INJECT", false),
 		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, err.Error(), cfg.Language))
 	}
-	if output.Decision == "block" && *copyPreview && output.PreviewPrompt != "" {
-		result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "devin"))
-		output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("devin"))
+	if *copyPreview {
+		output = deliverDevinBlock(cfg, output)
 	}
 	if output.Decision == "block" && *blockOutput == "stderr" {
 		if *terminalPreview {
@@ -996,6 +1024,68 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(true, fmt.Sprintf("unsupported block-output %q", *blockOutput), cfg.Language))
 	}
 	return devinadapter.EncodeHookOutputOrFallback(stdout, output)
+}
+
+// runningUnderDevin reports whether this hook process was invoked by the Devin
+// CLI. Devin sets DEVIN_PROJECT_DIR for every command hook it runs — including
+// the Claude- and Windsurf-format hooks it imports — so it is the reliable
+// signal that the codex/claude/windsurf adapters must render Devin-native JSON
+// output instead of their exit-2 + stderr delivery, which Devin misreads as an
+// empty "Prompt blocked:".
+func runningUnderDevin() bool {
+	return strings.TrimSpace(os.Getenv("DEVIN_PROJECT_DIR")) != ""
+}
+
+// renderDevinHook enhances rawPrompt and emits Devin-native JSON output,
+// applying cross-adapter single-flight de-duplication. It is shared by the
+// claude/windsurf hook runs when the Devin CLI imports and invokes them, so a
+// Claude- or Windsurf-installed hook still produces a correct single Devin
+// injection. rawPrompt is the unparsed user text (still carrying the `pe`
+// trigger); the Devin adapter parses it.
+func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt string, cwd string, stdout io.Writer) int {
+	if cfg.HookDedup.Enabled {
+		won, done := hookdedup.Claim(cfg.Delivery.CacheDir, rawPrompt, cfg.HookDedup.Window)
+		if !won {
+			return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.SkipOutput())
+		}
+		defer done()
+	}
+	if strings.TrimSpace(cwd) == "" {
+		cwd = strings.TrimSpace(os.Getenv("DEVIN_PROJECT_DIR"))
+	}
+	output, err := devinadapter.HandleHook(context.Background(), service, devinadapter.HookInput{
+		HookEventName: devinadapter.UserPromptSubmit,
+		Prompt:        rawPrompt,
+		CWD:           cwd,
+	}, devinadapter.HookOptions{
+		Client:   "devin",
+		Mode:     "agent",
+		Language: cfg.Language,
+		Timeout:  timeoutOrDefault(cfg.Timeout),
+		// Same default as the native devin hook: review (block) unless the user
+		// opted into silent injection via OPENPE_DEVIN_INJECT.
+		Inject:           envBoolOrDefault("OPENPE_DEVIN_INJECT", false),
+		MaxContextTokens: cfg.MaxContextTokens,
+	})
+	if err != nil {
+		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(true, err.Error(), cfg.Language))
+	}
+	output = deliverDevinBlock(cfg, output)
+	return devinadapter.EncodeHookOutputOrFallback(stdout, output)
+}
+
+// deliverDevinBlock copies the enhanced prompt to the clipboard and sets the
+// block reason from the shared delivery.HookStatus, so every review-mode Devin
+// path (the native devin hook and the imported claude/windsurf hooks) shows the
+// same "blocked + copied, paste it" / "clipboard failed, see hook last" feedback
+// as the Codex/Claude/Windsurf clients. It is a no-op for inject/skip outputs.
+func deliverDevinBlock(cfg config.Config, output devinadapter.HookOutput) devinadapter.HookOutput {
+	if output.Decision != "block" || strings.TrimSpace(output.PreviewPrompt) == "" {
+		return output
+	}
+	result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "devin"))
+	output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("devin"))
+	return output
 }
 
 func runDevinHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {

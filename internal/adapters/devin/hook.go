@@ -71,6 +71,14 @@ type HookOptions struct {
 	Language string
 	Timeout  time.Duration
 	History  []enhancer.Message
+	// Inject makes a manual `pe` trigger inject the enhanced prompt as
+	// additional context (exit 0, JSON hookSpecificOutput) instead of blocking
+	// the original message with a clipboard/preview handoff. The Devin CLI
+	// natively consumes additionalContext, so injection is the seamless path
+	// there; the codex/claude/windsurf clipboard model only ever worked because
+	// those clients cannot ingest hook-provided context. The default (false)
+	// preserves the historical preview-block behaviour for existing callers.
+	Inject bool
 	// MaxContextTokens forwards the consumer-layer global token budget
 	// (config.Config.MaxContextTokens, sourced from OPENPE_MAX_CONTEXT_TOKENS)
 	// into enhancer.Request.Options. Zero means "no budget" so this field is
@@ -143,17 +151,46 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if err != nil {
 		return HookError(manualTrigger, err.Error(), opts.Language), nil
 	}
-	if manualTrigger && manualMode == ModePreview {
+	if manualTrigger && manualMode == ModePreview && !opts.Inject {
+		// Default, controllable path: hold the original (decision=block) and hand
+		// the enhanced prompt to the clipboard, exactly like the Codex / Claude /
+		// Windsurf clients. The runner overwrites Reason with delivery.HookStatus
+		// ("blocked + copied, paste it" / "clipboard failed, see hook last"), so
+		// the cross-client experience is consistent. openPE never auto-applies a
+		// generated prompt: the user pastes/edits/resubmits it.
 		cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
 		return BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt), nil
 	}
+	// Inject mode (auto, or opt-in OPENPE_DEVIN_INJECT): the user has explicitly
+	// chosen to trust the enhancement, so inject it as additional context
+	// (exit 0). The injection is silent — Devin consumes additionalContext but
+	// does not surface our systemMessage — so cache the enhanced prompt too;
+	// `openpe devin hook last --prompt` lets the user audit what was injected.
+	_, _ = SavePreview(resp.EnhancedPrompt, opts.Language)
+	return InjectionOutput(resp.EnhancedPrompt, opts.Language), nil
+}
+
+// InjectionOutput builds the UserPromptSubmit output that injects an enhanced
+// prompt as additional context (the non-preview success shape). It is exported
+// so other adapters can render Devin-native output when the Devin CLI imports
+// and runs their hooks: Devin reads additionalContext from stdout JSON, whereas
+// the codex/claude/windsurf adapters' native exit-2 + stderr delivery is
+// misread by Devin as an empty block.
+func InjectionOutput(enhanced string, language string) HookOutput {
 	return HookOutput{
-		SystemMessage: injectedMessage(opts.Language),
+		SystemMessage: injectedMessage(language),
 		HookSpecificOutput: &HookSpecificOutput{
 			HookEventName:     UserPromptSubmit,
-			AdditionalContext: AdditionalContext(resp.EnhancedPrompt),
+			AdditionalContext: AdditionalContext(enhanced),
 		},
-	}, nil
+	}
+}
+
+// SkipOutput is the no-op a de-duplication loser emits: it lets the host
+// proceed with the original prompt without a second injection or a block, so
+// only the single winning hook enhances the prompt.
+func SkipOutput() HookOutput {
+	return HookOutput{Continue: true}
 }
 
 func ParseManualEnhance(prompt string) (string, Mode, bool) {
