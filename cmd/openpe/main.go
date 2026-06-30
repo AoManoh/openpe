@@ -410,6 +410,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		Language:         cfg.Language,
 		Timeout:          timeoutOrDefault(*timeout),
 		History:          history,
+		Inject:           cfg.Inject.Codex,
 		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
@@ -619,11 +620,23 @@ func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr i
 		Language:         cfg.Language,
 		Timeout:          timeoutOrDefault(*timeout),
 		History:          history,
+		Inject:           cfg.Inject.Claude,
 		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
 		return 2
+	}
+	// Inject mode (OPENPE_HOOK_INJECT / OPENPE_CLAUDE_INJECT): emit exit-0 JSON
+	// with additionalContext (Claude CLI injects it via a system-reminder) plus
+	// the non-silent history disclosure; cache the prompt for `claude hook last`.
+	if output.Injected {
+		_, _ = delivery.Save("claude", output.PreviewPrompt, cfg.Language)
+		if note := historyDisclosure(history, histStatus, histErr, cfg.Language); note != "" {
+			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
+		}
+		_ = claudeadapter.EncodeInjection(stdout, output)
+		return 0
 	}
 	if strings.TrimSpace(output.PreviewPrompt) == "" {
 		return 0
@@ -1022,10 +1035,11 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		Timeout:  timeoutOrDefault(*timeout),
 		History:  history,
 		// Default false: hold a manual `pe` for review (block + show the enhanced
-		// prompt) so the user controls what is sent. OPENPE_DEVIN_INJECT=true is
-		// the opt-in "I trust it" mode that injects silently. --auto is inherently
-		// inject — it would be unusable if it blocked every prompt.
-		Inject:           *auto || envBoolOrDefault("OPENPE_DEVIN_INJECT", false),
+		// prompt) so the user controls what is sent. The unified inject switch
+		// (OPENPE_HOOK_INJECT / OPENPE_DEVIN_INJECT, resolved in config) is the
+		// opt-in "I trust it" mode. --auto is inherently inject — it would be
+		// unusable if it blocked every prompt.
+		Inject:           *auto || cfg.Inject.Devin,
 		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
@@ -1097,8 +1111,9 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 		Timeout:  timeoutOrDefault(cfg.Timeout),
 		History:  history,
 		// Same default as the native devin hook: review (block) unless the user
-		// opted into silent injection via OPENPE_DEVIN_INJECT.
-		Inject:           envBoolOrDefault("OPENPE_DEVIN_INJECT", false),
+		// opted into injection via the unified switch (OPENPE_HOOK_INJECT /
+		// OPENPE_DEVIN_INJECT, resolved in config).
+		Inject:           cfg.Inject.Devin,
 		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {

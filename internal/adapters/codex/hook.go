@@ -53,6 +53,12 @@ type HookOptions struct {
 	Language string
 	Timeout  time.Duration
 	History  []enhancer.Message
+	// Inject makes a manual `pe` trigger inject the enhanced prompt as
+	// additional context (exit 0, hookSpecificOutput.additionalContext) instead
+	// of holding the original with a clipboard/preview review. Codex CLI
+	// consumes UserPromptSubmit additionalContext into the model context, so
+	// this is a real injection there. Default false preserves the review model.
+	Inject bool
 	// MaxContextTokens forwards the consumer-layer global token budget
 	// (config.Config.MaxContextTokens, sourced from
 	// OPENPE_MAX_CONTEXT_TOKENS) into enhancer.Request.Options. Zero
@@ -127,10 +133,14 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if err != nil {
 		return HookError(manual, err.Error(), opts.Language), nil
 	}
-	if manual && manualMode == ModePreview {
+	if manual && manualMode == ModePreview && !opts.Inject {
 		cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
 		return BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt), nil
 	}
+	// Inject mode (--auto, or OPENPE_HOOK_INJECT/OPENPE_CODEX_INJECT): cache the
+	// enhanced prompt for audit (`openpe codex hook last --prompt`), then inject
+	// it as additional context.
+	_, _ = SavePreview(resp.EnhancedPrompt, opts.Language)
 	return HookOutput{
 		SystemMessage: injectedMessage(opts.Language),
 		HookSpecificOutput: &HookSpecificOutput{

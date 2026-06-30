@@ -73,11 +73,11 @@ type HookOptions struct {
 	History  []enhancer.Message
 	// Inject makes a manual `pe` trigger inject the enhanced prompt as
 	// additional context (exit 0, JSON hookSpecificOutput) instead of blocking
-	// the original message with a clipboard/preview handoff. The Devin CLI
-	// natively consumes additionalContext, so injection is the seamless path
-	// there; the codex/claude/windsurf clipboard model only ever worked because
-	// those clients cannot ingest hook-provided context. The default (false)
-	// preserves the historical preview-block behaviour for existing callers.
+	// the original message with a clipboard/preview handoff. Devin consumes
+	// additionalContext natively. (Codex CLI and Claude Code CLI also consume
+	// UserPromptSubmit additionalContext — so the unified inject switch covers
+	// them too; only Windsurf cannot, and there the switch is a no-op.) The
+	// default (false) preserves the review/clipboard behaviour for all clients.
 	Inject bool
 	// MaxContextTokens forwards the consumer-layer global token budget
 	// (config.Config.MaxContextTokens, sourced from OPENPE_MAX_CONTEXT_TOKENS)

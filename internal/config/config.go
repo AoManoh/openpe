@@ -89,6 +89,7 @@ type Config struct {
 	Codex        CodexConfig
 	Claude       ClaudeConfig
 	Devin        DevinConfig
+	Inject       InjectConfig
 	Delivery     DeliveryConfig
 	Server       ServerConfig
 	HookDedup    HookDedupConfig
@@ -139,6 +140,17 @@ type DevinHistoryConfig struct {
 	MaxMessages int
 	MaxChars    int
 	Recency     time.Duration
+}
+
+// InjectConfig is the resolved per-client silent-injection switch. The global
+// default OPENPE_HOOK_INJECT (default false = review + clipboard, preserving
+// openPE's "never auto-apply" philosophy) is overridden per client by
+// OPENPE_<CLIENT>_INJECT. Windsurf cannot ingest hook-provided context, so it
+// has no field here — the switch is a documented no-op there.
+type InjectConfig struct {
+	Codex  bool
+	Claude bool
+	Devin  bool
 }
 
 type DeliveryConfig struct {
@@ -193,6 +205,10 @@ func Load() Config {
 		envFile = ".env"
 	}
 	fileEnv := loadDotEnv(envFile)
+	// Silent-injection switch: global default + per-client override. Resolved
+	// from the dotenv too (not just process env), so the hook's --env-file can
+	// configure it — unlike the old os.Getenv-only OPENPE_DEVIN_INJECT read.
+	globalInject := boolFromValue(valueFromEnv("OPENPE_HOOK_INJECT", fileEnv), false)
 	return Config{
 		BaseURL:          valueFromEnv("OPENPE_BASE_URL", fileEnv),
 		APIKey:           valueFromEnv("OPENPE_API_KEY", fileEnv),
@@ -250,6 +266,11 @@ func Load() Config {
 				MaxChars:    intFromValue(valueFromEnv("OPENPE_DEVIN_HISTORY_MAX_CHARS", fileEnv), DefaultDevinHistoryMaxChars),
 				Recency:     durationFromValue(valueFromEnv("OPENPE_DEVIN_HISTORY_RECENCY", fileEnv), DefaultDevinHistoryRecency),
 			},
+		},
+		Inject: InjectConfig{
+			Codex:  boolFromValue(valueFromEnv("OPENPE_CODEX_INJECT", fileEnv), globalInject),
+			Claude: boolFromValue(valueFromEnv("OPENPE_CLAUDE_INJECT", fileEnv), globalInject),
+			Devin:  boolFromValue(valueFromEnv("OPENPE_DEVIN_INJECT", fileEnv), globalInject),
 		},
 		Delivery: DeliveryConfig{
 			CacheDir:               valueFromEnv("OPENPE_CACHE_DIR", fileEnv),

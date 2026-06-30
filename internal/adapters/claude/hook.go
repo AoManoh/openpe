@@ -29,6 +29,12 @@ type HookOptions struct {
 	Language string
 	Timeout  time.Duration
 	History  []enhancer.Message
+	// Inject makes a manual `pe` trigger inject the enhanced prompt as additional
+	// context (exit 0, hookSpecificOutput.additionalContext) instead of the
+	// exit-2 + clipboard review delivery. Claude Code (CLI) wraps additionalContext
+	// in a system-reminder and feeds it to the model. Default false preserves the
+	// review model. (Note: the Claude VSCode extension does not consume it.)
+	Inject bool
 	// MaxContextTokens forwards the consumer-layer global token budget
 	// (config.Config.MaxContextTokens, sourced from
 	// OPENPE_MAX_CONTEXT_TOKENS) into enhancer.Request.Options. Zero
@@ -40,6 +46,17 @@ type HookOptions struct {
 type HookOutput struct {
 	TerminalPreview string
 	PreviewPrompt   string
+	// Injected is set when opts.Inject: the caller emits exit-0 JSON carrying
+	// HookSpecificOutput.additionalContext (and SystemMessage) instead of the
+	// exit-2 + clipboard review path.
+	Injected           bool
+	SystemMessage      string
+	HookSpecificOutput *HookSpecificOutput
+}
+
+type HookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
+	AdditionalContext string `json:"additionalContext,omitempty"`
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -89,10 +106,56 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if err != nil {
 		return HookOutput{}, err
 	}
+	if opts.Inject {
+		return HookOutput{
+			Injected:      true,
+			SystemMessage: injectedMessage(opts.Language),
+			HookSpecificOutput: &HookSpecificOutput{
+				HookEventName:     UserPromptSubmit,
+				AdditionalContext: AdditionalContext(resp.EnhancedPrompt),
+			},
+			PreviewPrompt: strings.TrimSpace(resp.EnhancedPrompt),
+		}, nil
+	}
 	return HookOutput{
 		TerminalPreview: preview.Markdown(resp.EnhancedPrompt, opts.Language),
 		PreviewPrompt:   strings.TrimSpace(resp.EnhancedPrompt),
 	}, nil
+}
+
+// AdditionalContext wraps the enhanced prompt for hook-context injection,
+// matching the codex/devin adapters' wrapper so the cross-client behaviour is
+// consistent.
+func AdditionalContext(enhanced string) string {
+	return strings.TrimSpace(`openPE generated an enhanced version of the user's prompt.
+
+Use this enhanced prompt as the preferred interpretation of the user's request while preserving any explicit user constraints and safety boundaries.
+
+<openpe_enhanced_prompt>
+` + strings.TrimSpace(enhanced) + `
+</openpe_enhanced_prompt>`)
+}
+
+// EncodeInjection writes the Claude UserPromptSubmit exit-0 JSON that injects
+// additionalContext (and an optional systemMessage) into Claude's context.
+func EncodeInjection(w io.Writer, output HookOutput) error {
+	payload := struct {
+		SystemMessage      string              `json:"systemMessage,omitempty"`
+		HookSpecificOutput *HookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+	}{
+		SystemMessage:      strings.TrimSpace(output.SystemMessage),
+		HookSpecificOutput: output.HookSpecificOutput,
+	}
+	return json.NewEncoder(w).Encode(payload)
+}
+
+func injectedMessage(language string) string {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "en", "en-us", "english":
+		return "openPE enhanced prompt injected as additional context."
+	default:
+		return "openPE 已将增强提示词注入为附加上下文。"
+	}
 }
 
 func valueOrDefault(value string, fallback string) string {
