@@ -1442,6 +1442,7 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 	return svc.
 		WithSystemPrompt(cfg.SystemPrompt).
 		WithMessageStyle(messageStyleFromConfig(cfg)).
+		WithHistoryRatio(config.HistoryKeepFraction(cfg.HistoryRatio)).
 		WithLanguageGuard(languageGuardFromConfig(cfg)).
 		WithLogger(slog.Default()), nil
 }

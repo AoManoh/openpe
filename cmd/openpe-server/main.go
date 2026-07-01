@@ -261,6 +261,7 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 	}
 	return svc.
 		WithSystemPrompt(cfg.SystemPrompt).
+		WithHistoryRatio(config.HistoryKeepFraction(cfg.HistoryRatio)).
 		WithLanguageGuard(enhancer.LanguageGuardConfig{
 			Enabled:  cfg.LanguageGuard.Enabled,
 			Reanchor: cfg.LanguageGuard.Reanchor,

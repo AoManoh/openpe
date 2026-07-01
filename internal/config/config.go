@@ -61,6 +61,13 @@ const (
 	// for latency-sensitive setups, in which case the guard only warns.
 	DefaultLanguageGuardEnabled  = true
 	DefaultLanguageGuardReanchor = true
+
+	// DefaultHistoryRatio is the context-turn gradient tier applied when
+	// OPENPE_HISTORY_RATIO is unset/unknown. "full" keeps 100% of the
+	// collected history (identical to the pre-gradient behaviour), so the
+	// gradient is opt-in and backward compatible. The real default tier is
+	// left to a later cross-model A/B; until then "full" is the safe default.
+	DefaultHistoryRatio = "full"
 )
 
 type Config struct {
@@ -87,6 +94,14 @@ type Config struct {
 	// historical, eval-validated layout stays the default until hybrid is
 	// promoted by eval A/B.
 	MessageStyle string
+	// HistoryRatio selects how much of the collected conversation history to
+	// keep when building the prompt: "full" (default, 100%), "high" (75%),
+	// "med" (50%) or "low" (25%). The most-recent turns are kept (reference
+	// resolution favours recency). Sourced from OPENPE_HISTORY_RATIO; unknown/
+	// empty → "full" so this is purely additive and backward compatible. The
+	// gradient applies uniformly to both flatten and hybrid layouts; the final
+	// task turn is never trimmed. See HistoryKeepFraction for the mapping.
+	HistoryRatio string
 	// Provider selects the model provider wire protocol: "openai" (default,
 	// OpenAI-compatible /v1/chat/completions) or "anthropic" (Anthropic Messages
 	// API /v1/messages). Sourced from OPENPE_PROVIDER; unknown/empty → "openai"
@@ -248,6 +263,7 @@ func Load() Config {
 		Language:         normalizeLanguage(valueOrDefault("OPENPE_LANGUAGE", fileEnv, DefaultLanguage)),
 		MaxContextTokens: intFromValue(valueFromEnv("OPENPE_MAX_CONTEXT_TOKENS", fileEnv), DefaultMaxContextTokens),
 		MessageStyle:     normalizeMessageStyle(valueFromEnv("OPENPE_MESSAGE_STYLE", fileEnv)),
+		HistoryRatio:     normalizeHistoryTier(valueFromEnv("OPENPE_HISTORY_RATIO", fileEnv)),
 		Provider:         normalizeProvider(valueFromEnv("OPENPE_PROVIDER", fileEnv)),
 		MaxTokens:        intFromValue(valueFromEnv("OPENPE_MAX_TOKENS", fileEnv), 0),
 		SystemPrompt:     systemPromptFromEnv(fileEnv),
@@ -456,6 +472,41 @@ func normalizeMessageStyle(value string) string {
 		return "hybrid"
 	default:
 		return "flatten"
+	}
+}
+
+// normalizeHistoryTier maps OPENPE_HISTORY_RATIO to a known context-turn
+// gradient tier: "full" (default) | "high" | "med" | "low". Unknown/empty
+// values fall back to "full" so the gradient is opt-in and existing setups keep
+// 100% history. The tier→fraction mapping lives in HistoryKeepFraction.
+func normalizeHistoryTier(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "high":
+		return "high"
+	case "med", "medium":
+		return "med"
+	case "low":
+		return "low"
+	default:
+		return DefaultHistoryRatio
+	}
+}
+
+// HistoryKeepFraction maps a normalized history tier to the fraction of the
+// most-recent history turns to keep: full→1.0, high→0.75, med→0.5, low→0.25.
+// Any other value (including "full") yields 1.0 = keep all, so callers can
+// pass the raw Config.HistoryRatio unconditionally. The enhancer treats a
+// fraction of 1.0 (or ≥1) as "no trim", preserving backward compatibility.
+func HistoryKeepFraction(tier string) float64 {
+	switch strings.ToLower(strings.TrimSpace(tier)) {
+	case "high":
+		return 0.75
+	case "med", "medium":
+		return 0.5
+	case "low":
+		return 0.25
+	default:
+		return 1.0
 	}
 }
 

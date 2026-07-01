@@ -63,6 +63,11 @@ type Service struct {
 	contextProvider ContextProvider
 	systemPrompt    string
 	messageStyle    MessageStyle
+	// historyKeepRatio is the fraction of the collected history to keep (most
+	// recent turns). 0 or >=1 means "keep all" — the default, fully backward
+	// compatible. Applied in Enhance before the layout branch so both flatten
+	// and hybrid see the trimmed history. See trimHistoryByRatio.
+	historyKeepRatio float64
 	// languageGuard, when non-nil and Enabled, post-processes each enhancement
 	// to keep the output in the user's input language. nil (the default from
 	// NewService) means the guard is off — fully backward compatible.
@@ -86,6 +91,15 @@ func NewServiceWithContext(provider Provider, contextProvider ContextProvider) *
 // StyleHybrid opt-in). Returns the Service for chaining.
 func (s *Service) WithMessageStyle(style MessageStyle) *Service {
 	s.messageStyle = style
+	return s
+}
+
+// WithHistoryRatio sets how much of the collected history to keep (most
+// recent). 0 or >=1 keeps all (the default, backward compatible), so callers
+// may wire config.HistoryKeepFraction unconditionally. Returns the Service for
+// chaining.
+func (s *Service) WithHistoryRatio(ratio float64) *Service {
+	s.historyKeepRatio = ratio
 	return s
 }
 
@@ -138,6 +152,11 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 		}
 		req.Context.Retrieval = append(req.Context.Retrieval, retrieved...)
 	}
+
+	// Context-turn gradient: keep only the most-recent fraction of history
+	// before choosing a layout, so flatten and hybrid apply the same trim.
+	// A ratio of 0 or >=1 (the default) is a no-op — full backward compat.
+	req.History = trimHistoryByRatio(req.History, s.historyKeepRatio)
 
 	var (
 		completion  CompletionRequest
