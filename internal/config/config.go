@@ -463,13 +463,17 @@ func normalizeLanguage(value string) string {
 	}
 }
 
-// normalizeMessageStyle maps OPENPE_MESSAGE_STYLE to "flatten" (default) or
-// "hybrid". Unknown/empty values fall back to "flatten" so the eval-validated
-// layout stays the default until hybrid is explicitly promoted.
+// normalizeMessageStyle maps OPENPE_MESSAGE_STYLE to "flatten" (default),
+// "hybrid", or "structured". Unknown/empty values fall back to "flatten" so the
+// eval-validated layout stays the default until hybrid/structured are
+// explicitly promoted. "structured" adds a separated read-only reference block
+// on top of the hybrid multi-turn layout (see enhancer.StyleStructured).
 func normalizeMessageStyle(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "hybrid", "multi-turn", "multiturn":
 		return "hybrid"
+	case "structured", "structured-v2", "structuredv2":
+		return "structured"
 	default:
 		return "flatten"
 	}

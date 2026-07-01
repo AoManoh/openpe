@@ -63,6 +63,16 @@ const (
 	// turn carries the rewrite instruction + original prompt. Opt-in until eval
 	// A/B promotes it (OPENPE_MESSAGE_STYLE=hybrid).
 	StyleHybrid
+	// StyleStructured sends [system(+zone framing), (optional) read-only
+	// reference-material message, prior user/assistant turns..., final user
+	// task]. Unlike StyleHybrid it pulls the reference context (rules,
+	// guidelines, context.files, context.retrieval) OUT of the final task
+	// message into a dedicated, clearly-delimited read-only block placed before
+	// the conversation, so the task turn carries only the rewrite instruction +
+	// original prompt + this-turn metadata. Opt-in (OPENPE_MESSAGE_STYLE=
+	// structured) until eval A/B promotes it. See docs/development/
+	// 2026-07-01-message-construction-part2.md.
+	StyleStructured
 )
 
 // CompletionRequest is the provider-facing prompt. System is always the first

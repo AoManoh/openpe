@@ -1448,10 +1448,14 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 }
 
 func messageStyleFromConfig(cfg config.Config) enhancer.MessageStyle {
-	if strings.EqualFold(strings.TrimSpace(cfg.MessageStyle), "hybrid") {
+	switch strings.ToLower(strings.TrimSpace(cfg.MessageStyle)) {
+	case "hybrid":
 		return enhancer.StyleHybrid
+	case "structured":
+		return enhancer.StyleStructured
+	default:
+		return enhancer.StyleFlatten
 	}
-	return enhancer.StyleFlatten
 }
 
 // languageGuardFromConfig maps the config-layer guard switches onto the
