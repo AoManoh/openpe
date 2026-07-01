@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1408,28 +1409,29 @@ func runCommand(ctx context.Context, name string, args []string, stdin io.Reader
 }
 
 func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {
-	if !cfg.Openace.Enabled {
-		return enhancer.NewService(provider).
-			WithSystemPrompt(cfg.SystemPrompt).
-			WithMessageStyle(messageStyleFromConfig(cfg)), nil
+	svc := enhancer.NewService(provider)
+	if cfg.Openace.Enabled {
+		contextProvider, err := openacectx.New(openacectx.Config{
+			DaemonAddr:        cfg.Openace.Addr,
+			DaemonToken:       cfg.Openace.Token,
+			ProviderProfileID: cfg.Openace.ProviderProfileID,
+			MaxOutputLength:   cfg.Openace.MaxOutputLength,
+			Timeout:           cfg.Openace.Timeout,
+			MaxRetries:        cfg.Openace.MaxRetries,
+			RetryBaseDelay:    cfg.Openace.RetryBaseDelay,
+			RetryMaxDelay:     cfg.Openace.RetryMaxDelay,
+			RetryJitter:       cfg.Openace.RetryJitter,
+		})
+		if err != nil {
+			return nil, err
+		}
+		svc = enhancer.NewServiceWithContext(provider, contextProvider)
 	}
-	contextProvider, err := openacectx.New(openacectx.Config{
-		DaemonAddr:        cfg.Openace.Addr,
-		DaemonToken:       cfg.Openace.Token,
-		ProviderProfileID: cfg.Openace.ProviderProfileID,
-		MaxOutputLength:   cfg.Openace.MaxOutputLength,
-		Timeout:           cfg.Openace.Timeout,
-		MaxRetries:        cfg.Openace.MaxRetries,
-		RetryBaseDelay:    cfg.Openace.RetryBaseDelay,
-		RetryMaxDelay:     cfg.Openace.RetryMaxDelay,
-		RetryJitter:       cfg.Openace.RetryJitter,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return enhancer.NewServiceWithContext(provider, contextProvider).
+	return svc.
 		WithSystemPrompt(cfg.SystemPrompt).
-		WithMessageStyle(messageStyleFromConfig(cfg)), nil
+		WithMessageStyle(messageStyleFromConfig(cfg)).
+		WithLanguageGuard(languageGuardFromConfig(cfg)).
+		WithLogger(slog.Default()), nil
 }
 
 func messageStyleFromConfig(cfg config.Config) enhancer.MessageStyle {
@@ -1437,6 +1439,15 @@ func messageStyleFromConfig(cfg config.Config) enhancer.MessageStyle {
 		return enhancer.StyleHybrid
 	}
 	return enhancer.StyleFlatten
+}
+
+// languageGuardFromConfig maps the config-layer guard switches onto the
+// enhancer's LanguageGuardConfig (keeps internal/config enhancer-free).
+func languageGuardFromConfig(cfg config.Config) enhancer.LanguageGuardConfig {
+	return enhancer.LanguageGuardConfig{
+		Enabled:  cfg.LanguageGuard.Enabled,
+		Reanchor: cfg.LanguageGuard.Reanchor,
+	}
 }
 
 func timeoutOrDefault(value time.Duration) time.Duration {

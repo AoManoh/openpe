@@ -53,6 +53,14 @@ const (
 	// total prompt size handed to the LLM provider, regardless of which
 	// collector populated history / context.files / context.retrieval.
 	DefaultMaxContextTokens = 0
+
+	// Language guard keeps the enhanced prompt in the user's input language.
+	// Enabled by default and a no-op when the languages already match (the
+	// common case), so it is backward compatible. Reanchor adds one re-request
+	// on a detected mismatch; disable it (OPENPE_LANGUAGE_GUARD_REANCHOR=false)
+	// for latency-sensitive setups, in which case the guard only warns.
+	DefaultLanguageGuardEnabled  = true
+	DefaultLanguageGuardReanchor = true
 )
 
 type Config struct {
@@ -85,14 +93,26 @@ type Config struct {
 	// the compiled-in enhancer.defaultSystemPrompt, so this field is purely
 	// additive and lets operators iterate on the prompt without recompiling.
 	SystemPrompt string
-	Openace      OpenaceConfig
-	Codex        CodexConfig
-	Claude       ClaudeConfig
-	Devin        DevinConfig
-	Inject       InjectConfig
-	Delivery     DeliveryConfig
-	Server       ServerConfig
-	HookDedup    HookDedupConfig
+	// LanguageGuard configures the enhancer's post-processing language-
+	// preservation guard (see internal/enhancer.LanguageGuardConfig). Sourced
+	// from OPENPE_LANGUAGE_GUARD_ENABLED / OPENPE_LANGUAGE_GUARD_REANCHOR.
+	LanguageGuard LanguageGuardConfig
+	Openace       OpenaceConfig
+	Codex         CodexConfig
+	Claude        ClaudeConfig
+	Devin         DevinConfig
+	Inject        InjectConfig
+	Delivery      DeliveryConfig
+	Server        ServerConfig
+	HookDedup     HookDedupConfig
+}
+
+// LanguageGuardConfig is the config-layer mirror of
+// enhancer.LanguageGuardConfig. cmd maps between the two, keeping
+// internal/config free of an enhancer import (consistent with MessageStyle).
+type LanguageGuardConfig struct {
+	Enabled  bool
+	Reanchor bool
 }
 
 // HookDedupConfig controls the cross-adapter single-flight de-duplication that
@@ -219,6 +239,10 @@ func Load() Config {
 		MaxContextTokens: intFromValue(valueFromEnv("OPENPE_MAX_CONTEXT_TOKENS", fileEnv), DefaultMaxContextTokens),
 		MessageStyle:     normalizeMessageStyle(valueFromEnv("OPENPE_MESSAGE_STYLE", fileEnv)),
 		SystemPrompt:     systemPromptFromEnv(fileEnv),
+		LanguageGuard: LanguageGuardConfig{
+			Enabled:  boolFromValue(valueFromEnv("OPENPE_LANGUAGE_GUARD_ENABLED", fileEnv), DefaultLanguageGuardEnabled),
+			Reanchor: boolFromValue(valueFromEnv("OPENPE_LANGUAGE_GUARD_REANCHOR", fileEnv), DefaultLanguageGuardReanchor),
+		},
 		Openace: OpenaceConfig{
 			Enabled:           boolFromValue(valueFromEnv("OPENPE_OPENACE_ENABLED", fileEnv), false),
 			Addr:              valueOrDefaultFromAny([]string{"OPENPE_OPENACE_ADDR", "OPENACE_DAEMON_ADDR"}, fileEnv, DefaultOpenaceAddr),

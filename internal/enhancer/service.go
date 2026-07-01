@@ -2,6 +2,7 @@ package enhancer
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 )
 
@@ -50,6 +51,15 @@ type Service struct {
 	contextProvider ContextProvider
 	systemPrompt    string
 	messageStyle    MessageStyle
+	// languageGuard, when non-nil and Enabled, post-processes each enhancement
+	// to keep the output in the user's input language. nil (the default from
+	// NewService) means the guard is off — fully backward compatible.
+	languageGuard *LanguageGuardConfig
+	// logger, when set, receives structured language-guard records. Optional.
+	logger *slog.Logger
+	// guardObserver, when set, is called once per guarded enhancement with the
+	// LanguageGuardEvent — the metrics hook (e.g. Prometheus counters). Optional.
+	guardObserver func(LanguageGuardEvent)
 }
 
 func NewService(provider Provider) *Service {
@@ -74,6 +84,30 @@ func (s *Service) WithSystemPrompt(prompt string) *Service {
 	if strings.TrimSpace(prompt) != "" {
 		s.systemPrompt = prompt
 	}
+	return s
+}
+
+// WithLanguageGuard enables the post-processing language-preservation guard.
+// A disabled config leaves the guard off (identical to not calling this), so it
+// is safe to wire unconditionally from config. Returns the Service for chaining.
+func (s *Service) WithLanguageGuard(cfg LanguageGuardConfig) *Service {
+	if cfg.Enabled {
+		s.languageGuard = &cfg
+	}
+	return s
+}
+
+// WithLogger sets the structured logger used for language-guard observability.
+// nil (the default) disables logging. Returns the Service for chaining.
+func (s *Service) WithLogger(logger *slog.Logger) *Service {
+	s.logger = logger
+	return s
+}
+
+// WithLanguageGuardObserver registers a metrics hook invoked once per guarded
+// enhancement with the LanguageGuardEvent. nil disables it. Returns the Service.
+func (s *Service) WithLanguageGuardObserver(fn func(LanguageGuardEvent)) *Service {
+	s.guardObserver = fn
 	return s
 }
 
@@ -122,6 +156,16 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 	enhanced := strings.TrimSpace(out.Text)
 	if enhanced == "" {
 		return Response{}, invalid("provider returned empty enhanced prompt")
+	}
+	// Post-processing language guard: keep the enhanced prompt in the user's
+	// input language. No-op unless enabled and a confident input/output language
+	// mismatch is detected; on mismatch it may re-anchor once (see language_guard.go).
+	if guarded, ev := s.applyLanguageGuard(ctx, completion, req.Prompt, enhanced); ev != nil {
+		enhanced = guarded
+		s.reportGuard(ev)
+		if ev.Mismatch && !ev.Corrected {
+			warnings = append(warnings, languageMismatchWarning(ev))
+		}
 	}
 	return Response{
 		EnhancedPrompt: enhanced,

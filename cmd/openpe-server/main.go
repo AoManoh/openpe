@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -238,22 +239,29 @@ func deriveBaseURL(listenAddr string) string {
 }
 
 func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {
-	if !cfg.Openace.Enabled {
-		return enhancer.NewService(provider).WithSystemPrompt(cfg.SystemPrompt), nil
+	svc := enhancer.NewService(provider)
+	if cfg.Openace.Enabled {
+		contextProvider, err := openacectx.New(openacectx.Config{
+			DaemonAddr:        cfg.Openace.Addr,
+			DaemonToken:       cfg.Openace.Token,
+			ProviderProfileID: cfg.Openace.ProviderProfileID,
+			MaxOutputLength:   cfg.Openace.MaxOutputLength,
+			Timeout:           cfg.Openace.Timeout,
+			MaxRetries:        cfg.Openace.MaxRetries,
+			RetryBaseDelay:    cfg.Openace.RetryBaseDelay,
+			RetryMaxDelay:     cfg.Openace.RetryMaxDelay,
+			RetryJitter:       cfg.Openace.RetryJitter,
+		})
+		if err != nil {
+			return nil, err
+		}
+		svc = enhancer.NewServiceWithContext(provider, contextProvider)
 	}
-	contextProvider, err := openacectx.New(openacectx.Config{
-		DaemonAddr:        cfg.Openace.Addr,
-		DaemonToken:       cfg.Openace.Token,
-		ProviderProfileID: cfg.Openace.ProviderProfileID,
-		MaxOutputLength:   cfg.Openace.MaxOutputLength,
-		Timeout:           cfg.Openace.Timeout,
-		MaxRetries:        cfg.Openace.MaxRetries,
-		RetryBaseDelay:    cfg.Openace.RetryBaseDelay,
-		RetryMaxDelay:     cfg.Openace.RetryMaxDelay,
-		RetryJitter:       cfg.Openace.RetryJitter,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return enhancer.NewServiceWithContext(provider, contextProvider).WithSystemPrompt(cfg.SystemPrompt), nil
+	return svc.
+		WithSystemPrompt(cfg.SystemPrompt).
+		WithLanguageGuard(enhancer.LanguageGuardConfig{
+			Enabled:  cfg.LanguageGuard.Enabled,
+			Reanchor: cfg.LanguageGuard.Reanchor,
+		}).
+		WithLogger(slog.Default()), nil
 }
