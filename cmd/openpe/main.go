@@ -29,7 +29,7 @@ import (
 	"github.com/AoManoh/openpe/internal/context/histstatus"
 	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
-	"github.com/AoManoh/openpe/internal/providers/openai"
+	"github.com/AoManoh/openpe/internal/providers"
 )
 
 // Version is the build identifier exposed via `openpe --version`. The
@@ -39,12 +39,12 @@ import (
 //	go build -ldflags "-X main.Version=v0.2.0" ./cmd/openpe
 var Version = "dev"
 
-type providerFactory func(openai.Config) (enhancer.Provider, error)
+type providerFactory func(providers.Spec) (enhancer.Provider, error)
 type commandRunner func(ctx context.Context, name string, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, func(cfg openai.Config) (enhancer.Provider, error) {
-		return openai.New(cfg)
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, func(s providers.Spec) (enhancer.Provider, error) {
+		return providers.New(s)
 	}, os.Getwd, runCommand))
 }
 
@@ -114,11 +114,13 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		}
 		*cwd = workingDir
 	}
-	provider, err := newProvider(openai.Config{
-		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
-		Model:   model.ValueOrDefault(cfg.Model),
-		Timeout: *timeout,
+	provider, err := newProvider(providers.Spec{
+		Provider:  cfg.Provider,
+		MaxTokens: cfg.MaxTokens,
+		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
+		Model:     model.ValueOrDefault(cfg.Model),
+		Timeout:   *timeout,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "configure provider: %v\n", err)
@@ -203,11 +205,13 @@ func runCodex(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 		}
 		*cwd = workingDir
 	}
-	provider, err := newProvider(openai.Config{
-		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
-		Model:   model.ValueOrDefault(cfg.Model),
-		Timeout: *timeout,
+	provider, err := newProvider(providers.Spec{
+		Provider:  cfg.Provider,
+		MaxTokens: cfg.MaxTokens,
+		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
+		Model:     model.ValueOrDefault(cfg.Model),
+		Timeout:   *timeout,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "configure provider: %v\n", err)
@@ -390,11 +394,13 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		return 0
 	}
 	history, histStatus, histErr := codexSessionHistory(input.Prompt, effectiveCWD, cfg)
-	provider, err := newProvider(openai.Config{
-		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
-		Model:   model.ValueOrDefault(cfg.Model),
-		Timeout: *timeout,
+	provider, err := newProvider(providers.Spec{
+		Provider:  cfg.Provider,
+		MaxTokens: cfg.MaxTokens,
+		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
+		Model:     model.ValueOrDefault(cfg.Model),
+		Timeout:   *timeout,
 	})
 	if err != nil {
 		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure provider: %v", err), cfg.Language))
@@ -593,11 +599,13 @@ func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr i
 		effectiveCWD = workingDir
 	}
 	history, histStatus, histErr := claudeTranscriptHistory(input.TranscriptPath, effectiveCWD, cfg)
-	provider, err := newProvider(openai.Config{
-		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
-		Model:   model.ValueOrDefault(cfg.Model),
-		Timeout: *timeout,
+	provider, err := newProvider(providers.Spec{
+		Provider:  cfg.Provider,
+		MaxTokens: cfg.MaxTokens,
+		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
+		Model:     model.ValueOrDefault(cfg.Model),
+		Timeout:   *timeout,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure provider: %v", err), cfg.Language))
@@ -813,11 +821,13 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr
 		}
 		overrideCWD = workingDir
 	}
-	provider, err := newProvider(openai.Config{
-		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
-		Model:   model.ValueOrDefault(cfg.Model),
-		Timeout: *timeout,
+	provider, err := newProvider(providers.Spec{
+		Provider:  cfg.Provider,
+		MaxTokens: cfg.MaxTokens,
+		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
+		Model:     model.ValueOrDefault(cfg.Model),
+		Timeout:   *timeout,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure provider: %v", err), cfg.Language))
@@ -1013,11 +1023,13 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 		}
 		overrideCWD = workingDir
 	}
-	provider, err := newProvider(openai.Config{
-		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
-		Model:   model.ValueOrDefault(cfg.Model),
-		Timeout: *timeout,
+	provider, err := newProvider(providers.Spec{
+		Provider:  cfg.Provider,
+		MaxTokens: cfg.MaxTokens,
+		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
+		Model:     model.ValueOrDefault(cfg.Model),
+		Timeout:   *timeout,
 	})
 	if err != nil {
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure provider: %v", err), cfg.Language))

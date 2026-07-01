@@ -87,6 +87,16 @@ type Config struct {
 	// historical, eval-validated layout stays the default until hybrid is
 	// promoted by eval A/B.
 	MessageStyle string
+	// Provider selects the model provider wire protocol: "openai" (default,
+	// OpenAI-compatible /v1/chat/completions) or "anthropic" (Anthropic Messages
+	// API /v1/messages). Sourced from OPENPE_PROVIDER; unknown/empty → "openai"
+	// so existing setups are unaffected.
+	Provider string
+	// MaxTokens caps the model's response length. It is required by the
+	// Anthropic provider and ignored by the OpenAI one (which lets the gateway
+	// default). Sourced from OPENPE_MAX_TOKENS; 0 (default) lets the provider
+	// pick its own default.
+	MaxTokens int
 	// SystemPrompt, when non-empty, overrides the enhancer's built-in system
 	// prompt. It is populated from OPENPE_SYSTEM_PROMPT_FILE (file contents,
 	// preferred) or OPENPE_SYSTEM_PROMPT (inline). Empty (the default) keeps
@@ -238,6 +248,8 @@ func Load() Config {
 		Language:         normalizeLanguage(valueOrDefault("OPENPE_LANGUAGE", fileEnv, DefaultLanguage)),
 		MaxContextTokens: intFromValue(valueFromEnv("OPENPE_MAX_CONTEXT_TOKENS", fileEnv), DefaultMaxContextTokens),
 		MessageStyle:     normalizeMessageStyle(valueFromEnv("OPENPE_MESSAGE_STYLE", fileEnv)),
+		Provider:         normalizeProvider(valueFromEnv("OPENPE_PROVIDER", fileEnv)),
+		MaxTokens:        intFromValue(valueFromEnv("OPENPE_MAX_TOKENS", fileEnv), 0),
 		SystemPrompt:     systemPromptFromEnv(fileEnv),
 		LanguageGuard: LanguageGuardConfig{
 			Enabled:  boolFromValue(valueFromEnv("OPENPE_LANGUAGE_GUARD_ENABLED", fileEnv), DefaultLanguageGuardEnabled),
@@ -444,6 +456,17 @@ func normalizeMessageStyle(value string) string {
 		return "hybrid"
 	default:
 		return "flatten"
+	}
+}
+
+// normalizeProvider maps OPENPE_PROVIDER to "anthropic" or "openai" (default).
+// Unknown/empty values fall back to "openai" so existing setups keep working.
+func normalizeProvider(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "anthropic", "claude", "messages":
+		return "anthropic"
+	default:
+		return "openai"
 	}
 }
 

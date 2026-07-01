@@ -19,7 +19,7 @@ import (
 	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/integration"
-	"github.com/AoManoh/openpe/internal/providers/openai"
+	"github.com/AoManoh/openpe/internal/providers"
 	"github.com/AoManoh/openpe/internal/server"
 )
 
@@ -80,11 +80,13 @@ func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 		return err
 	}
 
-	provider, err := openai.New(openai.Config{
-		BaseURL: baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:  apiKey.ValueOrDefault(cfg.APIKey),
-		Model:   model.ValueOrDefault(cfg.Model),
-		Timeout: *timeout,
+	provider, err := providers.New(providers.Spec{
+		Provider:  cfg.Provider,
+		MaxTokens: cfg.MaxTokens,
+		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
+		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
+		Model:     model.ValueOrDefault(cfg.Model),
+		Timeout:   *timeout,
 	})
 	if err != nil {
 		return fmt.Errorf("configure provider: %w", err)
