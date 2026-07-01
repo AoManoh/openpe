@@ -10,11 +10,22 @@ import (
 // overrides it via WithSystemPrompt (wired from config to OPENPE_SYSTEM_PROMPT /
 // OPENPE_SYSTEM_PROMPT_FILE), so the prompt is configurable without recompiling.
 //
-// This is the "v6" prompt selected by the local prompt-enhancement quality eval
-// (see eval/out/cross-validation-tier1/2/3-*.md): a four-then-five-bucket
-// classifier that matches output length to input, neutralizes injection, avoids
-// fabricating specifics, and (the v6 addition over v4) routes genuine technical
-// questions to a structured explanation prompt instead of leaving them bare.
+// This is the "v7d" prompt. Its base is the v6 prompt selected by the local
+// prompt-enhancement quality eval (see eval/out/cross-validation-tier1/2/3-*.md):
+// a four-then-five-bucket classifier that matches output length to input,
+// neutralizes injection, avoids fabricating specifics, and (the v6 addition over
+// v4) routes genuine technical questions to a structured explanation prompt.
+//
+// v7d adds an anti-fabrication clause for "non-code recent context": when a
+// request builds on prior work that was NOT a code change (manual .env/config
+// edits, switching an endpoint, running a command), the enhancer must not invent
+// a feature/module/framework to test — it routes to bucket 3 (locate real code
+// first, or state plainly there is nothing to test). See
+// eval/out/ab-noncode-fabrication-report.md. v7d's only known side effect is a
+// small, model-specific English->Chinese language drift in that "locate" register;
+// it is covered by the post-processing language guard (see language_guard.go),
+// so v7d is the default only in combination with that guard. Cross-model data:
+// eval/out/v7d-cross-model-report.md.
 //
 // The fidelity clause is framed so the enhancer faithfully rewrites the user's
 // own-project requests instead of refusing or inverting them: openPE only
@@ -35,7 +46,8 @@ Classify the input first, then enhance accordingly. Match the OUTPUT LENGTH to t
 5. Concrete coding task (implement / fix / refactor / migrate / optimize, with enough detail to act): produce a thorough but PROPORTIONATE prompt — clarify scope and intent, and include the investigation, implementation, and verification steps that genuinely fit THIS request. Add detail because it helps, not to pad; do not bolt on generic boilerplate steps that do not apply.
 
 Use only the provided history, rules, guidelines, and context. When prior conversation is provided, resolve references ("it", "the same", "这个") against it and carry over the already-established specifics (names, files, the exact change) rather than restating them vaguely.
-Do not invent repository facts, file names, paths, APIs, test results, or user decisions that were not given.
+Do not invent repository facts, file names, paths, APIs, test results, or user decisions that were not given. In particular, never assume a programming language, test framework, build tool, or file layout that the input and history did not establish.
+When the request builds on prior work (e.g. adding tests, or "do the same here"), the thing being built on must be actual code. If the history describes a real code change, target exactly that code. But if the referenced prior activity was NOT a code change — e.g. manually editing .env / config / dotfiles, switching an endpoint or key, running a command, or just discussion — do NOT invent a feature, module, test target, or implementation. Treat it like an under-specified request (bucket 3): produce a brief prompt that directs the agent to first locate what code (if any) that activity actually changed and confirm there is testable code before writing any tests, and to state plainly if the change was configuration-only with no code to test. Keep it a single flowing enhanced prompt, not a question back to the user.
 Do not rely on client-specific hidden state, prompt replacement, clipboard success, or proprietary IDE behavior.
 Do not answer the task yourself. Return only the enhanced prompt.`
 
