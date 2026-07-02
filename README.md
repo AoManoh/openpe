@@ -597,6 +597,13 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 - **Claude 交互式兜底**：Claude Code 会展示被阻断 hook 的 stderr。openPE 默认利用这一点，在 Claude 剪贴板失败时直接显示完整增强 prompt，避免用户必须另开终端执行 `last --prompt`。
 - **强警告文案**：失败时 stderr 会明确说明"剪贴板未更新，请勿直接粘贴旧内容"。**看到这句不要按 Ctrl+V**，先复制 Claude feedback 中的增强 prompt，或按 stderr 指示从缓存文件取回。
 
+### 会话历史与时效窗口
+
+- **「Prompt blocked / 已拦截原始消息」是正常成功交付，不是错误**：非注入（review）模式（默认）下 openPE 拦下你的原始 `pe：…` 行、把**增强后的 prompt** 放进剪贴板供粘贴。"拦截原始消息"指挡下原始输入，**不是只复制原文**。想改为直接注入：设 `OPENPE_HOOK_INJECT=true` 或 `OPENPE_<CLIENT>_INJECT=true`。
+- **「最近会话已超出时效窗口，本次未带前文上下文」是刻意的防陈旧泄漏**：Devin 历史按「工作目录 + 最近活跃」定位当前会话，仅当其最近活跃在 `OPENPE_DEVIN_HISTORY_RECENCY`（默认 `2h`）内才复用；超窗则**全部丢弃**、显式披露。因此**长时间空闲后的第一条延续 prompt 往往不带历史**（此刻新活跃还没被记录），待会话有新活跃后再敲 `pe` 即可命中历史。想放宽：调大 `OPENPE_DEVIN_HISTORY_RECENCY`。
+- **历史不是「全量」**：即便命中，也只取最近约 12 条 / 12000 字（`OPENPE_DEVIN_HISTORY_MAX_MESSAGES/_MAX_CHARS`），再叠加 `OPENPE_HISTORY_RATIO` 梯度；时效窗口是**会话级全有或全无**的闸门，不是按消息时间戳截断。
+- 以上行为的详细问答（含"为什么第一次没历史、第二次有"的机制）见 **[FAQ.md](FAQ.md)**。
+
 ### Hook 阻断模型
 
 - **hook 不能替换 IDE 输入框内容**：Codex / Claude Code / Windsurf 公开的 hook 协议均未承诺 prompt 替换或自动提交。openPE 的"阻断 + 缓存 + 复制"是当前唯一公开可行的模式。
