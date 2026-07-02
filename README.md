@@ -141,10 +141,10 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_CLAUDE_PROMPT_FALLBACK`                        | `true`                     | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制                                                                                                                                   |
 | `OPENPE_WINDSURF_PROMPT_FALLBACK`                      | `false`                    | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长                                                                                                                          |
 | `OPENPE_ENV_FILE`                                      | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                                                                                                                                       |
-| `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词               | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。用于自定义改写风格或部署自调版本，无需改代码重新编译                                         |
+| `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词（v7g）        | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。内置默认当前为 **v7g**（2026-07）：在按输入分桶、防臆造非代码测试目标的基础上，新增**用户视角**与**数值保真**两条护栏并在提示词末尾 FINAL CHECK 复检——增强结果必须是"用户对 agent 的指令"（不吸收历史中助手的反问/自称），数字与组成只能逐字取自上下文中同一实体（总数不得分解成编造的分项）。用于自定义改写风格或部署自调版本，无需改代码重新编译 |
 | `OPENPE_MAX_CONTEXT_TOKENS`                            | `0`（不限）                | 全局 token 预算，所有客户端共享；正整数时 enhancer 按 section 级裁剪可选上下文（history / rules / guidelines / context.files / context.retrieval），required section 始终保留                           |
 | `OPENPE_MESSAGE_STYLE`                                | `flatten`                  | 消息构建结构：`flatten`（默认，`[system, user]`，历史以 `[role] content` 文本嵌入单条 user）；`hybrid`（`[system, 历史真多轮, 末轮 user 仅含改写指令+原 prompt]`，角色保真/指代更强，系统提示附加「前文仅供参考、勿作答」框架）；`structured`（在 hybrid 之上把 rules/guidelines/files/retrieval 从任务与对话流里分离为独立「只读参考块」置于历史之前，系统提示用三区框架标注参考块/历史/任务）。`hybrid`、`structured` 均为实验性，eval A/B 通过前默认仍为 `flatten` |
-| `OPENPE_LANGUAGE_GUARD_ENABLED`                       | `true`                     | 语言守卫总开关：增强返回前做后处理，检测**用户输入语言**与**增强输出语言**（CJK/拉丁启发式，检测开销 <1ms）；仅当两者都能明确判定且**不一致**时才动作，一致（绝大多数情况）为零成本空操作，故向后兼容、不改变 v6 行为。设 `false` 完全关闭 |
+| `OPENPE_LANGUAGE_GUARD_ENABLED`                       | `true`                     | 语言守卫总开关：增强返回前做后处理，检测**用户输入语言**与**增强输出语言**（CJK/拉丁启发式，检测开销 <1ms）；仅当两者都能明确判定且**不一致**时才动作，一致（绝大多数情况）为零成本空操作，故向后兼容、不改变既有增强行为。设 `false` 完全关闭 |
 | `OPENPE_LANGUAGE_GUARD_REANCHOR`                      | `true`                     | 检测到语言不一致时的策略：`true` = 追加强语言指令后**重请求一次**（strategy 1，命中不一致时多一次模型调用），修正失败则保留原输出并附 `Warnings` 提示；`false` = 只检测并告警、不重试（strategy 2，零额外延迟）。触发场景（如英文输入被模型改写成中文）本身低频，故对整体延迟影响很小 |
 | `OPENPE_PROVIDER`                                     | `openai`                   | 模型 provider 协议：`openai`（默认，OpenAI 兼容 `/v1/chat/completions`）或 `anthropic`（Anthropic Messages API `/v1/messages`，用 `x-api-key` + `anthropic-version` 头）。用于只提供 Anthropic 格式的端点；未设/未知 → `openai`，现有配置不受影响 |
 | `OPENPE_MAX_TOKENS`                                   | `0`（provider 默认）       | 模型响应最大 token 数。Anthropic 必填（`0` 时回退其默认 4096）；OpenAI 忽略（交给网关默认）。与 `OPENPE_MAX_CONTEXT_TOKENS`（输入侧预算）不同，这是**输出**长度上限 |
@@ -604,6 +604,11 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 - **「本目录存在多个活跃会话、无法确定当前会话」**：回退路径下若同目录时效窗内有 ≥2 个会话，openPE **宁可不带历史也不猜**（猜错=把别的对话内容串进增强），显式披露后按无历史增强。
 - **历史不是「全量」**：即便命中，也只取最近约 12 条 / 12000 字，仅由 `OPENPE_DEVIN_HISTORY_MAX_MESSAGES/_MAX_CHARS` 控制（绝对轮数，就近保留）；时效窗口是**会话级全有或全无**的闸门，不是按消息时间戳截断。
 - 以上行为的详细问答（含"为什么第一次没历史、第二次有"的机制）见 **[FAQ.md](FAQ.md)**。
+
+### 增强改写质量
+
+- **v7g 护栏（2026-07）**：针对真实事故（用户对助手报告的简短回应被增强成"助手口吻反问用户"，并给上下文没给数字的条目编出精确数值），内置提示词加入**用户视角**与**数值保真**规则并在末尾复检。跨 6 个模型端点 17 样本验证：助手口吻反转已根治，编造数字从主要失败降为 ~12% 残余。
+- **残余风险与兜底**：残余臆造集中在「给上下文中只提了名字的条目补一个括号数字」这一种模式。默认 review 交付流（增强结果进剪贴板、由你粘贴前过目）即为兜底——**粘贴前扫一眼数字**是否是你上下文里真实出现过的。
 
 ### Hook 阻断模型
 
