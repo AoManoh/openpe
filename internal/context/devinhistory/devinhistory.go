@@ -39,8 +39,11 @@ import (
 const (
 	defaultMaxMessages = 12
 	defaultMaxChars    = 12000
-	defaultRecency     = 2 * time.Hour
-	queryTimeout       = 5 * time.Second
+	// defaultRecency mirrors config.DefaultDevinHistoryRecency (kept in sync;
+	// see its comment for the 2h -> 6h rationale). Used only when a caller
+	// passes Options.Recency <= 0.
+	defaultRecency = 6 * time.Hour
+	queryTimeout   = 5 * time.Second
 )
 
 type Options struct {

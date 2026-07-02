@@ -175,7 +175,7 @@ openPE 默认读取当前 Codex / Claude Code / Devin 对话上下文，启用�
 | `OPENPE_DEVIN_HISTORY_DB_PATH`          | 平台默认                       | Devin `sessions.db` 路径（默认 `~/.local/share/devin/cli/sessions.db`，Windows 为 `%APPDATA%\devin\cli\sessions.db`） |
 | `OPENPE_DEVIN_HISTORY_MAX_MESSAGES`     | `12`                         | Devin session history 注入的最近消息数上限                                          |
 | `OPENPE_DEVIN_HISTORY_MAX_CHARS`        | `12000`                      | Devin session history 注入的字符预算上限                                            |
-| `OPENPE_DEVIN_HISTORY_RECENCY`          | `2h`                         | 定位到的 Devin session 最近活跃须在此时效窗口内才复用，避免注入同目录旧 session 的陈旧历史 |
+| `OPENPE_DEVIN_HISTORY_RECENCY`          | `6h`                         | 定位到的 Devin session 最近活跃须在此时效窗口内才复用，避免注入同目录旧 session 的陈旧历史（2026-07 由 `2h` 上调，覆盖同日恢复场景） |
 
 </details>
 
@@ -384,7 +384,7 @@ openpe devin hook install --dry-run
 - **Devin 是 hook 聚合器**：它一次性加载自己（`~/.config/devin/config.json`）、Claude Code（`~/.claude/*`）和 Windsurf（`~/.codeium/windsurf/hooks.json`）的 `UserPromptSubmit` hook。也就是说你只要在其中**任意一个**客户端装了 openPE，Devin 里就能用 `pe`；若同时装了多个，一次 `pe` 会触发多个 openPE hook。
 - openPE 对此做了两层处理，无需你手动取舍：(1) **跨适配器去重**——同一条 prompt 只由最先触发的 hook 增强一次，其余直接放行（见 `OPENPE_HOOK_DEDUP_*`）；(2) **宿主感知渲染**——被 Devin 调起的 Claude/Windsurf hook 会自动改用 Devin 的 JSON 注入输出，而不是它们原生的 `exit 2 + 剪贴板`（后者会被 Devin 误判为空的 “Prompt blocked:”）。所以装一个或装多个，行为都是「恰好增强一次并注入」。
 - 这两层只在 `DEVIN_PROJECT_DIR` 存在（即真的跑在 Devin 里）时生效；Codex / Claude Code / Windsurf 各自原生使用时行为完全不变。
-- **Devin session history 默认读取**（启用满血提示词增强）。在 Devin 下运行时，openPE 只读 Devin 的本机 SQLite 会话库（`~/.local/share/devin/cli/sessions.db`），按工作目录 + 最近活跃定位当前 session，沿 `main_chain` 重建最近 user/assistant 历史填入 `enhancer.Request.History`，让 `pe` 能理解 Devin 对话里的前文引用。**非静默**：未找到 session、超出时效窗口（`OPENPE_DEVIN_HISTORY_RECENCY`，默认 2h）或读取失败，都会显式提示，绝不静默兜底成无历史增强。被 Devin 调起的 Claude/Windsurf hook 同样读取的是 Devin 会话历史（而非各自原生来源）。如需关闭，设置 `OPENPE_DEVIN_HISTORY_ENABLED=false`。
+- **Devin session history 默认读取**（启用满血提示词增强）。在 Devin 下运行时，openPE 只读 Devin 的本机 SQLite 会话库（`~/.local/share/devin/cli/sessions.db`），按工作目录 + 最近活跃定位当前 session，沿 `main_chain` 重建最近 user/assistant 历史填入 `enhancer.Request.History`，让 `pe` 能理解 Devin 对话里的前文引用。**非静默**：未找到 session、超出时效窗口（`OPENPE_DEVIN_HISTORY_RECENCY`，默认 6h）或读取失败，都会显式提示，绝不静默兜底成无历史增强。被 Devin 调起的 Claude/Windsurf hook 同样读取的是 Devin 会话历史（而非各自原生来源）。如需关闭，设置 `OPENPE_DEVIN_HISTORY_ENABLED=false`。
 
 ### Windsurf Cascade hook
 
@@ -600,7 +600,7 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 ### 会话历史与时效窗口
 
 - **「Prompt blocked / 已拦截原始消息」是正常成功交付，不是错误**：非注入（review）模式（默认）下 openPE 拦下你的原始 `pe：…` 行、把**增强后的 prompt** 放进剪贴板供粘贴。"拦截原始消息"指挡下原始输入，**不是只复制原文**。想改为直接注入：设 `OPENPE_HOOK_INJECT=true` 或 `OPENPE_<CLIENT>_INJECT=true`。
-- **「最近会话已超出时效窗口，本次未带前文上下文」是刻意的防陈旧泄漏**：Devin 历史按「工作目录 + 最近活跃」定位当前会话，仅当其最近活跃在 `OPENPE_DEVIN_HISTORY_RECENCY`（默认 `2h`）内才复用；超窗则**全部丢弃**、显式披露。因此**长时间空闲后的第一条延续 prompt 往往不带历史**（此刻新活跃还没被记录），待会话有新活跃后再敲 `pe` 即可命中历史。想放宽：调大 `OPENPE_DEVIN_HISTORY_RECENCY`。
+- **「最近会话已超出时效窗口，本次未带前文上下文」是刻意的防陈旧泄漏**：Devin 历史按「工作目录 + 最近活跃」定位当前会话，仅当其最近活跃在 `OPENPE_DEVIN_HISTORY_RECENCY`（默认 `6h`，2026-07 由 `2h` 上调）内才复用；超窗则**全部丢弃**、显式披露。因此**长时间空闲后的第一条延续 prompt 往往不带历史**（此刻新活跃还没被记录），待会话有新活跃后再敲 `pe` 即可命中历史。想放宽：调大 `OPENPE_DEVIN_HISTORY_RECENCY`。
 - **历史不是「全量」**：即便命中，也只取最近约 12 条 / 12000 字（`OPENPE_DEVIN_HISTORY_MAX_MESSAGES/_MAX_CHARS`），再叠加 `OPENPE_HISTORY_RATIO` 梯度；时效窗口是**会话级全有或全无**的闸门，不是按消息时间戳截断。
 - 以上行为的详细问答（含"为什么第一次没历史、第二次有"的机制）见 **[FAQ.md](FAQ.md)**。
 

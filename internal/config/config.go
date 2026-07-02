@@ -35,7 +35,12 @@ const (
 	// when the hook fires, so devinhistory locates the session by working
 	// directory + most-recent activity; this window prevents an abandoned older
 	// session in the same directory from leaking stale history into a new one.
-	DefaultDevinHistoryRecency = 2 * time.Hour
+	// Raised 2h -> 6h (2026-07-02, user decision): with 2h the FIRST
+	// continuation prompt after a same-day resume (e.g. a morning "继续 Phase 3"
+	// on last night's session) kept missing history, because the just-submitted
+	// prompt has not refreshed last_activity_at yet. 6h still guards against
+	// genuinely abandoned sessions while covering same-day work gaps.
+	DefaultDevinHistoryRecency = 6 * time.Hour
 
 	// DefaultHookDedupWindow is the freshness window for the cross-adapter
 	// single-flight de-duplication applied when a host agent (e.g. the Devin
