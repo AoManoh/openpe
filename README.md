@@ -141,7 +141,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_CLAUDE_PROMPT_FALLBACK`                        | `true`                     | Claude 剪贴板失败时，在 blocked feedback 中输出完整增强 prompt 供复制                                                                                                                                   |
 | `OPENPE_WINDSURF_PROMPT_FALLBACK`                      | `false`                    | Windsurf 剪贴板失败时是否输出完整增强 prompt；默认关闭以避免 IDE feedback 过长                                                                                                                          |
 | `OPENPE_ENV_FILE`                                      | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                                                                                                                                       |
-| `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词（v7g）        | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。内置默认当前为 **v7g**（2026-07）：在按输入分桶、防臆造非代码测试目标的基础上，新增**用户视角**与**数值保真**两条护栏并在提示词末尾 FINAL CHECK 复检——增强结果必须是"用户对 agent 的指令"（不吸收历史中助手的反问/自称），数字与组成只能逐字取自上下文中同一实体（总数不得分解成编造的分项）。用于自定义改写风格或部署自调版本，无需改代码重新编译 |
+| `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词（v7h）        | 覆盖增强器系统提示词：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。内置默认当前为 **v7h**（2026-07）：在按输入分桶、防臆造非代码测试目标的基础上，含三条护栏并在提示词末尾 FINAL CHECK 复检——①**用户视角**：增强结果必须是"用户对 agent 的指令"，不吸收历史中助手的反问/自称；②**数值保真**：数字与组成只能逐字取自上下文中同一实体，总数不得分解成编造的分项；③**问题保持与决策保真**：用户输入是征询意见的问题时，增强结果必须仍是咨询请求（可枚举候选方向），不得替用户选择，更不得把上下文里的状态陈述（如"尚未 push"）翻转成执行指令。用于自定义改写风格或部署自调版本，无需改代码重新编译 |
 | `OPENPE_MAX_CONTEXT_TOKENS`                            | `0`（不限）                | 全局 token 预算，所有客户端共享；正整数时 enhancer 按 section 级裁剪可选上下文（history / rules / guidelines / context.files / context.retrieval），required section 始终保留                           |
 | `OPENPE_MESSAGE_STYLE`                                | `flatten`                  | 消息构建结构：`flatten`（默认，`[system, user]`，历史以 `[role] content` 文本嵌入单条 user）；`hybrid`（`[system, 历史真多轮, 末轮 user 仅含改写指令+原 prompt]`，角色保真/指代更强，系统提示附加「前文仅供参考、勿作答」框架）；`structured`（在 hybrid 之上把 rules/guidelines/files/retrieval 从任务与对话流里分离为独立「只读参考块」置于历史之前，系统提示用三区框架标注参考块/历史/任务）。`hybrid`、`structured` 均为实验性，eval A/B 通过前默认仍为 `flatten` |
 | `OPENPE_LANGUAGE_GUARD_ENABLED`                       | `true`                     | 语言守卫总开关：增强返回前做后处理，检测**用户输入语言**与**增强输出语言**（CJK/拉丁启发式，检测开销 <1ms）；仅当两者都能明确判定且**不一致**时才动作，一致（绝大多数情况）为零成本空操作，故向后兼容、不改变既有增强行为。设 `false` 完全关闭 |
@@ -608,7 +608,8 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 ### 增强改写质量
 
 - **v7g 护栏（2026-07）**：针对真实事故（用户对助手报告的简短回应被增强成"助手口吻反问用户"，并给上下文没给数字的条目编出精确数值），内置提示词加入**用户视角**与**数值保真**规则并在末尾复检。跨 6 个模型端点 17 样本验证：助手口吻反转已根治，编造数字从主要失败降为 ~12% 残余。
-- **残余风险与兜底**：残余臆造集中在「给上下文中只提了名字的条目补一个括号数字」这一种模式。默认 review 交付流（增强结果进剪贴板、由你粘贴前过目）即为兜底——**粘贴前扫一眼数字**是否是你上下文里真实出现过的。
+- **v7h 护栏（2026-07，事故 #3）**：用户的**征询式问题**（"你觉得该做什么？A 还是 B？"）曾被增强成执行指令单，且把上下文中"尚未 push"的**状态陈述**翻转成"push 到远程"的**编造指令**（该指令随后被 agent 真实执行）。v7h 限定"回应→指令"转换仅适用于用户已表达决策的输入，问题必须保持问题；qd 探针验证 sonnet/opus/gpt-5.5 共 7/7 干净（对照 v7g 0/3）。
+- **残余风险与兜底**：残余臆造集中在「给上下文中只提了名字的条目补一个括号数字」这一种模式。默认 review 交付流（增强结果进剪贴板、由你粘贴前过目）即为兜底——**粘贴前扫一眼数字与"要执行的动作"**是否真是你说过/决定过的；对 push、部署、删除这类不可逆动作尤其如此。
 
 ### Hook 阻断模型
 
