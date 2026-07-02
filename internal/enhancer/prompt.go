@@ -2,7 +2,6 @@ package enhancer
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -150,27 +149,6 @@ func hybridHistoryTurns(history []Message, currentPrompt string) []Message {
 		turns = turns[:n-1]
 	}
 	return turns
-}
-
-// trimHistoryByRatio keeps the most-recent ceil(ratio*n) turns. ratio<=0 or
-// >=1 means "keep all" (default full), matching the pre-gradient behaviour.
-// It runs before layout so flatten and hybrid both see the trimmed history;
-// the newest turns (most relevant for reference resolution) are kept and the
-// oldest are dropped. The current-prompt turn is handled downstream (flatten
-// embeds it, hybrid drops a trailing duplicate), so this never touches it.
-func trimHistoryByRatio(history []Message, ratio float64) []Message {
-	n := len(history)
-	if ratio <= 0 || ratio >= 1 || n <= 1 {
-		return history
-	}
-	k := int(math.Ceil(ratio * float64(n)))
-	if k < 1 {
-		k = 1
-	}
-	if k >= n {
-		return history
-	}
-	return history[n-k:]
 }
 
 func prependUnique(values []string, value string) []string {
