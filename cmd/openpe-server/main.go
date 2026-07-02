@@ -265,5 +265,10 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 			Enabled:  cfg.LanguageGuard.Enabled,
 			Reanchor: cfg.LanguageGuard.Reanchor,
 		}).
+		WithContentWarnings(enhancer.ContentWarningsConfig{
+			Enabled:      cfg.Warnings.Enabled,
+			ExtraActions: cfg.Warnings.ExtraActions,
+			NumMaxLen:    cfg.Warnings.NumMaxLen,
+		}, cfg.Language).
 		WithLogger(slog.Default()), nil
 }

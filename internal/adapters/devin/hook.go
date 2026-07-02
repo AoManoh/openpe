@@ -55,6 +55,10 @@ type HookOutput struct {
 	HookSpecificOutput *HookSpecificOutput `json:"hookSpecificOutput,omitempty"`
 	TerminalPreview    string              `json:"-"`
 	PreviewPrompt      string              `json:"-"`
+	// Warnings carries enhancer.Response.Warnings (language guard + content
+	// warnings) so the runner can fold them into the user-facing disclosure
+	// (block Reason / inject SystemMessage). Not part of the wire JSON.
+	Warnings []string `json:"-"`
 }
 
 type HookSpecificOutput struct {
@@ -159,7 +163,9 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		// the cross-client experience is consistent. openPE never auto-applies a
 		// generated prompt: the user pastes/edits/resubmits it.
 		cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
-		return BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt), nil
+		out := BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt)
+		out.Warnings = resp.Warnings
+		return out, nil
 	}
 	// Inject mode (auto, or opt-in OPENPE_DEVIN_INJECT): the user has explicitly
 	// chosen to trust the enhancement, so inject it as additional context
@@ -167,7 +173,9 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	// does not surface our systemMessage — so cache the enhanced prompt too;
 	// `openpe devin hook last --prompt` lets the user audit what was injected.
 	_, _ = SavePreview(resp.EnhancedPrompt, opts.Language)
-	return InjectionOutput(resp.EnhancedPrompt, opts.Language), nil
+	out := InjectionOutput(resp.EnhancedPrompt, opts.Language)
+	out.Warnings = resp.Warnings
+	return out, nil
 }
 
 // InjectionOutput builds the UserPromptSubmit output that injects an enhanced

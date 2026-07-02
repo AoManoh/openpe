@@ -109,6 +109,13 @@ type Service struct {
 	// to keep the output in the user's input language. nil (the default from
 	// NewService) means the guard is off — fully backward compatible.
 	languageGuard *LanguageGuardConfig
+	// contentWarnings, when Enabled, runs the deterministic output checks
+	// (out-of-context numbers / undecided irreversible actions) and appends
+	// advisory lines to Response.Warnings. Zero value = off. See
+	// content_warnings.go.
+	contentWarnings ContentWarningsConfig
+	// warningsLanguage localizes the advisory lines (config.Language).
+	warningsLanguage string
 	// logger, when set, receives structured language-guard records. Optional.
 	logger *slog.Logger
 	// guardObserver, when set, is called once per guarded enhancement with the
@@ -128,6 +135,15 @@ func NewServiceWithContext(provider Provider, contextProvider ContextProvider) *
 // StyleHybrid opt-in). Returns the Service for chaining.
 func (s *Service) WithMessageStyle(style MessageStyle) *Service {
 	s.messageStyle = style
+	return s
+}
+
+// WithContentWarnings enables the deterministic output-side warning checks
+// (content_warnings.go), localized to language. Returns the Service for
+// chaining; the zero config keeps them off.
+func (s *Service) WithContentWarnings(cfg ContentWarningsConfig, language string) *Service {
+	s.contentWarnings = cfg
+	s.warningsLanguage = language
 	return s
 }
 
@@ -240,6 +256,9 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 			warnings = append(warnings, languageMismatchWarning(ev))
 		}
 	}
+	// Deterministic output checks (advisory only — never rewrites/blocks):
+	// out-of-context numbers and undecided irreversible actions.
+	warnings = append(warnings, detectContentWarnings(req, enhanced, s.contentWarnings, s.warningsLanguage)...)
 	return Response{
 		EnhancedPrompt: enhanced,
 		Warnings:       warnings,

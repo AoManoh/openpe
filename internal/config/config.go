@@ -112,14 +112,31 @@ type Config struct {
 	// preservation guard (see internal/enhancer.LanguageGuardConfig). Sourced
 	// from OPENPE_LANGUAGE_GUARD_ENABLED / OPENPE_LANGUAGE_GUARD_REANCHOR.
 	LanguageGuard LanguageGuardConfig
-	Openace       OpenaceConfig
-	Codex         CodexConfig
-	Claude        ClaudeConfig
-	Devin         DevinConfig
-	Inject        InjectConfig
-	Delivery      DeliveryConfig
-	Server        ServerConfig
-	HookDedup     HookDedupConfig
+	// Warnings configures the deterministic output-side advisory checks
+	// (out-of-context numbers / undecided irreversible actions — the
+	// model-independent backstop behind the v7g/v7h prompt guardrails).
+	// Sourced from OPENPE_WARNINGS_ENABLED (default true),
+	// OPENPE_WARNINGS_ACTIONS (comma-separated extra action words) and
+	// OPENPE_WARNINGS_NUM_MAXLEN (digit-run length cap, default 5).
+	Warnings  WarningsConfig
+	Openace   OpenaceConfig
+	Codex     CodexConfig
+	Claude    ClaudeConfig
+	Devin     DevinConfig
+	Inject    InjectConfig
+	Delivery  DeliveryConfig
+	Server    ServerConfig
+	HookDedup HookDedupConfig
+}
+
+// WarningsConfig is the config-layer mirror of
+// enhancer.ContentWarningsConfig (kept apart so config does not import the
+// enhancer package). Enabled defaults to true: the checks are advisory-only
+// (never rewrite or block), so they are safe on by default.
+type WarningsConfig struct {
+	Enabled      bool
+	ExtraActions []string
+	NumMaxLen    int
 }
 
 // LanguageGuardConfig is the config-layer mirror of
@@ -259,6 +276,11 @@ func Load() Config {
 		LanguageGuard: LanguageGuardConfig{
 			Enabled:  boolFromValue(valueFromEnv("OPENPE_LANGUAGE_GUARD_ENABLED", fileEnv), DefaultLanguageGuardEnabled),
 			Reanchor: boolFromValue(valueFromEnv("OPENPE_LANGUAGE_GUARD_REANCHOR", fileEnv), DefaultLanguageGuardReanchor),
+		},
+		Warnings: WarningsConfig{
+			Enabled:      boolFromValue(valueFromEnv("OPENPE_WARNINGS_ENABLED", fileEnv), true),
+			ExtraActions: splitCSV(valueFromEnv("OPENPE_WARNINGS_ACTIONS", fileEnv)),
+			NumMaxLen:    intFromValue(valueFromEnv("OPENPE_WARNINGS_NUM_MAXLEN", fileEnv), 5),
 		},
 		Openace: OpenaceConfig{
 			Enabled:           boolFromValue(valueFromEnv("OPENPE_OPENACE_ENABLED", fileEnv), false),

@@ -1081,15 +1081,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if *copyPreview {
 		output = deliverDevinBlock(cfg, output)
 	}
-	// Non-silent disclosure: state whether prior Devin-session context was
-	// included (block -> Reason, inject/skip -> SystemMessage).
-	if note := historyDisclosure(history, histStatus, histErr, cfg.Language); note != "" {
-		if output.Decision == "block" {
-			output.Reason = strings.TrimSpace(note + " " + output.Reason)
-		} else {
-			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
-		}
-	}
+	output = applyDevinDisclosure(output, history, histStatus, histErr, cfg.Language)
 	if output.Decision == "block" && *blockOutput == "stderr" {
 		if *terminalPreview {
 			_ = devinadapter.WriteTerminalPreview(output.TerminalPreview)
@@ -1153,16 +1145,31 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(true, err.Error(), cfg.Language))
 	}
 	output = deliverDevinBlock(cfg, output)
-	// Non-silent disclosure: state whether prior Devin-session context was
-	// included (block -> Reason, inject/skip -> SystemMessage).
-	if note := historyDisclosure(history, histStatus, histErr, cfg.Language); note != "" {
-		if output.Decision == "block" {
-			output.Reason = strings.TrimSpace(note + " " + output.Reason)
-		} else {
-			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
-		}
-	}
+	output = applyDevinDisclosure(output, history, histStatus, histErr, cfg.Language)
 	return devinadapter.EncodeHookOutputOrFallback(stdout, output)
+}
+
+// applyDevinDisclosure folds the non-silent notes into the hook output: the
+// history disclosure (whether prior Devin-session context was included) plus
+// any enhancer content warnings (out-of-context numbers / undecided actions —
+// they exist precisely to be seen before the user acts). Block outputs carry
+// the notes in Reason, inject/skip outputs in SystemMessage.
+func applyDevinDisclosure(output devinadapter.HookOutput, history []enhancer.Message, histStatus histstatus.Status, histErr error, language string) devinadapter.HookOutput {
+	notes := make([]string, 0, 1+len(output.Warnings))
+	if note := historyDisclosure(history, histStatus, histErr, language); note != "" {
+		notes = append(notes, note)
+	}
+	notes = append(notes, output.Warnings...)
+	if len(notes) == 0 {
+		return output
+	}
+	joined := strings.Join(notes, " ")
+	if output.Decision == "block" {
+		output.Reason = strings.TrimSpace(joined + " " + output.Reason)
+	} else {
+		output.SystemMessage = strings.TrimSpace(joined + " " + output.SystemMessage)
+	}
+	return output
 }
 
 // deliverDevinBlock copies the enhanced prompt to the clipboard and sets the
@@ -1463,6 +1470,11 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 		WithSystemPrompt(cfg.SystemPrompt).
 		WithMessageStyle(messageStyleFromConfig(cfg)).
 		WithLanguageGuard(languageGuardFromConfig(cfg)).
+		WithContentWarnings(enhancer.ContentWarningsConfig{
+			Enabled:      cfg.Warnings.Enabled,
+			ExtraActions: cfg.Warnings.ExtraActions,
+			NumMaxLen:    cfg.Warnings.NumMaxLen,
+		}, cfg.Language).
 		WithLogger(slog.Default()), nil
 }
 
