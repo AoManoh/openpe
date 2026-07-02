@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/providers/useragent"
 )
 
 type Config struct {
@@ -89,6 +90,9 @@ func (c *Client) Complete(ctx context.Context, req enhancer.CompletionRequest) (
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("accept", "application/json")
 	httpReq.Header.Set("authorization", "Bearer "+c.apiKey)
+	// Identify truthfully: some public gateways 403 Go's default UA as an
+	// anonymous bot (channel:client_restricted). See internal/providers/useragent.
+	httpReq.Header.Set("user-agent", useragent.Value)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {

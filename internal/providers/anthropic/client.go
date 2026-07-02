@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/providers/useragent"
 )
 
 const (
@@ -114,6 +115,9 @@ func (c *Client) Complete(ctx context.Context, req enhancer.CompletionRequest) (
 	// Anthropic uses x-api-key + anthropic-version, not Authorization: Bearer.
 	httpReq.Header.Set("x-api-key", c.apiKey)
 	httpReq.Header.Set("anthropic-version", c.version)
+	// Identify truthfully: some public gateways 403 Go's default UA as an
+	// anonymous bot (channel:client_restricted). See internal/providers/useragent.
+	httpReq.Header.Set("user-agent", useragent.Value)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
