@@ -9,4 +9,6 @@ package useragent
 // muyuan.do: HTTP 403 channel:client_restricted "does not allow the current
 // client (detected: Go-http-client/2.0)"). Sending a real product UA keeps
 // requests identifiable and unblocked without impersonating another client.
-const Value = "openpe/1 (+https://github.com/AoManoh/openpe)"
+// Kept to a bare product token (no URL comment): a URL inside the UA adds no
+// value for gateway operators and can trip WAF/injection heuristics.
+const Value = "openpe"
