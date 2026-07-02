@@ -30,6 +30,11 @@ const (
 	// CWDMismatch: the located session belongs to a different workspace than
 	// the current one, so its history was not reused.
 	CWDMismatch
+	// Ambiguous: several sessions are active for this workspace within the
+	// freshness window and the current one could not be identified, so no
+	// history was attached rather than risk injecting another conversation's
+	// context (devin heuristic fallback).
+	Ambiguous
 )
 
 // IncludedHistory reports whether this status means prior context was actually
@@ -48,6 +53,8 @@ func (s Status) String() string {
 		return "stale"
 	case CWDMismatch:
 		return "cwd_mismatch"
+	case Ambiguous:
+		return "ambiguous"
 	default:
 		return "unknown"
 	}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	claudetranscript "github.com/AoManoh/openpe/internal/context/claudetranscript"
 	codexhistory "github.com/AoManoh/openpe/internal/context/codexhistory"
 	devinhistory "github.com/AoManoh/openpe/internal/context/devinhistory"
+	devinsession "github.com/AoManoh/openpe/internal/context/devinsession"
 	"github.com/AoManoh/openpe/internal/context/histstatus"
 	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
@@ -681,8 +683,13 @@ func claudeTranscriptHistory(transcriptPath string, cwd string, cfg config.Confi
 
 // devinSessionHistory returns the current Devin session history to inject when
 // running under the Devin CLI. Like the codex/claude helpers, the error is
-// non-nil only on a genuine read failure; "no session", "stale" and "empty"
-// are reported via the status so the hook layer surfaces them explicitly.
+// non-nil only on a genuine read failure; "no session", "stale", "empty" and
+// "ambiguous" are reported via the status so the hook layer surfaces them
+// explicitly. On Linux the session is identified exactly from the hook's
+// process ancestry (the devin ancestor holds session_locks/<id>.lock open),
+// which makes same-directory parallel sessions safe; elsewhere — or if
+// discovery fails — the collector falls back to the cwd+recency heuristic,
+// which refuses to guess between multiple live sessions (Ambiguous).
 func devinSessionHistory(prompt string, cwd string, cfg config.Config) ([]enhancer.Message, histstatus.Status, error) {
 	if !cfg.Devin.History.Enabled {
 		return nil, histstatus.Unknown, nil
@@ -692,8 +699,21 @@ func devinSessionHistory(prompt string, cwd string, cfg config.Config) ([]enhanc
 		MaxMessages: cfg.Devin.History.MaxMessages,
 		MaxChars:    cfg.Devin.History.MaxChars,
 		Recency:     cfg.Devin.History.Recency,
+		SessionID:   discoverDevinSessionID(cfg.Devin.History.DBPath),
 	}).Retrieve(prompt, cwd)
 	return result.Messages, result.Status, err
+}
+
+// discoverDevinSessionID resolves the identity of the Devin session this hook
+// process belongs to (Linux /proc ancestry walk; "" elsewhere or on failure).
+func discoverDevinSessionID(dbPath string) string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	if strings.TrimSpace(dbPath) == "" {
+		dbPath = devinhistory.DefaultDBPath()
+	}
+	return devinsession.Discover("/proc", devinsession.DefaultLockDir(dbPath), os.Getpid())
 }
 
 func runClaudeHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
@@ -1663,6 +1683,11 @@ func localizedHistoryNote(status histstatus.Status, count int, language string) 
 			return "openPE: the located session belongs to another workspace; enhanced without history."
 		}
 		return "openPE：会话历史属于其它工作区，本次未带前文上下文。"
+	case histstatus.Ambiguous:
+		if en {
+			return "openPE: multiple sessions are active in this directory and the current one could not be identified; enhanced without history to avoid injecting another conversation's context."
+		}
+		return "openPE：本目录存在多个活跃会话、无法确定当前会话，本次未带前文上下文（避免串入其它会话内容）。"
 	default:
 		// Unknown: the history feature is disabled — make no claim.
 		return ""

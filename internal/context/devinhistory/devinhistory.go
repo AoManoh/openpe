@@ -6,8 +6,13 @@
 // sessions in ~/.local/share/devin/cli/sessions.db (WAL mode). The
 // UserPromptSubmit hook carries only the prompt — no session id, and the prompt
 // is not yet written to the DB when the hook fires — so the session is located
-// by working directory + most-recent activity (bounded by a recency window),
-// and the conversation is reconstructed by walking the session's node forest up
+// in two tiers: preferably by an identified session id (Options.SessionID,
+// discovered from the hook's process ancestry by devinsession — exact, so no
+// cwd/recency guard applies), otherwise by the working directory +
+// most-recent-activity heuristic (bounded by a recency window, and refusing
+// with Ambiguous when several sessions in the directory are inside the window
+// — guessing there once injected another conversation's history). The
+// conversation is reconstructed by walking the session's node forest up
 // from sessions.main_chain_id via parent_node_id (node_id is monotonic along a
 // chain; created_at is not, so the chain — not a timestamp sort — defines
 // order). Compaction is handled for free: the main chain runs through Devin's
@@ -51,6 +56,13 @@ type Options struct {
 	MaxMessages int
 	MaxChars    int
 	Recency     time.Duration
+	// SessionID, when non-empty, is the identified session (e.g. discovered by
+	// devinsession from the hook's process ancestry): the session is loaded by
+	// id, with no cwd or recency filtering — identity makes both guards
+	// redundant, so resuming yesterday's conversation still gets its history.
+	// When empty, or when the id matches no session row, Retrieve falls back
+	// to the cwd+recency heuristic.
+	SessionID string
 }
 
 type Result struct {
@@ -64,6 +76,7 @@ type Collector struct {
 	maxMessages int
 	maxChars    int
 	recency     time.Duration
+	sessionID   string
 }
 
 func New(opts Options) *Collector {
@@ -83,7 +96,13 @@ func New(opts Options) *Collector {
 	if recency <= 0 {
 		recency = defaultRecency
 	}
-	return &Collector{dbPath: dbPath, maxMessages: maxMessages, maxChars: maxChars, recency: recency}
+	return &Collector{
+		dbPath:      dbPath,
+		maxMessages: maxMessages,
+		maxChars:    maxChars,
+		recency:     recency,
+		sessionID:   strings.TrimSpace(opts.SessionID),
+	}
 }
 
 // Retrieve locates the Devin session for cwd and returns its recent
@@ -114,9 +133,22 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 	defer cancel()
 
-	sess, status, err := locateSession(ctx, db, cwd, c.recency)
-	if err != nil {
-		return Result{}, err
+	// Identified path first: a session id discovered from the hook's process
+	// ancestry is authoritative — no cwd or recency guard needed (both exist
+	// only because the heuristic cannot be sure it found the right session).
+	// An id that matches no row (e.g. stale lock parse) falls back.
+	sess, status := sessionRow{}, histstatus.NoSession
+	if c.sessionID != "" {
+		sess, status, err = locateSessionByID(ctx, db, c.sessionID)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	if status != histstatus.Found {
+		sess, status, err = locateSession(ctx, db, cwd, c.recency)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	if status != histstatus.Found {
 		return Result{SessionID: sess.id, Status: status}, nil
@@ -139,25 +171,68 @@ type sessionRow struct {
 	mainChainID sql.NullInt64
 }
 
+// locateSessionByID loads an identified session directly. A missing row is
+// reported as NoSession so the caller can fall back to the heuristic.
+func locateSessionByID(ctx context.Context, db *sql.DB, sessionID string) (sessionRow, histstatus.Status, error) {
+	const q = `SELECT id, main_chain_id FROM sessions WHERE id = ? AND hidden = 0`
+	var s sessionRow
+	err := db.QueryRowContext(ctx, q, sessionID).Scan(&s.id, &s.mainChainID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sessionRow{}, histstatus.NoSession, nil
+	}
+	if err != nil {
+		return sessionRow{}, histstatus.Unknown, fmt.Errorf("query devin session by id: %w", err)
+	}
+	return s, histstatus.Found, nil
+}
+
+// locateSession is the cwd+recency heuristic fallback (used when no identified
+// session id is available — non-Linux, or ancestry discovery failed). When
+// SEVERAL sessions in this directory are inside the recency window, the
+// current one cannot be told apart, so it reports Ambiguous instead of
+// guessing: injecting another conversation's history is strictly worse than
+// enhancing without history (a real cross-session incident motivated this).
 func locateSession(ctx context.Context, db *sql.DB, cwd string, recency time.Duration) (sessionRow, histstatus.Status, error) {
 	const q = `SELECT id, main_chain_id, last_activity_at
 		FROM sessions
 		WHERE working_directory = ? AND hidden = 0
 		ORDER BY last_activity_at DESC
-		LIMIT 1`
-	var s sessionRow
-	var lastActivity sql.NullInt64
-	err := db.QueryRowContext(ctx, q, cwd).Scan(&s.id, &s.mainChainID, &lastActivity)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sessionRow{}, histstatus.NoSession, nil
-	}
+		LIMIT 2`
+	rows, err := db.QueryContext(ctx, q, cwd)
 	if err != nil {
 		return sessionRow{}, histstatus.Unknown, fmt.Errorf("query devin session: %w", err)
 	}
-	if lastActivity.Valid && time.Since(time.Unix(lastActivity.Int64, 0)) > recency {
-		return s, histstatus.Stale, nil
+	defer rows.Close()
+
+	type candidate struct {
+		row          sessionRow
+		lastActivity sql.NullInt64
 	}
-	return s, histstatus.Found, nil
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.row.id, &c.row.mainChainID, &c.lastActivity); err != nil {
+			return sessionRow{}, histstatus.Unknown, fmt.Errorf("scan devin session: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return sessionRow{}, histstatus.Unknown, fmt.Errorf("iterate devin sessions: %w", err)
+	}
+	if len(candidates) == 0 {
+		return sessionRow{}, histstatus.NoSession, nil
+	}
+	fresh := func(c candidate) bool {
+		return !c.lastActivity.Valid || time.Since(time.Unix(c.lastActivity.Int64, 0)) <= recency
+	}
+	if len(candidates) > 1 && fresh(candidates[1]) {
+		// Two or more live sessions in this directory: ambiguous.
+		return sessionRow{}, histstatus.Ambiguous, nil
+	}
+	if !fresh(candidates[0]) {
+		return candidates[0].row, histstatus.Stale, nil
+	}
+	return candidates[0].row, histstatus.Found, nil
 }
 
 func loadChainMessages(ctx context.Context, db *sql.DB, sessionID string, mainChainID sql.NullInt64) ([]enhancer.Message, error) {
@@ -334,6 +409,11 @@ func openReadOnly(path string) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 	return db, nil
 }
+
+// DefaultDBPath exposes the platform-default sessions.db location so callers
+// (e.g. the hook's devinsession lock-dir derivation) resolve paths exactly the
+// way this collector does when Options.DBPath is empty.
+func DefaultDBPath() string { return defaultDBPath() }
 
 func defaultDBPath() string {
 	if runtime.GOOS == "windows" {
