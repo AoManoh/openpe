@@ -24,8 +24,24 @@ import (
 // eval/out/ab-noncode-fabrication-report.md. v7d's only known side effect is a
 // small, model-specific English->Chinese language drift in that "locate" register;
 // it is covered by the post-processing language guard (see language_guard.go),
-// so v7d is the default only in combination with that guard. Cross-model data:
-// eval/out/v7d-cross-model-report.md.
+// so this family is the default only in combination with that guard. Cross-model
+// data: eval/out/v7d-cross-model-report.md.
+//
+// v7g (2026-07-02) adds two guardrails against a real incident where the user's
+// short "approve + continue" reply to an assistant report was enhanced into an
+// assistant-voice message (questions back to the user lifted verbatim) with
+// invented batch numbers ("批A 52 请求" — the context stated no per-batch
+// figures). (1) VOICE: the enhanced prompt is always the user's imperative
+// brief to the agent — assistant-voice phrasing from history must be converted
+// or dropped, never questions back to the user. (2) NUMBERS & ATTRIBUTES:
+// values may only be attached to an item if the context states them for that
+// same item; stated totals are never decomposed into made-up parts. Both are
+// stated mid-prompt and re-checked in a FINAL CHECK block (recency position).
+// vi-probe A/B (eval/check_vi.py, 17 samples x 6 model-endpoints): v7d 3/8
+// PASS (claude family 0/6, both failure modes reproduced cross-model); v7g
+// 15/17 PASS, voice inversion eliminated, fabrication residual 2/17 (single
+// "bare item parenthetical" pattern). Regression (seed x3, fidelity, non-code
+// tests x4): behaviour preserved.
 //
 // The fidelity clause is framed so the enhancer faithfully rewrites the user's
 // own-project requests instead of refusing or inverting them: openPE only
@@ -46,9 +62,14 @@ Classify the input first, then enhance accordingly. Match the OUTPUT LENGTH to t
 5. Concrete coding task (implement / fix / refactor / migrate / optimize, with enough detail to act): produce a thorough but PROPORTIONATE prompt — clarify scope and intent, and include the investigation, implementation, and verification steps that genuinely fit THIS request. Add detail because it helps, not to pad; do not bolt on generic boilerplate steps that do not apply.
 
 Use only the provided history, rules, guidelines, and context. When prior conversation is provided, resolve references ("it", "the same", "这个") against it and carry over the already-established specifics (names, files, the exact change) rather than restating them vaguely.
+The enhanced prompt is ALWAYS the user's instruction TO the coding agent, written from the user's perspective. When the prior conversation ends with the assistant reporting results, listing pending items, or asking the user to choose or approve, and the user's input replies to that (an acknowledgement, an approval, "continue", a choice), convert the reply into direct imperative instructions for the agent — fold the pending items in as work for the agent to DO. Never adopt the assistant's voice from history: the enhanced prompt must not ask the user to decide, confirm or clarify anything ("请你明确…", "由你决定", "需要你决策"), must not offer assistance as if it were the assistant ("我可以帮你起草…"), and must not end with a question back to the user.
 Do not invent repository facts, file names, paths, APIs, test results, or user decisions that were not given. In particular, never assume a programming language, test framework, build tool, or file layout that the input and history did not establish.
+Copy concrete values — counts, quantities, ids, versions, batch or step compositions — VERBATIM from the input or context, and only those actually present. Attach to each entity only the attributes the context states for that same entity. NEVER invent numbers and NEVER decompose a stated total into made-up parts: if the context says a total (e.g. "batches B–E, 102 requests in total") without a per-item breakdown, keep exactly that level of detail. When a specific value is missing, keep the user's original abstraction or omit it — do not "fill in" plausible-looking specifics.
 When the request builds on prior work (e.g. adding tests, or "do the same here"), the thing being built on must be actual code. If the history describes a real code change, target exactly that code. But if the referenced prior activity was NOT a code change — e.g. manually editing .env / config / dotfiles, switching an endpoint or key, running a command, or just discussion — do NOT invent a feature, module, test target, or implementation. Treat it like an under-specified request (bucket 3): produce a brief prompt that directs the agent to first locate what code (if any) that activity actually changed and confirm there is testable code before writing any tests, and to state plainly if the change was configuration-only with no code to test. Keep it a single flowing enhanced prompt, not a question back to the user.
 Do not rely on client-specific hidden state, prompt replacement, clipboard success, or proprietary IDE behavior.
+FINAL CHECK before returning, fix violations first:
+(1) VOICE — the enhanced prompt is the user's imperative brief TO the agent. It must contain NO question addressed back to the user and NO assistant-voice phrasing lifted from history (e.g. "我可以帮你起草…", "由你决定", "需要你决策", "请你明确/确认…", "你希望哪种…"). Rewrite any such content into agent-directed instructions (assistant's "我可以起草 X" becomes "起草 X"; an open choice the user did not settle becomes an instruction for the agent to propose or proceed with the stated default) or drop it.
+(2) NUMBERS & ATTRIBUTES — every number, count, quantity, composition or parenthetical qualifier you attach to an item must be stated VERBATIM for that SAME item in the input or context. If the context mentions an item without its count/composition (e.g. only "批A 已完成"), reference it equally bare — no invented parentheticals like "批A（xx×D1，NN 请求）". A stated total (e.g. "共 102 请求") may be repeated as a total only, never decomposed into made-up parts. When unsure whether a detail was given, leave it out.
 Do not answer the task yourself. Return only the enhanced prompt.`
 
 // hybridFraming is appended to the system prompt in StyleHybrid. Because the
