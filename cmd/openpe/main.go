@@ -1227,8 +1227,9 @@ func replayDevinBlockedPrompt(cfg config.Config, copyPreview bool, blockOutput s
 	prompt, err := devinadapter.ReadLastPrompt()
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		// Cache lost between the winner and this loser (rare): still block —
-		// re-blocking without a preview beats re-sending the raw prompt.
-		out := devinadapter.Block(strings.TrimSpace(localizedDedupReplayNote(cfg.Language) + " " + localizedDedupReplayCacheMiss(cfg.Language)))
+		// re-blocking without a preview beats re-sending the raw prompt. The
+		// degraded message must NOT claim anything was reused (nothing was).
+		out := devinadapter.Block(localizedDedupReplayCacheMiss(cfg.Language))
 		return emitDevinBlock(out, blockOutput, terminalPreview, stdout, stderr)
 	}
 	out := devinadapter.BlockPreview(devinadapter.PreviewReason("", cfg.Language), devinadapter.MarkdownPreview(prompt, cfg.Language), prompt)
@@ -1263,12 +1264,13 @@ func localizedDedupReplayNote(language string) string {
 }
 
 // localizedDedupReplayCacheMiss covers the degraded replay: the outcome said
-// block but the cached enhancement could not be read back.
+// block but the cached enhancement could not be read back, so nothing is
+// reused — the message must say so instead of claiming a reuse.
 func localizedDedupReplayCacheMiss(language string) string {
 	if isEnglishLanguage(language) {
-		return "The cached enhancement could not be read; the original message was NOT submitted. Run `openpe devin hook last` to inspect the cache."
+		return "openPE: duplicate submission within the de-dup window, but the cached enhancement could not be read; the original message was NOT submitted. Run `openpe devin hook last` to inspect the cache."
 	}
-	return "缓存的增强结果读取失败，原始消息未提交。可运行 openpe devin hook last 查看缓存。"
+	return "openPE：检测到去重窗口内重复提交同一消息，但缓存的增强结果读取失败；原始消息未提交。可运行 openpe devin hook last 查看缓存。"
 }
 
 func runDevinHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {
