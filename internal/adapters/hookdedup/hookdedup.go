@@ -2,12 +2,14 @@
 // openPE hook runs.
 //
 // Some host agents aggregate the UserPromptSubmit event from multiple
-// ecosystems. The Devin CLI in particular loads hooks from its own config,
-// from Claude Code (~/.claude/*), and from Windsurf (~/.codeium/windsurf/
-// hooks.json) all at once, then fires every matching hook for a single user
-// prompt. With openPE installed for more than one client this means the same
-// prompt is enhanced two or three times — wasting latency and provider cost
-// and producing conflicting hook output.
+// ecosystems. The Devin CLI in particular loads hooks from its own config AND
+// from Claude Code (~/.claude/*) at once (2026-07 probe of 2026.8.18: the
+// Windsurf hooks.json is NOT loaded, contrary to an earlier assumption), then
+// fires EVERY loaded hook for a single user prompt — a block does not
+// short-circuit the rest, and which hook's block reason the host displays
+// depends on source/order. With openPE installed for more than one format
+// this means the same prompt would be enhanced multiple times — wasting
+// latency and provider cost and producing conflicting hook output.
 //
 // Claim implements a filesystem-backed single-flight lock keyed on the prompt
 // text: the first hook to fire for a given prompt wins and performs the
