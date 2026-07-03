@@ -151,7 +151,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_MAX_TOKENS`                                   | `0`（provider 默认）       | 模型响应最大 token 数。Anthropic 必填（`0` 时回退其默认 4096）；OpenAI 忽略（交给网关默认）。与 `OPENPE_MAX_CONTEXT_TOKENS`（输入侧预算）不同，这是**输出**长度上限 |
 | `OPENPE_HOOK_INJECT`（+ `OPENPE_CODEX_INJECT` / `OPENPE_CLAUDE_INJECT` / `OPENPE_DEVIN_INJECT`） | `false` | 统一注入开关：默认 `false` = 拦截 + 剪贴板 review（保留「绝不自动应用、由你粘贴」哲学）；`true` = 把增强版作为 `additionalContext` 注入，代理直接按增强版执行。全局 `OPENPE_HOOK_INJECT` + 每客户端覆盖（每客户端优先 → 全局 → `false`）。已验证 Codex CLI / Claude Code(CLI) / Devin 均消费 `additionalContext`；**Windsurf 不支持**（开关无效空操作）；Claude 的 VSCode 扩展不消费（仅 CLI 生效）。配置经 dotenv 解析（hook 的 `--env-file` 可配） |
 | `OPENPE_HOOK_DEDUP_ENABLED`                            | `true`                     | 跨适配器去重总开关，仅在 Devin 下生效：Devin 会同时加载 devin/claude/windsurf 三类 hook，开启后同一条 `pe` 只增强一次（详见 [Devin CLI hook](#devin-cli-hook)）；设 `false` 关闭                       |
-| `OPENPE_HOOK_DEDUP_WINDOW`                             | `5s`                       | 去重时间窗（Go duration）：判定「同一条 prompt 的兄弟 hook」的新鲜度窗口，需略大于 hook 间毫秒级调度间隔、又小于有意重试间隔，默认 `5s` 足够                                                          |
+| `OPENPE_HOOK_DEDUP_WINDOW`                             | `5s`                       | 去重时间窗（Go duration）：判定「同一条 prompt 的重复触发」的新鲜度窗口。窗口内重复提交同一文本：上次是拦截则**重放拦截**（复用缓存增强，不放行原文），上次是注入则跳过；窗口外重新增强                |
 
 > **关于 `OPENPE_MAX_CONTEXT_TOKENS`**：这是 openPE 唯一的"消费层"token 总预算旋钮，一处配置覆盖 codex / claude / windsurf 全部 hook**以及** Windsurf patch 按钮路径（patch 路径走安装时快照，需要重跑 `installer install`；详见 `extensions/openpe-windsurf-patch/README.md` § "消费层 token 预算"）。各采集层自带的 `OPENPE_*_MAX_MESSAGES` / `_MAX_CHARS` 是"采集层"按源数据特性的经验调优（不同源数据格式不同），用于决定**读多少**进 `Request.History`；patch inject 侧 cascade trajectory 抓取的 32 / 6000 / 80000 三常量同属采集层（硬编码不可配，见 `inject/src/cascade_context.ts::DEFAULT_HISTORY_BUDGET`）。`OPENPE_MAX_CONTEXT_TOKENS` 决定**最终送给 LLM 的总 token 上限**，从 token 成本和 provider context window 上限两个角度统一兜底。默认 0 = 不启用预算，保持向后兼容。
 
@@ -382,9 +382,9 @@ openpe devin hook install --dry-run
 
 - 安装后在 Devin CLI 内用 `/hooks` 确认 openPE 的 `UserPromptSubmit` hook 已加载；改动配置后重开会话生效。
 - **Devin 是 hook 聚合器**：它一次性加载自己（`~/.config/devin/config.json`）、Claude Code（`~/.claude/*`）和 Windsurf（`~/.codeium/windsurf/hooks.json`）的 `UserPromptSubmit` hook。也就是说你只要在其中**任意一个**客户端装了 openPE，Devin 里就能用 `pe`；若同时装了多个，一次 `pe` 会触发多个 openPE hook。
-- openPE 对此做了两层处理，无需你手动取舍：(1) **跨适配器去重**——同一条 prompt 只由最先触发的 hook 增强一次，其余直接放行（见 `OPENPE_HOOK_DEDUP_*`）；(2) **宿主感知渲染**——被 Devin 调起的 Claude/Windsurf hook 会自动改用 Devin 的 JSON 注入输出，而不是它们原生的 `exit 2 + 剪贴板`（后者会被 Devin 误判为空的 “Prompt blocked:”）。所以装一个或装多个，行为都是「恰好增强一次并注入」。
+- openPE 对此做了两层处理，无需你手动取舍：(1) **跨适配器去重**——同一条 prompt 只由最先触发的 hook 增强一次，其余**镜像获胜者的结果**：获胜者是拦截（review）时重放拦截并复用缓存里的增强结果（绝不把原始 `pe：…` 放行给模型；2026-07-03 曾因「一律放行」把重发的原文送进模型，已修复），获胜者是注入时则静默跳过（防止同一条消息被注入两次）（见 `OPENPE_HOOK_DEDUP_*`）；(2) **宿主感知渲染**——被 Devin 调起的 Claude/Windsurf hook 会自动改用 Devin 的 JSON 注入输出，而不是它们原生的 `exit 2 + 剪贴板`（后者会被 Devin 误判为空的 “Prompt blocked:”）。所以装一个或装多个，行为都是「恰好增强一次」。
 - 这两层只在 `DEVIN_PROJECT_DIR` 存在（即真的跑在 Devin 里）时生效；Codex / Claude Code / Windsurf 各自原生使用时行为完全不变。
-- **Devin session history 默认读取**（启用满血提示词增强）。在 Devin 下运行时，openPE 只读 Devin 的本机 SQLite 会话库（`~/.local/share/devin/cli/sessions.db`），按工作目录 + 最近活跃定位当前 session，沿 `main_chain` 重建最近 user/assistant 历史填入 `enhancer.Request.History`，让 `pe` 能理解 Devin 对话里的前文引用。**非静默**：未找到 session、超出时效窗口（`OPENPE_DEVIN_HISTORY_RECENCY`，默认 6h）或读取失败，都会显式提示，绝不静默兜底成无历史增强。被 Devin 调起的 Claude/Windsurf hook 同样读取的是 Devin 会话历史（而非各自原生来源）。如需关闭，设置 `OPENPE_DEVIN_HISTORY_ENABLED=false`。
+- **Devin session history 默认读取**（启用满血提示词增强）。在 Devin 下运行时，openPE 只读 Devin 的本机 SQLite 会话库（`~/.local/share/devin/cli/sessions.db`），按工作目录 + 最近活跃定位当前 session，沿 `main_chain` 重建最近 user/assistant 历史填入 `enhancer.Request.History`，让 `pe` 能理解 Devin 对话里的前文引用。会话被**压缩（compaction）**后，Devin 会把前文替换成一条 system 角色的摘要节点——openPE 会把这条**压缩摘要作为历史带入**（映射为 assistant 轮次，披露注明「含前文压缩摘要」），压缩后的第一条 `pe` 不再是零上下文（2026-07-03 修复：此前摘要被 system 角色过滤器丢弃，压缩后必报「会话历史为空」）。**非静默**：未找到 session、超出时效窗口（`OPENPE_DEVIN_HISTORY_RECENCY`，默认 6h）或读取失败，都会显式提示，绝不静默兜底成无历史增强。被 Devin 调起的 Claude/Windsurf hook 同样读取的是 Devin 会话历史（而非各自原生来源）。如需关闭，设置 `OPENPE_DEVIN_HISTORY_ENABLED=false`。
 
 ### Windsurf Cascade hook
 
@@ -603,7 +603,9 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 - **Devin 会话身份识别（2026-07 起，Linux 精确识别）**：hook 进程沿进程链上溯找到所属的 devin 进程、读其持有的 `session_locks/<id>.lock` 得到**确定的当前会话**——同一目录并行开多个会话也不会串（此前按「目录+最近活跃」猜测曾把别的会话历史注入增强）。识别成功时**不受时效窗口限制**（隔天 resume 同一会话也带得上历史）。
 - **「最近会话已超出时效窗口，本次未带前文上下文」是回退路径的防陈旧泄漏**：仅当精确识别不可用（非 Linux / 进程链探测失败）才回退「工作目录 + 最近活跃」启发式，此时最近活跃须在 `OPENPE_DEVIN_HISTORY_RECENCY`（默认 `6h`）内才复用；超窗则**全部丢弃**、显式披露。想放宽：调大 `OPENPE_DEVIN_HISTORY_RECENCY`。
 - **「本目录存在多个活跃会话、无法确定当前会话」**：回退路径下若同目录时效窗内有 ≥2 个会话，openPE **宁可不带历史也不猜**（猜错=把别的对话内容串进增强），显式披露后按无历史增强。
-- **历史不是「全量」**：即便命中，也只取最近约 12 条 / 12000 字，仅由 `OPENPE_DEVIN_HISTORY_MAX_MESSAGES/_MAX_CHARS` 控制（绝对轮数，就近保留）；时效窗口是**会话级全有或全无**的闸门，不是按消息时间戳截断。
+- **「已带入 N 条会话历史（含前文压缩摘要）」**：Devin 压缩（compaction）会把前文替换成一条摘要节点；openPE 把它作为历史带入并在披露里注明。压缩后紧接着的 `pe` 报「会话历史为空」是 2026-07-03 前的旧版行为（摘要被 system 角色过滤器丢弃），升级即修复。
+- **5 秒内重复提交同一条 `pe`（如剪贴板粘贴失败后重发）**：会看到「检测到去重窗口内重复提交同一消息，已复用刚生成的增强结果」的拦截——这是去重重放，不再重新调用模型；此前版本此处会把原始 `pe：…` 原文放行给模型（2026-07-03 修复）。
+- **历史不是「全量」**：即便命中，也只取最近约 12 条 / 12000 字，仅由 `OPENPE_DEVIN_HISTORY_MAX_MESSAGES/_MAX_CHARS` 控制（绝对轮数，就近保留；压缩摘要同样占用这份预算）；时效窗口是**会话级全有或全无**的闸门，不是按消息时间戳截断。
 - 以上行为的详细问答（含"为什么第一次没历史、第二次有"的机制）见 **[FAQ.md](FAQ.md)**。
 
 ### 增强改写质量

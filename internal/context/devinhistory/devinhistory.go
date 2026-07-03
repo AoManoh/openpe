@@ -15,8 +15,14 @@
 // conversation is reconstructed by walking the session's node forest up
 // from sessions.main_chain_id via parent_node_id (node_id is monotonic along a
 // chain; created_at is not, so the chain — not a timestamp sort — defines
-// order). Compaction is handled for free: the main chain runs through Devin's
-// summary nodes, not the replaced pre-compaction detail.
+// order). Compaction needs explicit handling: the post-compaction main chain
+// replaces the prior turns with a summary node that Devin writes with role
+// "system" (marked summarized_from in the message_nodes.metadata column), so
+// the role filter alone would drop it and report a freshly compacted session
+// as empty — exactly when the summary is the only carrier of the prior
+// conversation (2026-07-03 incident). Summary nodes are therefore kept and
+// re-mapped to assistant turns, and Result.SummaryCount reports how many were
+// actually delivered.
 //
 // The store is opened strictly read-only (mode=ro + query_only); this package
 // never writes to the live database.
@@ -69,6 +75,12 @@ type Result struct {
 	SessionID string
 	Status    histstatus.Status
 	Messages  []enhancer.Message
+	// SummaryCount is how many of Messages are Devin compaction summaries
+	// (system-role nodes marked summarized_from, re-mapped to assistant so
+	// every prompt style keeps them). It counts what was actually delivered
+	// after limiting — never a summary that MaxMessages/MaxChars evicted — so
+	// the caller's disclosure can truthfully say a summary was included.
+	SummaryCount int
 }
 
 type Collector struct {
@@ -154,16 +166,34 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 		return Result{SessionID: sess.id, Status: status}, nil
 	}
 
-	messages, err := loadChainMessages(ctx, db, sess.id, sess.mainChainID)
+	chain, err := loadChainMessages(ctx, db, sess.id, sess.mainChainID)
 	if err != nil {
 		return Result{SessionID: sess.id}, err
 	}
-	messages = dropTrailingPrompt(messages, prompt)
-	messages = limitMessages(messages, c.maxMessages, c.maxChars)
-	if len(messages) == 0 {
+	chain = dropTrailingPrompt(chain, prompt)
+	chain = limitMessages(chain, c.maxMessages, c.maxChars)
+	if len(chain) == 0 {
 		return Result{SessionID: sess.id, Status: histstatus.Empty}, nil
 	}
-	return Result{SessionID: sess.id, Status: histstatus.Found, Messages: messages}, nil
+	messages := make([]enhancer.Message, len(chain))
+	summaries := 0
+	for i, m := range chain {
+		messages[i] = enhancer.Message{Role: m.Role, Content: m.Content}
+		if m.Summary {
+			summaries++
+		}
+	}
+	return Result{SessionID: sess.id, Status: histstatus.Found, Messages: messages, SummaryCount: summaries}, nil
+}
+
+// chainMessage is the collector-internal message shape: an enhancer.Message
+// plus whether the node is a compaction summary. The flag rides through
+// dropTrailingPrompt/limitMessages so Result.SummaryCount reflects what is
+// actually kept, not what the chain contained.
+type chainMessage struct {
+	Role    string
+	Content string
+	Summary bool
 }
 
 type sessionRow struct {
@@ -235,30 +265,39 @@ func locateSession(ctx context.Context, db *sql.DB, cwd string, recency time.Dur
 	return candidates[0].row, histstatus.Found, nil
 }
 
-func loadChainMessages(ctx context.Context, db *sql.DB, sessionID string, mainChainID sql.NullInt64) ([]enhancer.Message, error) {
+func loadChainMessages(ctx context.Context, db *sql.DB, sessionID string, mainChainID sql.NullInt64) ([]chainMessage, error) {
 	if !mainChainID.Valid {
 		return nil, nil
 	}
-	const q = `SELECT node_id, parent_node_id, chat_message FROM message_nodes WHERE session_id = ?`
+	const q = `SELECT node_id, parent_node_id, chat_message, metadata FROM message_nodes WHERE session_id = ?`
 	rows, err := db.QueryContext(ctx, q, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("query devin message_nodes: %w", err)
+		// Older Devin CLI schemas may predate the metadata column; retry
+		// without it. Summaries then cannot be identified, which degrades to
+		// the pre-summary behaviour instead of failing the whole history read.
+		const legacy = `SELECT node_id, parent_node_id, chat_message, NULL FROM message_nodes WHERE session_id = ?`
+		rows, err = db.QueryContext(ctx, legacy, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("query devin message_nodes: %w", err)
+		}
 	}
 	defer rows.Close()
 
 	type node struct {
-		parent sql.NullInt64
-		chat   string
+		parent  sql.NullInt64
+		chat    string
+		summary bool
 	}
 	nodes := make(map[int64]node)
 	for rows.Next() {
 		var id int64
 		var parent sql.NullInt64
 		var chat string
-		if err := rows.Scan(&id, &parent, &chat); err != nil {
+		var meta sql.NullString
+		if err := rows.Scan(&id, &parent, &chat, &meta); err != nil {
 			return nil, fmt.Errorf("scan devin message_node: %w", err)
 		}
-		nodes[id] = node{parent: parent, chat: chat}
+		nodes[id] = node{parent: parent, chat: chat, summary: summaryMarked(meta)}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate devin message_nodes: %w", err)
@@ -283,15 +322,33 @@ func loadChainMessages(ctx context.Context, db *sql.DB, sessionID string, mainCh
 		cur = n.parent
 	}
 
-	messages := make([]enhancer.Message, 0, len(chainIDs))
+	messages := make([]chainMessage, 0, len(chainIDs))
 	for i := len(chainIDs) - 1; i >= 0; i-- {
-		role, content, ok := parseChatMessage(nodes[chainIDs[i]].chat)
+		n := nodes[chainIDs[i]]
+		msg, ok := parseChatMessage(n.chat, n.summary)
 		if !ok {
 			continue
 		}
-		messages = append(messages, enhancer.Message{Role: role, Content: content})
+		messages = append(messages, msg)
 	}
 	return messages, nil
+}
+
+// summaryMarked reports whether a message_nodes.metadata column value marks a
+// compaction summary. Devin writes {"summarized_from": <old chain leaf>} on
+// summary nodes; system-prefix nodes carry the KEY with a null value, so the
+// marker is a non-null value, not key presence.
+func summaryMarked(meta sql.NullString) bool {
+	if !meta.Valid || strings.TrimSpace(meta.String) == "" {
+		return false
+	}
+	var m struct {
+		SummarizedFrom *int64 `json:"summarized_from"`
+	}
+	if err := json.Unmarshal([]byte(meta.String), &m); err != nil {
+		return false
+	}
+	return m.SummarizedFrom != nil
 }
 
 type chatMessageEnvelope struct {
@@ -303,30 +360,44 @@ type chatMessageEnvelope struct {
 }
 
 // parseChatMessage keeps genuine assistant and user turns and drops system /
-// tool nodes. A user node is only kept when metadata.is_user_input is true:
-// Devin also stores injected user-role context (rules, system_info, hook
-// additionalContext) which would be circular noise in the rewriter's context.
-func parseChatMessage(raw string) (string, string, bool) {
+// tool nodes — with one exception: a system node marked as a compaction
+// summary (summaryNode) is kept and re-mapped to an assistant turn, because
+// right after a compaction it is the only carrier of the prior conversation
+// and prompt styles drop non-user/assistant turns (2026-07-03 incident:
+// filtering it made every post-compaction enhancement history-less). A user
+// node is only kept when metadata.is_user_input is true: Devin also stores
+// injected user-role context (rules, system_info, hook additionalContext)
+// which would be circular noise in the rewriter's context.
+func parseChatMessage(raw string, summaryNode bool) (chainMessage, bool) {
 	var env chatMessageEnvelope
 	if err := json.Unmarshal([]byte(raw), &env); err != nil {
-		return "", "", false
+		return chainMessage{}, false
 	}
 	role := strings.TrimSpace(env.Role)
+	summary := false
 	switch role {
 	case "assistant":
-		// keep
+		// keep; an in-place compaction may append the summary as an assistant
+		// turn, which counts as a summary without needing a role re-map.
+		summary = summaryNode
 	case "user":
 		if env.Metadata.IsUserInput == nil || !*env.Metadata.IsUserInput {
-			return "", "", false
+			return chainMessage{}, false
 		}
+	case "system":
+		if !summaryNode {
+			return chainMessage{}, false
+		}
+		role = "assistant"
+		summary = true
 	default:
-		return "", "", false
+		return chainMessage{}, false
 	}
 	content := extractContent(env.Content)
 	if content == "" {
-		return "", "", false
+		return chainMessage{}, false
 	}
-	return role, content, true
+	return chainMessage{Role: role, Content: content, Summary: summary}, true
 }
 
 func extractContent(raw json.RawMessage) string {
@@ -354,7 +425,7 @@ func extractContent(raw json.RawMessage) string {
 // Devin does not persist the in-flight prompt before the hook fires, so this is
 // defensive against any timing where the current prompt already appears as the
 // last turn (avoids asking the model to "rewrite" against itself).
-func dropTrailingPrompt(messages []enhancer.Message, prompt string) []enhancer.Message {
+func dropTrailingPrompt(messages []chainMessage, prompt string) []chainMessage {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" || len(messages) == 0 {
 		return messages
@@ -366,14 +437,14 @@ func dropTrailingPrompt(messages []enhancer.Message, prompt string) []enhancer.M
 	return messages
 }
 
-func limitMessages(messages []enhancer.Message, maxMessages int, maxChars int) []enhancer.Message {
+func limitMessages(messages []chainMessage, maxMessages int, maxChars int) []chainMessage {
 	if maxMessages <= 0 {
 		maxMessages = defaultMaxMessages
 	}
 	if maxChars <= 0 {
 		maxChars = defaultMaxChars
 	}
-	var reversed []enhancer.Message
+	var reversed []chainMessage
 	remaining := maxChars
 	for i := len(messages) - 1; i >= 0 && len(reversed) < maxMessages && remaining > 0; i-- {
 		content := strings.TrimSpace(messages[i].Content)
@@ -383,10 +454,10 @@ func limitMessages(messages []enhancer.Message, maxMessages int, maxChars int) [
 		if runeLen(content) > remaining {
 			content = truncateRunes(content, remaining)
 		}
-		reversed = append(reversed, enhancer.Message{Role: messages[i].Role, Content: content})
+		reversed = append(reversed, chainMessage{Role: messages[i].Role, Content: content, Summary: messages[i].Summary})
 		remaining -= runeLen(content)
 	}
-	out := make([]enhancer.Message, len(reversed))
+	out := make([]chainMessage, len(reversed))
 	for i := range reversed {
 		out[len(reversed)-1-i] = reversed[i]
 	}
