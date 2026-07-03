@@ -690,7 +690,7 @@ func claudeTranscriptHistory(transcriptPath string, cwd string, cfg config.Confi
 // which makes same-directory parallel sessions safe; elsewhere — or if
 // discovery fails — the collector falls back to the cwd+recency heuristic,
 // which refuses to guess between multiple live sessions (Ambiguous).
-func devinSessionHistory(prompt string, cwd string, cfg config.Config) (devinhistory.Result, error) {
+func devinSessionHistory(prompt string, cwd string, cfg config.Config, sessionID string) (devinhistory.Result, error) {
 	if !cfg.Devin.History.Enabled {
 		return devinhistory.Result{Status: histstatus.Unknown}, nil
 	}
@@ -699,7 +699,7 @@ func devinSessionHistory(prompt string, cwd string, cfg config.Config) (devinhis
 		MaxMessages: cfg.Devin.History.MaxMessages,
 		MaxChars:    cfg.Devin.History.MaxChars,
 		Recency:     cfg.Devin.History.Recency,
-		SessionID:   discoverDevinSessionID(cfg.Devin.History.DBPath),
+		SessionID:   sessionID,
 	}).Retrieve(prompt, cwd)
 }
 
@@ -1018,23 +1018,30 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if strings.TrimSpace(*hookScope) == "project" && devinadapter.HasUserOpenPEHookConfig() {
 		return 0
 	}
+	// The session identity feeds both the de-dup claim key (same text in two
+	// parallel sessions must not dedup against each other) and the history
+	// lookup, so discover it once up front.
+	sessionID := discoverDevinSessionID(cfg.Devin.History.DBPath)
 	// Cross-adapter single-flight: Devin also imports the Claude- and
-	// Windsurf-format openPE hooks, so a single prompt can fire several openPE
-	// hooks in sequence. The first claims the prompt and enhances it; later
-	// firings inside the window mirror the winner's outcome: after a review
-	// block they replay the block from the delivery cache (a plain skip here
-	// once passed the raw resubmitted `pe` prompt through to the model),
-	// after an injection they skip so the prompt is enhanced exactly once.
+	// Windsurf-format openPE hooks and runs EVERY one of them for a single
+	// prompt (a block does not short-circuit the rest). The first claims the
+	// prompt and enhances it; later firings inside the window mirror the
+	// winner's conclusion: after a review block they replay the block — the
+	// winner's recorded disclosure notes plus the cached enhancement — because
+	// Devin displays the LAST hook's block reason, and a plain skip here once
+	// passed a raw resubmitted `pe` prompt through to the model. After an
+	// injection they skip so the prompt is injected exactly once.
 	claimOutcome := hookdedup.OutcomeUnknown
+	claimNotes := ""
 	if cfg.HookDedup.Enabled {
-		won, prior, finish := hookdedup.Claim(cfg.Delivery.CacheDir, input.Prompt, cfg.HookDedup.Window)
+		won, prior, finish := hookdedup.Claim(cfg.Delivery.CacheDir, devinDedupKey(sessionID, input.Prompt), cfg.HookDedup.Window)
 		if !won {
-			if prior == hookdedup.OutcomeBlock {
-				return replayDevinBlockedPrompt(cfg, *copyPreview, *blockOutput, *terminalPreview, stdout, stderr)
+			if prior.Outcome == hookdedup.OutcomeBlock {
+				return replayDevinBlockedPrompt(cfg, prior.Notes, *copyPreview, *blockOutput, *terminalPreview, stdout, stderr)
 			}
 			return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.SkipOutput())
 		}
-		defer func() { finish(claimOutcome) }()
+		defer func() { finish(claimOutcome, claimNotes) }()
 	}
 	// Devin's UserPromptSubmit stdin does not carry cwd; fall back to
 	// DEVIN_PROJECT_DIR (set for command hooks) then the process cwd.
@@ -1064,7 +1071,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if err != nil {
 		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
 	}
-	hist, histErr := devinSessionHistory(input.Prompt, overrideCWD, cfg)
+	hist, histErr := devinSessionHistory(input.Prompt, overrideCWD, cfg, sessionID)
 	output, err := devinadapter.HandleHook(context.Background(), service, input, devinadapter.HookOptions{
 		Client:   *client,
 		Mode:     *mode,
@@ -1088,7 +1095,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	if *copyPreview {
 		output = deliverDevinBlock(cfg, output)
 	}
-	output = applyDevinDisclosure(output, hist, histErr, cfg.Language)
+	output, claimNotes = applyDevinDisclosure(output, hist, histErr, cfg.Language)
 	if output.Decision == "block" && *blockOutput == "stderr" {
 		if *terminalPreview {
 			_ = devinadapter.WriteTerminalPreview(output.TerminalPreview)
@@ -1119,25 +1126,27 @@ func runningUnderDevin() bool {
 // injection. rawPrompt is the unparsed user text (still carrying the `pe`
 // trigger); the Devin adapter parses it.
 func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt string, cwd string, stdout io.Writer) int {
+	sessionID := discoverDevinSessionID(cfg.Devin.History.DBPath)
 	claimOutcome := hookdedup.OutcomeUnknown
+	claimNotes := ""
 	if cfg.HookDedup.Enabled {
-		won, prior, finish := hookdedup.Claim(cfg.Delivery.CacheDir, rawPrompt, cfg.HookDedup.Window)
+		won, prior, finish := hookdedup.Claim(cfg.Delivery.CacheDir, devinDedupKey(sessionID, rawPrompt), cfg.HookDedup.Window)
 		if !won {
-			if prior == hookdedup.OutcomeBlock {
+			if prior.Outcome == hookdedup.OutcomeBlock {
 				// Same replay as the native devin hook path: a skip here would
 				// pass the raw resubmitted `pe` prompt through to the model.
-				return replayDevinBlockedPrompt(cfg, true, "json", false, stdout, io.Discard)
+				return replayDevinBlockedPrompt(cfg, prior.Notes, true, "json", false, stdout, io.Discard)
 			}
 			return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.SkipOutput())
 		}
-		defer func() { finish(claimOutcome) }()
+		defer func() { finish(claimOutcome, claimNotes) }()
 	}
 	if strings.TrimSpace(cwd) == "" {
 		cwd = strings.TrimSpace(os.Getenv("DEVIN_PROJECT_DIR"))
 	}
 	// Under Devin the context is always the current Devin session (read from
 	// its local SQLite store), regardless of which client's hook fired.
-	hist, histErr := devinSessionHistory(rawPrompt, cwd, cfg)
+	hist, histErr := devinSessionHistory(rawPrompt, cwd, cfg, sessionID)
 	output, err := devinadapter.HandleHook(context.Background(), service, devinadapter.HookInput{
 		HookEventName: devinadapter.UserPromptSubmit,
 		Prompt:        rawPrompt,
@@ -1159,7 +1168,7 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 	}
 	claimOutcome = dedupOutcomeFor(output)
 	output = deliverDevinBlock(cfg, output)
-	output = applyDevinDisclosure(output, hist, histErr, cfg.Language)
+	output, claimNotes = applyDevinDisclosure(output, hist, histErr, cfg.Language)
 	return devinadapter.EncodeHookOutputOrFallback(stdout, output)
 }
 
@@ -1168,15 +1177,18 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 // whether it contains a compaction summary) plus any enhancer content warnings
 // (out-of-context numbers / undecided actions — they exist precisely to be
 // seen before the user acts). Block outputs carry the notes in Reason,
-// inject/skip outputs in SystemMessage.
-func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Result, histErr error, language string) devinadapter.HookOutput {
+// inject/skip outputs in SystemMessage. The joined notes are also returned so
+// a de-dup winner can record them for its losers: Devin runs every hook and
+// displays the LAST block reason, so a loser's replayed block must be able to
+// show the same disclosure the winner produced.
+func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Result, histErr error, language string) (devinadapter.HookOutput, string) {
 	notes := make([]string, 0, 1+len(output.Warnings))
 	if note := historyDisclosure(hist.Messages, hist.Status, hist.SummaryCount, histErr, language); note != "" {
 		notes = append(notes, note)
 	}
 	notes = append(notes, output.Warnings...)
 	if len(notes) == 0 {
-		return output
+		return output, ""
 	}
 	joined := strings.Join(notes, " ")
 	if output.Decision == "block" {
@@ -1184,7 +1196,21 @@ func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Resu
 	} else {
 		output.SystemMessage = strings.TrimSpace(joined + " " + output.SystemMessage)
 	}
-	return output
+	return output, joined
+}
+
+// devinDedupKey scopes the de-dup claim to the current Devin session when its
+// identity is known. The same kickoff text pasted into two parallel sessions
+// within the window is two DIFFERENT requests (each must be enhanced with its
+// own session context), while duplicate firings inside one session — sibling
+// hooks of one submission, or an immediate resubmission — still share a claim.
+// With no session identity (non-Linux / discovery failure) it falls back to
+// the plain text key, i.e. the historical global behaviour.
+func devinDedupKey(sessionID string, prompt string) string {
+	if strings.TrimSpace(sessionID) == "" {
+		return prompt
+	}
+	return sessionID + "\x00" + prompt
 }
 
 // deliverDevinBlock copies the enhanced prompt to the clipboard and sets the
@@ -1223,7 +1249,14 @@ func dedupOutcomeFor(output devinadapter.HookOutput) hookdedup.Outcome {
 // and the raw trigger message sails through to the model. Replaying costs no
 // model call: the winner's enhanced prompt is still in the delivery cache, so
 // it is re-delivered (clipboard included) exactly like the original block.
-func replayDevinBlockedPrompt(cfg config.Config, copyPreview bool, blockOutput string, terminalPreview bool, stdout io.Writer, stderr io.Writer) int {
+//
+// The replayed reason = the winner's recorded disclosure notes + a FRESH
+// delivery status. Devin runs every hook for one submission and displays the
+// LAST block reason, so for sibling hooks this output IS what the user sees —
+// it must read exactly like the winner's (a "duplicate submission" label here
+// once accused a first-time prompt of being a resubmission and hid the
+// history disclosure).
+func replayDevinBlockedPrompt(cfg config.Config, winnerNotes string, copyPreview bool, blockOutput string, terminalPreview bool, stdout io.Writer, stderr io.Writer) int {
 	prompt, err := devinadapter.ReadLastPrompt()
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		// Cache lost between the winner and this loser (rare): still block —
@@ -1236,7 +1269,7 @@ func replayDevinBlockedPrompt(cfg config.Config, copyPreview bool, blockOutput s
 	if copyPreview {
 		out = deliverDevinBlock(cfg, out)
 	}
-	out.Reason = strings.TrimSpace(localizedDedupReplayNote(cfg.Language) + " " + out.Reason)
+	out.Reason = strings.TrimSpace(winnerNotes + " " + out.Reason)
 	return emitDevinBlock(out, blockOutput, terminalPreview, stdout, stderr)
 }
 
@@ -1253,24 +1286,16 @@ func emitDevinBlock(output devinadapter.HookOutput, blockOutput string, terminal
 	return devinadapter.EncodeHookOutputOrFallback(stdout, output)
 }
 
-// localizedDedupReplayNote explains a de-dup replay: the same text was just
-// enhanced and blocked, so this resubmission reuses that result instead of
-// re-enhancing (or worse, passing the raw trigger message through).
-func localizedDedupReplayNote(language string) string {
-	if isEnglishLanguage(language) {
-		return "openPE: duplicate submission within the de-dup window; reusing the just-generated enhancement (no re-enhancement)."
-	}
-	return "openPE：检测到去重窗口内重复提交同一消息，已复用刚生成的增强结果（未重新增强）。"
-}
-
-// localizedDedupReplayCacheMiss covers the degraded replay: the outcome said
-// block but the cached enhancement could not be read back, so nothing is
-// reused — the message must say so instead of claiming a reuse.
+// localizedDedupReplayCacheMiss covers the degraded replay: the winner
+// blocked this text moments ago but the cached enhancement could not be read
+// back, so nothing is reused — the message must say so instead of claiming a
+// reuse, and must stay neutral about WHY the hook fired again (a sibling hook
+// of the same submission is indistinguishable from a quick resubmission).
 func localizedDedupReplayCacheMiss(language string) string {
 	if isEnglishLanguage(language) {
-		return "openPE: duplicate submission within the de-dup window, but the cached enhancement could not be read; the original message was NOT submitted. Run `openpe devin hook last` to inspect the cache."
+		return "openPE: this message was just enhanced and blocked, but the cached enhancement could not be read back; the original message was NOT submitted. Run `openpe devin hook last` to inspect the cache."
 	}
-	return "openPE：检测到去重窗口内重复提交同一消息，但缓存的增强结果读取失败；原始消息未提交。可运行 openpe devin hook last 查看缓存。"
+	return "openPE：该消息刚刚已增强并拦截，但缓存的增强结果读取失败；原始消息未提交。可运行 openpe devin hook last 查看缓存。"
 }
 
 func runDevinHookInstall(args []string, stdout io.Writer, stderr io.Writer, getwd func() (string, error)) int {

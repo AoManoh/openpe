@@ -61,13 +61,24 @@ const (
 	OutcomeInject Outcome = "inject"
 )
 
+// Prior is what a losing caller learns about the winning flight: how it
+// concluded, and (for blocks) the winner's disclosure notes so a replayed
+// block can show the user the same information the winner produced. Hosts
+// like the Devin CLI run EVERY hook and display the LAST block reason, so a
+// loser's output is often the one the user actually sees.
+type Prior struct {
+	Outcome Outcome
+	Notes   string
+}
+
 // Claim attempts to acquire the single-flight claim for prompt within window.
 //
 // It returns won=true for the first caller of a fresh prompt; the caller must
-// do the work and then invoke finish exactly once with the flight's Outcome.
-// It returns won=false for callers inside a fresh claim's window, along with
-// the winner's recorded Outcome (OutcomeUnknown while the winner is still in
-// flight); for a losing caller finish is a no-op.
+// do the work and then invoke finish exactly once with the flight's Outcome
+// and (for blocks) its disclosure notes. It returns won=false for callers
+// inside a fresh claim's window, along with the winner's recorded Prior
+// (OutcomeUnknown while the winner is still in flight); for a losing caller
+// finish is a no-op.
 //
 // baseCacheDir mirrors the delivery package's cache-directory resolution so the
 // claim directory is shared across every adapter. An empty baseCacheDir falls
@@ -76,34 +87,34 @@ const (
 //
 // Any filesystem error degrades to "won=true, no claim": a transient FS problem
 // must never silently drop the user's enhancement, only its de-duplication.
-func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior Outcome, finish func(Outcome)) {
+func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior Prior, finish func(Outcome, string)) {
 	if window <= 0 {
 		window = DefaultWindow
 	}
-	noop := func(Outcome) {}
+	noop := func(Outcome, string) {}
 	dir := dedupDir(baseCacheDir)
 	if dir == "" {
-		return true, OutcomeUnknown, noop
+		return true, Prior{}, noop
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return true, OutcomeUnknown, noop
+		return true, Prior{}, noop
 	}
 	path := filepath.Join(dir, key(prompt))
 
 	// Fast path: atomically create the claim. Success means we are the winner.
 	if f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
 		_ = f.Close()
-		return true, OutcomeUnknown, func(o Outcome) { record(path, o) }
+		return true, Prior{}, func(o Outcome, notes string) { record(path, o, notes) }
 	} else if !os.IsExist(err) {
 		// Unexpected FS error: never drop the enhancement.
-		return true, OutcomeUnknown, noop
+		return true, Prior{}, noop
 	}
 
 	// A claim already exists. If it is still fresh, a sibling (or an immediate
-	// resubmission) owns this prompt: report the winner's outcome and skip.
+	// resubmission) owns this prompt: report the winner's conclusion and skip.
 	if info, err := os.Stat(path); err == nil {
 		if time.Since(info.ModTime()) <= window {
-			prior := readOutcome(path)
+			prior := readPrior(path)
 			// Slide the window so a chain of siblings stays deduped, then skip.
 			touch(path)
 			return false, prior, noop
@@ -111,46 +122,54 @@ func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior O
 	}
 
 	// Stale (or unreadable) claim: take it over and become the winner,
-	// clearing the previous flight's outcome so this flight's losers do not
-	// replay a stale conclusion. The take-over is not perfectly atomic, but it
-	// only matters after a crashed winner, and the worst case is a single
-	// extra enhancement.
+	// clearing the previous flight's conclusion so this flight's losers do
+	// not replay it. The take-over is not perfectly atomic, but it only
+	// matters after a crashed winner, and the worst case is a single extra
+	// enhancement.
 	reset(path)
-	return true, OutcomeUnknown, func(o Outcome) { record(path, o) }
+	return true, Prior{}, func(o Outcome, notes string) { record(path, o, notes) }
 }
 
-// record stores the flight's outcome in the claim body and refreshes its
-// modification time (sibling hooks that start after the winner exits must
-// still observe a fresh claim). Best effort: on write failure it degrades to
-// a plain touch so de-duplication itself keeps working.
-func record(path string, outcome Outcome) {
-	if err := os.WriteFile(path, []byte(outcome), 0o600); err != nil {
+// record stores the flight's conclusion in the claim body — outcome on the
+// first line, disclosure notes verbatim after — and refreshes its modification
+// time (sibling hooks that start after the winner exits must still observe a
+// fresh claim). Best effort: on write failure it degrades to a plain touch so
+// de-duplication itself keeps working.
+func record(path string, outcome Outcome, notes string) {
+	body := string(outcome)
+	if notes != "" {
+		body += "\n" + notes
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		touch(path)
 	}
 }
 
-// reset truncates a taken-over claim (dropping any stale outcome) and marks
-// it fresh. Best effort, like record.
+// reset truncates a taken-over claim (dropping any stale conclusion) and
+// marks it fresh. Best effort, like record.
 func reset(path string) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		touch(path)
 	}
 }
 
-// readOutcome parses the claim body written by record. Unrecognised or
-// unreadable content degrades to OutcomeUnknown (skip — the safe default).
-func readOutcome(path string) Outcome {
+// readPrior parses the claim body written by record. Unrecognised or
+// unreadable content degrades to OutcomeUnknown with no notes (skip — the
+// safe default); notes are only meaningful for a recognised outcome.
+func readPrior(path string) Prior {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return OutcomeUnknown
+		return Prior{}
 	}
-	switch Outcome(strings.TrimSpace(string(data))) {
+	body := string(data)
+	line, notes, _ := strings.Cut(body, "\n")
+	switch Outcome(strings.TrimSpace(line)) {
 	case OutcomeBlock:
-		return OutcomeBlock
+		return Prior{Outcome: OutcomeBlock, Notes: notes}
 	case OutcomeInject:
-		return OutcomeInject
+		return Prior{Outcome: OutcomeInject, Notes: notes}
 	default:
-		return OutcomeUnknown
+		return Prior{}
 	}
 }
 
