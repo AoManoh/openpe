@@ -130,7 +130,7 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}
 	service, err := newEnhancerService(provider, cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "configure context provider: %v\n", err)
+		fmt.Fprintf(stderr, "configure enhancer: %v\n", err)
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutOrDefault(*timeout))
@@ -221,7 +221,7 @@ func runCodex(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer
 	}
 	service, err := newEnhancerService(provider, cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "configure context provider: %v\n", err)
+		fmt.Fprintf(stderr, "configure enhancer: %v\n", err)
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutOrDefault(*timeout))
@@ -409,7 +409,7 @@ func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	}
 	service, err := newEnhancerService(provider, cfg)
 	if err != nil {
-		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+		return codexadapter.EncodeHookOutputOrFallback(stdout, codexadapter.HookError(manual, fmt.Sprintf("configure enhancer: %v", err), cfg.Language))
 	}
 	output, err := codexadapter.HandleHook(context.Background(), service, input, codexadapter.HookOptions{
 		Client:           *client,
@@ -615,7 +615,7 @@ func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr i
 	}
 	service, err := newEnhancerService(provider, cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure enhancer: %v", err), cfg.Language))
 		return 2
 	}
 	// When the Devin CLI imports and runs this Claude hook, render Devin-native
@@ -854,7 +854,7 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr
 	}
 	service, err := newEnhancerService(provider, cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(fmt.Sprintf("configure enhancer: %v", err), cfg.Language))
 		return 2
 	}
 	// When the Devin CLI imports and runs this Windsurf hook, render Devin-native
@@ -1069,7 +1069,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	}
 	service, err := newEnhancerService(provider, cfg)
 	if err != nil {
-		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure context provider: %v", err), cfg.Language))
+		return devinadapter.EncodeHookOutputOrFallback(stdout, devinadapter.HookError(manualTrigger, fmt.Sprintf("configure enhancer: %v", err), cfg.Language))
 	}
 	hist, histErr := devinSessionHistory(input.Prompt, overrideCWD, cfg, sessionID)
 	output, err := devinadapter.HandleHook(context.Background(), service, input, devinadapter.HookOptions{
@@ -1578,8 +1578,12 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 		}
 		svc = enhancer.NewServiceWithContext(provider, contextProvider)
 	}
+	systemPrompt, err := enhancer.ResolveSystemPrompt(cfg.SystemPrompt, cfg.PromptStyle)
+	if err != nil {
+		return nil, err
+	}
 	return svc.
-		WithSystemPrompt(cfg.SystemPrompt).
+		WithSystemPrompt(systemPrompt).
 		WithMessageStyle(messageStyleFromConfig(cfg)).
 		WithLanguageGuard(languageGuardFromConfig(cfg)).
 		WithContentWarnings(enhancer.ContentWarningsConfig{

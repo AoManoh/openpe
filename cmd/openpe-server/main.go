@@ -93,7 +93,7 @@ func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 	}
 	service, err := newEnhancerService(provider, cfg)
 	if err != nil {
-		return fmt.Errorf("configure context provider: %w", err)
+		return fmt.Errorf("configure enhancer: %w", err)
 	}
 
 	if cfg.Server.LifecycleEnabled {
@@ -259,8 +259,12 @@ func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhance
 		}
 		svc = enhancer.NewServiceWithContext(provider, contextProvider)
 	}
+	systemPrompt, err := enhancer.ResolveSystemPrompt(cfg.SystemPrompt, cfg.PromptStyle)
+	if err != nil {
+		return nil, err
+	}
 	return svc.
-		WithSystemPrompt(cfg.SystemPrompt).
+		WithSystemPrompt(systemPrompt).
 		WithLanguageGuard(enhancer.LanguageGuardConfig{
 			Enabled:  cfg.LanguageGuard.Enabled,
 			Reanchor: cfg.LanguageGuard.Reanchor,

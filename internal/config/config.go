@@ -108,6 +108,14 @@ type Config struct {
 	// the compiled-in enhancer.defaultSystemPrompt, so this field is purely
 	// additive and lets operators iterate on the prompt without recompiling.
 	SystemPrompt string
+	// PromptStyle selects a built-in system-prompt preset by audience:
+	// "agent" (default — compact prompt for the downstream coding agent) or
+	// "human" (detailed report-style expansion for human reading; the
+	// former v7h default kept verbatim). Sourced from OPENPE_PROMPT_STYLE.
+	// An explicit SystemPrompt overrides it. The raw value is validated at
+	// service construction (enhancer.ResolveSystemPrompt), where an unknown
+	// style fails startup loudly instead of silently degrading to a default.
+	PromptStyle string
 	// LanguageGuard configures the enhancer's post-processing language-
 	// preservation guard (see internal/enhancer.LanguageGuardConfig). Sourced
 	// from OPENPE_LANGUAGE_GUARD_ENABLED / OPENPE_LANGUAGE_GUARD_REANCHOR.
@@ -273,6 +281,7 @@ func Load() Config {
 		Provider:         normalizeProvider(valueFromEnv("OPENPE_PROVIDER", fileEnv)),
 		MaxTokens:        intFromValue(valueFromEnv("OPENPE_MAX_TOKENS", fileEnv), 0),
 		SystemPrompt:     systemPromptFromEnv(fileEnv),
+		PromptStyle:      valueFromEnv("OPENPE_PROMPT_STYLE", fileEnv),
 		LanguageGuard: LanguageGuardConfig{
 			Enabled:  boolFromValue(valueFromEnv("OPENPE_LANGUAGE_GUARD_ENABLED", fileEnv), DefaultLanguageGuardEnabled),
 			Reanchor: boolFromValue(valueFromEnv("OPENPE_LANGUAGE_GUARD_REANCHOR", fileEnv), DefaultLanguageGuardReanchor),
