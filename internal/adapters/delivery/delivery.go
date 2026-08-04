@@ -10,6 +10,7 @@ import (
 
 	"github.com/AoManoh/openpe/internal/adapters/clipboard"
 	"github.com/AoManoh/openpe/internal/adapters/preview"
+	"github.com/AoManoh/openpe/internal/fsatomic"
 )
 
 type Cache struct {
@@ -68,10 +69,13 @@ func SaveWithOptions(client string, enhanced string, language string, opts Optio
 		PreviewPath: filepath.Join(dir, "last.md"),
 		PromptPath:  filepath.Join(dir, "last-prompt.txt"),
 	}
-	if err := os.WriteFile(cache.PromptPath, []byte(enhanced+"\n"), 0o600); err != nil {
+	// Atomic replacement: parallel hook flights may write this cache
+	// concurrently while `hook last` (or a de-dup replay on an old binary)
+	// reads it — a reader must never observe a torn prompt (CR-003).
+	if err := fsatomic.WriteFile(cache.PromptPath, []byte(enhanced+"\n"), 0o600); err != nil {
 		return cache, err
 	}
-	if err := os.WriteFile(cache.PreviewPath, []byte(preview.Markdown(enhanced, language)+"\n"), 0o600); err != nil {
+	if err := fsatomic.WriteFile(cache.PreviewPath, []byte(preview.Markdown(enhanced, language)+"\n"), 0o600); err != nil {
 		return cache, err
 	}
 	return cache, nil
