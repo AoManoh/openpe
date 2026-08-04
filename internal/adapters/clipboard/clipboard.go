@@ -18,6 +18,14 @@ import (
 const defaultTimeout = 2 * time.Second
 const osc52MaxBytes = 100 * 1024
 
+// pipeWaitDelay bounds how long a finished (or context-killed) clipboard
+// helper may keep us in Wait through inherited output pipes. xclip in
+// particular forks a child that owns the X selection and inherits
+// stdout/stderr; without a WaitDelay, Wait blocks until that child exits —
+// on 2026-08-03 this held the Devin hook for ~115s until the host killed it
+// and the raw `pe` prompt sailed through to the model.
+const pipeWaitDelay = 500 * time.Millisecond
+
 type commandSpec struct {
 	name         string
 	args         []string
@@ -85,11 +93,7 @@ func runShellCommand(ctx context.Context, command string, text string) error {
 	shell, args := shellCommand(command)
 	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.Stdin = bytes.NewReader(commandInput(commandUsesClipExe(command), text))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
+	return runBounded(cmd)
 }
 
 func shellCommand(command string) (string, []string) {
@@ -102,11 +106,24 @@ func shellCommand(command string) (string, []string) {
 func runCommand(ctx context.Context, spec commandSpec, text string) error {
 	cmd := exec.CommandContext(ctx, spec.name, spec.args...)
 	cmd.Stdin = bytes.NewReader(commandInput(spec.stdinUTF16LE, text))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
+	return runBounded(cmd)
+}
+
+// runBounded runs a clipboard helper without hanging on inherited pipes.
+// WaitDelay lets Wait return shortly after the direct child exits even when a
+// forked descendant (xclip's selection owner) keeps stdout/stderr open; in
+// that case the run counts as a successful copy: exec.ErrWaitDelay is only
+// returned for processes that exited with a success status.
+func runBounded(cmd *exec.Cmd) error {
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	cmd.WaitDelay = pipeWaitDelay
+	err := cmd.Run()
+	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("%s: %s", err, strings.TrimSpace(output.String()))
 }
 
 func copyOSC52(text string, opts Options) error {
