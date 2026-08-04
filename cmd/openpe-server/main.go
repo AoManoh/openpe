@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -16,11 +15,11 @@ import (
 	"time"
 
 	"github.com/AoManoh/openpe/internal/config"
-	openacectx "github.com/AoManoh/openpe/internal/context/openace"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/integration"
 	"github.com/AoManoh/openpe/internal/providers"
 	"github.com/AoManoh/openpe/internal/server"
+	"github.com/AoManoh/openpe/internal/wiring"
 )
 
 // Version is the build identifier exposed via GET /v1/info and the
@@ -96,6 +95,18 @@ func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 		return fmt.Errorf("configure enhancer: %w", err)
 	}
 
+	// Bind FIRST, publish after: the descriptor is the only discovery channel
+	// IDE installers have, so it must never advertise an address that failed
+	// to bind (or a ":0" placeholder instead of the kernel-assigned port).
+	// CR-002: a second instance used to overwrite the live descriptor, fail
+	// ListenAndServe, and delete the survivor's descriptor on exit.
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", listen, err)
+	}
+	defer listener.Close()
+	boundAddr := listener.Addr().String()
+
 	if cfg.Server.LifecycleEnabled {
 		descriptorPath = cfg.Server.DescriptorFile
 		if descriptorPath == "" {
@@ -104,20 +115,22 @@ func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 				return fmt.Errorf("resolve descriptor path: %w", err)
 			}
 		}
-		descriptor := integration.NewLocalServerDescriptor(deriveBaseURL(listen), token, os.Getpid(), Version)
+		descriptor := integration.NewLocalServerDescriptor(deriveBaseURL(boundAddr), token, os.Getpid(), Version)
 		if err := integration.WriteDescriptor(descriptorPath, descriptor); err != nil {
 			return fmt.Errorf("write descriptor %s: %w", descriptorPath, err)
 		}
 		fmt.Fprintf(stderr, "openpe-server: descriptor written to %s (mode 0600)\n", descriptorPath)
 		defer func() {
-			if removeErr := integration.RemoveDescriptor(descriptorPath); removeErr != nil {
+			// Ownership-aware cleanup: only remove the file if it still names
+			// this instance; a sibling that replaced it keeps its lifecycle.
+			if removeErr := integration.RemoveDescriptorIfOwned(descriptorPath, os.Getpid(), token); removeErr != nil {
 				fmt.Fprintf(stderr, "openpe-server: cleanup descriptor %s: %v\n", descriptorPath, removeErr)
 			}
 		}()
 	}
 
 	httpServer := &http.Server{
-		Addr: listen,
+		Addr: boundAddr,
 		Handler: server.NewWithOptions(service, server.Options{
 			Token:    token,
 			CORS:     server.CORSOptions{AllowedOrigins: cfg.Server.CORSOrigins},
@@ -125,7 +138,7 @@ func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 			Info: server.ServerInfo{
 				Version:    Version,
 				StartedAt:  time.Now().UTC(),
-				ListenAddr: listen,
+				ListenAddr: boundAddr,
 			},
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -148,8 +161,8 @@ func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 	go func() {
 		fmt.Fprintf(stderr,
 			"openpe-server: listening on %s (version=%s; auth=%s; cors=%s; lifecycle=%s)\n",
-			listen, Version, authStatus, corsStatus, lifecycleStatus)
-		errCh <- httpServer.ListenAndServe()
+			boundAddr, Version, authStatus, corsStatus, lifecycleStatus)
+		errCh <- httpServer.Serve(listener)
 	}()
 
 	signalCh := make(chan os.Signal, 1)
@@ -240,39 +253,9 @@ func deriveBaseURL(listenAddr string) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
+// newEnhancerService delegates to the shared wiring builder. The previous
+// hand-maintained copy had drifted from the CLI's (CR-009: it never applied
+// OPENPE_MESSAGE_STYLE, so HTTP requests always used the flatten layout).
 func newEnhancerService(provider enhancer.Provider, cfg config.Config) (*enhancer.Service, error) {
-	svc := enhancer.NewService(provider)
-	if cfg.Openace.Enabled {
-		contextProvider, err := openacectx.New(openacectx.Config{
-			DaemonAddr:        cfg.Openace.Addr,
-			DaemonToken:       cfg.Openace.Token,
-			ProviderProfileID: cfg.Openace.ProviderProfileID,
-			MaxOutputLength:   cfg.Openace.MaxOutputLength,
-			Timeout:           cfg.Openace.Timeout,
-			MaxRetries:        cfg.Openace.MaxRetries,
-			RetryBaseDelay:    cfg.Openace.RetryBaseDelay,
-			RetryMaxDelay:     cfg.Openace.RetryMaxDelay,
-			RetryJitter:       cfg.Openace.RetryJitter,
-		})
-		if err != nil {
-			return nil, err
-		}
-		svc = enhancer.NewServiceWithContext(provider, contextProvider)
-	}
-	systemPrompt, err := enhancer.ResolveSystemPrompt(cfg.SystemPrompt, cfg.PromptStyle)
-	if err != nil {
-		return nil, err
-	}
-	return svc.
-		WithSystemPrompt(systemPrompt).
-		WithLanguageGuard(enhancer.LanguageGuardConfig{
-			Enabled:  cfg.LanguageGuard.Enabled,
-			Reanchor: cfg.LanguageGuard.Reanchor,
-		}).
-		WithContentWarnings(enhancer.ContentWarningsConfig{
-			Enabled:      cfg.Warnings.Enabled,
-			ExtraActions: cfg.Warnings.ExtraActions,
-			NumMaxLen:    cfg.Warnings.NumMaxLen,
-		}, cfg.Language).
-		WithLogger(slog.Default()), nil
+	return wiring.NewEnhancerService(provider, cfg)
 }

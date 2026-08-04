@@ -168,3 +168,28 @@ func RemoveDescriptor(path string) error {
 	}
 	return nil
 }
+
+// RemoveDescriptorIfOwned deletes the descriptor only when it still belongs
+// to this instance (same PID and token). A second openpe-server that failed
+// to bind must not tear down the running instance's descriptor on its way
+// out (CR-002): the file it would delete is the ONLY discovery channel IDE
+// installers have. A missing file is fine; a foreign or unreadable file is
+// left in place — leaving a stale file behind is recoverable, deleting a
+// live sibling's descriptor is not.
+func RemoveDescriptorIfOwned(path string, pid int, token string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("descriptor path is required")
+	}
+	d, err := ReadDescriptor(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("descriptor %s left in place (cannot verify ownership): %w", path, err)
+	}
+	if d.PID != pid || d.Token != strings.TrimSpace(token) {
+		// Another instance owns the file now; its lifecycle is not ours to end.
+		return nil
+	}
+	return RemoveDescriptor(path)
+}
