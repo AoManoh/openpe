@@ -14,7 +14,7 @@
 
 ## 快速开始
 
-需要 Go 1.23+。
+需要 Go 1.25+；使用旧版 Go 时必须允许 `GOTOOLCHAIN=auto` 联网下载 1.25 toolchain。
 
 ### 1. 构建并安装 binary
 
@@ -26,7 +26,7 @@ go install ./cmd/openpe            # 主程序：日常只需要它
 go install ./cmd/openpe-server     # 可选：长驻 HTTP 服务，仅自动化 / IDE patch 集成才需要
 ```
 
-> **两个 binary 的定位**：`openpe` 是你唯一需要的主程序——它既是裸 CLI（`openpe enhance ...`），也是安装到 Codex / Claude Code / Devin / Windsurf 后被各自 hook 调用的处理器（`openpe <client> hook run`）。`openpe-server` 是一个**可选的常驻 HTTP 服务**，把同一套增强能力暴露为 `POST /v1/prompt-enhance`，只在你要接入自动化脚本、其它进程，或 Devin（原 Windsurf） patch 按钮时才需要；**日常 hook 流程不需要它**，可以跳过第二条命令。
+> **两个 binary 的定位**：`openpe` 是你唯一需要的主程序——它既是裸 CLI（`openpe enhance ...`），也是安装到 Codex / Claude Code / Devin / Windsurf 后被各自 hook 调用的处理器（`openpe <client> hook run`）。`openpe-server` 是一个**可选的常驻 HTTP 服务**，把同一套增强能力暴露为 `POST /v1/prompt-enhance`，只在你要接入自动化脚本、其它进程，或已验证的实验性 IDE patch 按钮时才需要；**日常 hook 流程不需要它**，可以跳过第二条命令。
 
 确认 `$GOPATH/bin`（通常 `~/go/bin`）在 `PATH` 中：
 
@@ -57,6 +57,14 @@ EOF
 验证 endpoint 连通：
 
 ```bash
+OPENPE_ENV_FILE="$HOME/.config/openpe/.env" \
+openpe enhance --prompt "帮我重构这个 handler"
+```
+
+PowerShell 使用：
+
+```powershell
+$env:OPENPE_ENV_FILE = "$HOME\.config\openpe\.env"
 openpe enhance --prompt "帮我重构这个 handler"
 ```
 
@@ -133,6 +141,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | -------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OPENPE_LANGUAGE`                                      | `zh`                       | hook 终端反馈语言：`zh` / `en`                                                                                                                                                                      |
 | `OPENPE_TIMEOUT`                                       | `60s`                      | 单次 provider 调用超时（Go duration）                                                                                                                                                                   |
+| `OPENPE_HOOK_DEADLINE`                                 | `100s`                     | Devin hook 整体自我截止时间（Go duration，`0` 关闭）。宿主会在自身 timeout（安装默认 120s）到点时直接杀掉 hook 且不读取任何输出——增强结果与拦截决定都会丢失、裸 `pe` 直通模型；deadline 保证在此之前主动收尾：手动 `pe` 以"增强超时、原文未提交"拦截，`--auto`/注入模式退化为放行                                                                    |
 | `OPENPE_LISTEN_ADDR`                                   | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost`                                                                                                                 |
 | `OPENPE_CACHE_DIR`                                     | `~/.cache/openpe`（Linux） | hook 预览与纯文本缓存根目录                                                                                                                                                                             |
 | `OPENPE_COPY_COMMAND`                                  | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）。原生 Windows 用 `cmd.exe /C` 执行，POSIX/WSL 用 `sh -c` 执行；命令首段为 `clip.exe` 时会自动转为 UTF-16LE，避免 Windows 中文乱码 |
@@ -154,7 +163,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_HOOK_DEDUP_ENABLED`                            | `true`                     | 跨适配器去重总开关，仅在 Devin 下生效：Devin 会把已加载的 openPE hook（devin/claude 格式）都跑一遍，开启后同一条 `pe` 只增强一次、各 hook 输出一致（详见 [Devin CLI hook](#devin-cli-hook)）；设 `false` 关闭 |
 | `OPENPE_HOOK_DEDUP_WINDOW`                             | `5s`                       | 去重时间窗（Go duration）：判定「同一条 prompt（同一会话内）的重复触发」的新鲜度窗口。窗口内重复触发：上次是拦截则**重放拦截**（披露原样复现 + 缓存增强重新投递，不调模型、不放行原文），上次是注入则跳过；窗口外重新增强 |
 
-> **关于 `OPENPE_MAX_CONTEXT_TOKENS`**：这是 openPE 唯一的"消费层"token 总预算旋钮，一处配置覆盖 codex / claude / windsurf 全部 hook**以及** Windsurf patch 按钮路径（patch 路径走安装时快照，需要重跑 `installer install`；详见 `extensions/openpe-windsurf-patch/README.md` § "消费层 token 预算"）。各采集层自带的 `OPENPE_*_MAX_MESSAGES` / `_MAX_CHARS` 是"采集层"按源数据特性的经验调优（不同源数据格式不同），用于决定**读多少**进 `Request.History`；patch inject 侧 cascade trajectory 抓取的 32 / 6000 / 80000 三常量同属采集层（硬编码不可配，见 `inject/src/cascade_context.ts::DEFAULT_HISTORY_BUDGET`）。`OPENPE_MAX_CONTEXT_TOKENS` 决定**最终送给 LLM 的总 token 上限**，从 token 成本和 provider context window 上限两个角度统一兜底。默认 0 = 不启用预算，保持向后兼容。
+> **关于 `OPENPE_MAX_CONTEXT_TOKENS`**：这是 openPE 的"消费层"token 总预算旋钮，一处配置覆盖 codex / claude / windsurf 全部 hook。各采集层自带的 `OPENPE_*_MAX_MESSAGES` / `_MAX_CHARS` 是"采集层"按源数据特性的经验调优（不同源数据格式不同），用于决定**读多少**进 `Request.History`。`OPENPE_MAX_CONTEXT_TOKENS` 决定**最终送给 LLM 的总 token 上限**，从 token 成本和 provider context window 上限两个角度统一兜底；默认 0 = 不启用预算。实验性 exact-build Devin 按钮入口当前不把该值快照到 HTTP 请求，不能把 server 进程中的同名变量误当成按钮预算；详见 `extensions/openpe-windsurf-patch/README.md` § "消费层 token 预算"。
 
 #### 按需启用（高级 / 实验性 / 有前置依赖）
 
@@ -203,7 +212,7 @@ openPE 默认读取当前 Codex / Claude Code / Devin 对话上下文，启用�
 <details>
 <summary><b>openpe-server 高级选项（bearer auth / CORS / lifecycle）</b></summary>
 
-仅 [HTTP 与裸 CLI 调试入口](#http-与裸-cli-调试入口) 和 [Windsurf bundle patch](#windsurf-bundle-patch实验性) 需要。
+仅 [HTTP 与裸 CLI 调试入口](#http-与裸-cli-调试入口) 和 [IDE bundle patch](#ide-bundle-patch实验性) 需要。
 
 | 变量                                | 默认                             | 说明                                                                              |
 | ----------------------------------- | -------------------------------- | --------------------------------------------------------------------------------- |
@@ -249,9 +258,9 @@ openpe enhance --prompt "帮我修复 provider 超时重试" --cwd /path/to/repo
 | 裸 CLI                         | `openpe enhance --prompt ...`          | 当前 shell 环境 `OPENPE_OPENACE_ENABLED=true`                                                                                                        |
 | Codex / Claude / Windsurf hook | IDE 对话框输入 `pe <内容>`             | hook dotenv（默认 `~/.config/openpe/.env`）含 `OPENPE_OPENACE_ENABLED=true`                                                                        |
 | HTTP API                       | 任何外部进程 `POST /v1/prompt-enhance` | `openpe-server` 启动时所在 shell 含 `OPENPE_OPENACE_ENABLED=true`                                                                                  |
-| Windsurf patch 按钮            | Cascade 工具栏点击 openPE logo           | 由上一行同款 `openpe-server` 共享；但当前 inject 请求尚未传 workspace `cwd`，因此 Openace 代码检索会被 server 跳过，直到按钮路径补齐 workspace CWD |
+| Exact-build Devin patch 按钮 | 输入框旁 openPE logo | 共享 `openpe-server`；当前请求固定 `history=none` 且未传 workspace `cwd`，Openace 会跳过 |
 
-Openace provider 由处理请求的进程在启动或构造 service 时注入：CLI / hook 子进程读取自己的环境变量，HTTP 与 Windsurf patch 按钮路径读取 `openpe-server` 启动时的环境变量。换言之：**只要负责处理某次请求的进程（CLI 子进程 / hook 子进程 / openpe-server 主进程）在自己的环境里看见 `OPENPE_OPENACE_ENABLED=true`，且本次请求带有非空 `Request.CWD`**，Openace 检索就会自动注入到 `context.retrieval`。检索请求会把 `Request.Client`、`Request.Mode` 和 `Request.CWD` 一并写入 `information_request`，其中代码库定位仍以 `Request.CWD` 作为 daemon 检索目录；不同入口如果传入不同 `cwd`、history 或环境变量，结果不保证逐字节相同。
+Openace provider 由处理请求的进程在启动或构造 service 时注入：CLI / hook 子进程读取自己的环境变量，HTTP 与 patch 按钮读取 `openpe-server` 启动时的环境变量。换言之：**只要负责处理某次请求的进程（CLI 子进程 / hook 子进程 / openpe-server 主进程）在自己的环境里看见 `OPENPE_OPENACE_ENABLED=true`，且本次请求带有非空 `Request.CWD`**，Openace 检索就会自动注入到 `context.retrieval`。检索请求会把 `Request.Client`、`Request.Mode` 和 `Request.CWD` 一并写入 `information_request`，其中代码库定位仍以 `Request.CWD` 作为 daemon 检索目录；不同入口如果传入不同 `cwd`、history 或环境变量，结果不保证逐字节相同。当前 exact-build Devin inject 不传 `cwd`，因此即使 server 启用了 Openace，按钮路径仍不会进行代码检索。
 
 Openace 临时错误只会有限重试：HTTP `408`、`429`、`499`、`5xx`、网络超时和短暂连接错误会按指数退避加抖动重试；`400`、`401`、`403`、`404` 等配置、权限或请求错误不会重试。超过最大重试次数后，openPE 返回清晰错误，不静默降级为无检索上下文。
 
@@ -265,7 +274,7 @@ openPE 支持 **4 种 hook 方案** 和 **1 种实验性 patch 方案**：
 | hook  | Claude Code      | ✅ 推荐     | [Claude Code hook](#claude-code-hook)                           |
 | hook  | Devin CLI        | ✅ 推荐     | [Devin CLI hook](#devin-cli-hook)                               |
 | hook  | Windsurf Cascade | ✅ 推荐     | [Windsurf Cascade hook](#windsurf-cascade-hook)                 |
-| patch | Windsurf Cascade | ⚠️ 实验性 | [Windsurf bundle patch（实验性）](#windsurf-bundle-patch实验性) |
+| patch | Exact-build Devin Desktop | 实验性 | [IDE bundle patch（实验性）](#ide-bundle-patch实验性) |
 
 hook 方案安装一次后在客户端对话框输入 `pe <内容>` 即可触发；patch 方案则通过 Cascade 输入框旁的按钮触发。
 
@@ -385,7 +394,8 @@ openpe devin hook install --dry-run
 - **Devin 会聚合 hook**：它同时加载自己的 hook 配置和 Claude Code 格式的 hook；**不加载 Windsurf 格式**（2026.8.18 版实测）。装了 devin 或 claude 任一格式，Devin 里就能用 `pe`；两个都装时，一次 `pe` 会先后触发两个 openPE hook。
 - **多 hook 也只增强一次、输出一致**：Devin 会把已加载的 hook 全部跑一遍（先拦截不短路），最终展示哪个 hook 的消息由 Devin 决定、不可预期。openPE 的对策：最先触发的 hook 增强并拦截，其余 hook 原样复现同一份披露、把缓存的增强结果重新复制到剪贴板——不再调模型、绝不放行原文。所以无论 Devin 展示哪个 hook 的输出，你看到的内容都一样。注入模式下其余 hook 静默跳过，防止同一条消息注入两次（开关见 `OPENPE_HOOK_DEDUP_*`）。
 - **去重按会话隔离**（Linux）：同一段文本粘进两个并行 Devin 会话不会互相去重，各自用自己的会话上下文独立增强。
-- **宿主感知渲染**：被 Devin 调起的 Claude 格式 hook 自动改用 Devin 的 JSON 输出（其原生 `exit 2 + 剪贴板` 会被 Devin 误读为空拦截）。
+- **拦截通道 = exit 2 + stderr**（2026-08-03 修正）：Devin 对 `UserPromptSubmit` 只承诺两种 hook 效果——退出码 2 拦截（3000.3.22 起 reason 取自 stderr）与 stdout `additionalContext` 注入；stdout 的 `{"decision":"block"}` 不生效。openPE 的 Devin 路径（含被 Devin 调起的 Claude 格式 hook）拦截时统一以 exit 2 + stderr 输出披露；`--block-output=json` 仅保留用于测试与旧宿主。
+- **自我截止时间兜底**：宿主 timeout（安装默认 120s）到点会直接杀掉 hook、不读任何输出，等于无声放行原文。openPE 默认在 100s（`OPENPE_HOOK_DEADLINE`）主动收尾：手动 `pe` 以「增强超时、原文未提交」拦截，注入模式退化为放行——慢 provider / 剪贴板卡死都不再导致裸 `pe` 直通模型。
 - 以上仅在 `DEVIN_PROJECT_DIR` 存在（真的跑在 Devin 里）时生效；Codex / Claude Code / Windsurf 各自原生使用时行为完全不变。
 - **Devin session history 默认读取**（启用满血提示词增强）。在 Devin 下运行时，openPE 只读 Devin 的本机 SQLite 会话库（`~/.local/share/devin/cli/sessions.db`），按工作目录 + 最近活跃定位当前 session，沿 `main_chain` 重建最近 user/assistant 历史填入 `enhancer.Request.History`，让 `pe` 能理解 Devin 对话里的前文引用。会话被**压缩（compaction）**后，Devin 会把前文替换成一条 system 角色的摘要节点——openPE 会把这条**压缩摘要作为历史带入**（映射为 assistant 轮次，披露注明「含前文压缩摘要」），压缩后的第一条 `pe` 不再是零上下文（2026-07-03 修复：此前摘要被 system 角色过滤器丢弃，压缩后必报「会话历史为空」）。**非静默**：未找到 session、超出时效窗口（`OPENPE_DEVIN_HISTORY_RECENCY`，默认 6h）或读取失败，都会显式提示，绝不静默兜底成无历史增强。被 Devin 调起的 Claude 格式 hook 同样读取的是 Devin 会话历史（而非 Claude 原生来源）。如需关闭，设置 `OPENPE_DEVIN_HISTORY_ENABLED=false`。
 
@@ -423,53 +433,64 @@ openpe windsurf hook install --dry-run
 - Windsurf 公开 hook 协议仅证明可阻断原 prompt，**无法替换 Cascade 输入框内容**。openPE 因此采用"阻断 + 缓存 + 复制"模式。
 - Windsurf hook 子进程**没有控制 TTY**，OSC52 剪贴板兜底**必然失败**。本地命令（`wl-copy` / `xclip` / `pbcopy` / `clip.exe`）可用时复制仍能成功；不可用时按 stderr 提示从 `last-prompt.txt` 文件取回。详见 [注意事项与已知限制](#注意事项与已知限制)。
 
-### Windsurf bundle patch（实验性）
+### IDE bundle patch（实验性）
 
-`extensions/openpe-windsurf-patch/` 是独立的 bundle patcher，修改 Windsurf Electron bundle，在 Cascade 输入框旁注入「openPE logo」增强按钮。点击按钮直接把当前对话框 prompt 发到本地 `openpe-server` 改写并写回输入框，**无需手动复制粘贴**。
+`extensions/openpe-windsurf-patch/` 是 profile-gated 的实验性 Electron bundle
+patcher。正式默认路径仍是 native hook：
 
-**前置依赖**（与 hook 不同，patch 需要多一个启动中的 server 进程）：
+- Devin CLI / Devin Local：`openpe devin hook install`
+- legacy Windsurf Cascade：`openpe windsurf hook install`
 
-1. 拉取本仓库源码（`git clone https://github.com/AoManoh/openpe.git`）。
-2. `go install ./cmd/openpe-server`（构建 `openpe-server` binary。如未装可参考 [快速开始 step 1](#1-构建并安装-binary)）。
-3. 配好 `~/.config/openpe/.env`（至少 3 项必填，见 [step 2](#2-配置-openai-compatible-endpoint)）。
-4. Python 3.8+ （运行 installer）。
-5. 启动带 lifecycle + CORS 的 `openpe-server`（下面命令）。
+Patch 只提供提交前按钮、增强和输入框回填，不替代 native hook，不修改 bundled
+`devin.exe`，不拦截 ACP。
 
-> ⚠️ **实验性方案**：存在 EULA、签名、升级覆盖和私有 DOM 选择器风险；不能接受风险请用 [Windsurf Cascade hook](#windsurf-cascade-hook)。
->
-> **平台**：仅 Windows 本地端到端验证完成；macOS/Linux 有 installer 路径探测但未端到端验证；**Remote 场景请在本机进行 patch 注入**（Windsurf IDE 在本机运行，remote Linux 服务器找不到本地 bundle，所以只能本机 IDE 注入后，再使用）。
+当前支持状态：
 
-注入成功并重启后，Cascade 输入区右下角出现 openPE 按钮：
+| Profile | 只读诊断 | Bundle mutation / Runtime |
+|---|---|---|
+| `devin-desktop` | 可识别 manifest 与 build | **仅 Windows 1.110.1 / `0d4bf12...` exact build** 开放独立的多 renderer 实验入口；核心按钮/HTTP/回填已实机通过，冷启动完整性与附件场景唯一 anchor 修复仍待复验 |
+| `windsurf-legacy` | 可识别 allowlisted `1.110.1/8636ab5...` 基线 | canonical mutation 仍禁用；等待 crash recovery 与重新 E2E |
+| unknown | 报告 unsupported | 拒绝，不按目录名猜宿主 |
 
-![Windsurf bundle patch 按钮位置](assets/windsurf-button.png)
+一次 exact-build 实测不等于未来 Devin 版本通用支持。独立入口同时修改
+`sessions.desktop.main.js`、`workbench.desktop.main.js`、`sessions.html` CSP 和
+`product.json` 三个资源 checksum；四个原文件会先写入绑定 profile、install root
+和 product commit 的 transaction。任一 baseline 或 live checksum 不匹配都会拒绝。
 
-按钮路径依赖本地 `openpe-server` 持续运行：
+源码方式安装必须在 Devin 外部 PowerShell 执行，并先完整退出 Devin、
+`WindsurfGate` 及 updater，否则进程门禁拒绝写入：
 
-```bash
-OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
-OPENPE_SERVER_LIFECYCLE_ENABLED=true \
-OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
-openpe-server
-```
-
-**关键步骤**：
-
-1. 确保 `openpe-server` 正在运行（建议固定 `OPENPE_SERVER_TOKEN`，避免临时 token 重启变化导致按钮 401）。
-2. `cd extensions/openpe-windsurf-patch && python3 -m installer install --i-accept-experimental-risk`
-3. 重启 Windsurf，看到按钮即注入成功。
-4. 在 Cascade 输入 prompt → 点按钮 → 增强结果自动回填到输入框，无需手动 Ctrl+V。
-
-**排障入口**：
-
-```bash
+```powershell
 cd extensions/openpe-windsurf-patch
-python3 -m installer status                              # 检查注入状态 + bundle 一致性
-python3 -m installer doctor --app-dir /path/to/Windsurf  # 路径/codesign/DOM 适配诊断
+npm --prefix inject ci
+npm --prefix inject run check
+npm --prefix inject run build
+python -m installer.multi_bundle_patch `
+  --app-dir "C:\path\to\IDE" `
+  --payload "inject\dist\inject.js"
 ```
 
-输出 `button config: stale` 表示按钮内嵌 token 与当前 server descriptor 不一致；重启 `openpe-server` 时沿用相同 `OPENPE_SERVER_TOKEN`，或重新 install 刷新内嵌配置。
+命令成功后务必保存输出的 transaction ID，再从正常快捷方式**冷启动** Devin；
+`Developer: Reload Window` 不能替代主进程冷启动。输入 prompt 并点击发送按钮旁的
+openPE logo；成功时增强结果会写回同一输入框。恢复原厂四文件前也要完整退出 Devin：
 
-> 按钮路径会通过 `inject/src/cascade_context.ts` 观察 Cascade IndexedDB，把当前 trajectory 作为 history 字段注入到 enhancer 请求；但 Cascade 客户端不持久化多轮完整 transcript，因此只能拿到当前 in-flight trajectory 级别的历史，**不是** Codex `history.jsonl` 或 Claude `transcript_path` 那种完整 session 级别。安装时加 `--debug` 可启用 `window.__openpeDebug` 只读 shape-only 诊断接口。完整数据源契约、隐私边界与诊断说明见 [extensions/openpe-windsurf-patch/README.md](extensions/openpe-windsurf-patch/README.md)。
+```powershell
+python -m installer.multi_bundle_patch `
+  --app-dir "C:\path\to\IDE" `
+  --restore "<transaction-id>"
+```
+
+已有 exact patch 不能原地重复 install；升级必须先用旧 transaction 执行上述
+`--restore`，保持 Devin 关闭，再执行新 `--payload` install 并保存新 transaction。
+完整可复制流程与预期验收矩阵见 patch 子项目 README。
+
+Canonical `openpe-ide-patch install --host devin` 仍保持 fail-closed；上述
+`multi_bundle_patch` 是当前 exact build 的独立实验入口，不支持其它版本、macOS、
+Linux、refresh 或跨 build 恢复。Devin 路径固定 `client=devin`、`mode=agent`、
+`history=none`，不会把 legacy Windsurf trajectory 混入请求；当前也不传 workspace
+`cwd`，因此按钮路径不会触发 Openace 代码检索。Server descriptor、精确 CORS、
+完整风险和恢复边界见
+[patch 子项目 README](extensions/openpe-windsurf-patch/README.md)。
 
 ## 调用方式
 
@@ -596,6 +617,7 @@ printf '{"agent_action_name":"pre_user_prompt","tool_info":{"user_prompt":"pe fi
 
 - **OSC52 在 IDE 子进程必然失败**：Windsurf、Cursor、VS Code 等 IDE 拉起 hook 子进程时不分配控制 TTY，OSC52 兜底会以 `open /dev/tty: no such device or address` 失败。这是协议与进程模型的硬限制，openPE 无法在自己侧修复。
 - **Linux 纯 TTY / 远程 SSH 下系统剪贴板工具不可用**：`XDG_SESSION_TYPE=tty` 或 X server 不可达时 `xclip` / `xsel` 报 `Can't open display`；缺 `WAYLAND_DISPLAY` 时 `wl-copy` 不可用。此时复制必然失败，按 stderr 提示从 `last-prompt.txt` 取回。
+- **fork 型剪贴板工具不再拖死 hook**（2026-08-03 修复）：`xclip` 复制成功后会 fork 一个持有 X selection 的后台子进程并继承输出管道，此前 openPE 会一直等管道关闭——在 Devin 下曾拖满宿主 120s timeout、导致 hook 被杀、裸 `pe` 直通模型。现在等待有上界（`WaitDelay` 500ms），fork 存活视为复制成功。
 - **macOS / Windows / 桌面 Linux 完整会话**：`pbcopy` / `clip.exe` / `wl-copy` / `xclip` 默认可用，复制稳定。原生 Windows 下自定义 `OPENPE_COPY_COMMAND` 通过 `cmd.exe /C` 执行；POSIX/WSL 下通过 `sh -c` 执行。WSL 中若使用 `/mnt/c/Windows/System32/clip.exe` 或 `clip.exe`，openPE 会把 UTF-8 增强结果转为 `clip.exe` 需要的 UTF-16LE stdin；如果 `OPENPE_COPY_COMMAND` 包了一层自定义脚本，脚本自身需要保留 Unicode 编码。
 - **Claude 交互式兜底**：Claude Code 会展示被阻断 hook 的 stderr。openPE 默认利用这一点，在 Claude 剪贴板失败时直接显示完整增强 prompt，避免用户必须另开终端执行 `last --prompt`。
 - **强警告文案**：失败时 stderr 会明确说明"剪贴板未更新，请勿直接粘贴旧内容"。**看到这句不要按 Ctrl+V**，先复制 Claude feedback 中的增强 prompt，或按 stderr 指示从缓存文件取回。
@@ -663,7 +685,7 @@ client / hook / HTTP
 | `internal/config`                  | `.env` 与环境变量读取                                                                                   |
 | `internal/server`                  | HTTP API、bearer 鉴权、CORS 中间件、`/v1/info` 端点、lifecycle descriptor                               |
 | `internal/integration`             | IDE patch installer 与 openpe-server 的握手契约：`LocalServerDescriptor`、token 工具、`BundlePatcher` |
-| `extensions/openpe-windsurf-patch` | **实验性** Windsurf bundle 注入式安装器（独立 MIT 子项目，默认禁用，用户自担风险）                  |
+| `extensions/openpe-windsurf-patch` | **实验性** profile-gated IDE bundle patcher；仅 exact Windows Devin build 开放独立多 renderer 入口，canonical mutation 与 legacy Windsurf 仍禁用 |
 
 ### 增强契约（开发者参考）
 
