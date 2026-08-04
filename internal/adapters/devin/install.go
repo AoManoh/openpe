@@ -16,8 +16,11 @@ func HookCommand(bin string, envFile string) string {
 // UserPromptSubmit hook. It mirrors the Codex adapter's delivery model — block
 // the original message and copy the enhanced prompt to the clipboard for the
 // user to paste/edit/resubmit — so the experience is consistent across clients.
-// The only difference from Codex is the transport: Devin reads the block reason
-// from stdout JSON (the default --block-output=json), not stderr.
+// The transport is the same as Codex too: exit code 2 with the reason on
+// stderr (the binary's --block-output default). Devin only documents exit-2 as
+// the hook block channel and reads the reason from stderr since 3000.3.22; a
+// stdout {"decision":"block"} on UserPromptSubmit is not honoured (2026-08-03
+// incident: an enhanced-and-"blocked" prompt reached the model).
 func HookCommandForScope(bin string, envFile string, scope string) string {
 	command := shellQuote(bin) + " devin hook run --copy-preview=true --terminal-preview=false"
 	if strings.TrimSpace(scope) != "" {

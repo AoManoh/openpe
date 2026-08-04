@@ -181,9 +181,9 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 // InjectionOutput builds the UserPromptSubmit output that injects an enhanced
 // prompt as additional context (the non-preview success shape). It is exported
 // so other adapters can render Devin-native output when the Devin CLI imports
-// and runs their hooks: Devin reads additionalContext from stdout JSON, whereas
-// the codex/claude/windsurf adapters' native exit-2 + stderr delivery is
-// misread by Devin as an empty block.
+// and runs their hooks: stdout hookSpecificOutput.additionalContext is the one
+// documented Devin injection channel (blocks, by contrast, travel as exit-2
+// with the reason on stderr — see the runner's emitDevinBlock).
 func InjectionOutput(enhanced string, language string) HookOutput {
 	return HookOutput{
 		SystemMessage: injectedMessage(language),

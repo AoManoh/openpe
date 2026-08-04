@@ -26,13 +26,16 @@
 // plain skip is only correct after an injection (the prompt proceeded,
 // enhanced); after a block it un-does the interception — the raw `pe` prompt
 // sails through to the model (2026-07-03 incident). With the outcome recorded,
-// losers replay a block from the delivery cache and keep skipping after an
+// losers replay a block from the claim body itself (which carries the
+// winner's enhanced prompt — the global per-client cache may already belong
+// to a parallel session's flight, CR-003) and keep skipping after an
 // injection, which is safe under both interpretations.
 package hookdedup
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,13 +67,31 @@ const (
 )
 
 // Prior is what a losing caller learns about the winning flight: how it
-// concluded, and (for blocks) the winner's disclosure notes so a replayed
-// block can show the user the same information the winner produced. Hosts
-// like the Devin CLI run EVERY hook and display the LAST block reason, so a
-// loser's output is often the one the user actually sees.
+// concluded, (for blocks) the winner's disclosure notes so a replayed block
+// can show the user the same information the winner produced, and the
+// winner's enhanced prompt itself. Hosts like the Devin CLI run EVERY hook
+// and display the LAST block reason, so a loser's output is often the one
+// the user actually sees.
+//
+// Prompt lives IN the claim (not in the per-client "last prompt" cache) so a
+// replay is bound to this exact claim key: with parallel sessions the global
+// last-prompt file may already belong to ANOTHER session's flight by the time
+// a loser replays (CR-003), which once leaked one workspace's enhancement
+// into another. A loser must render from Prior.Prompt or degrade explicitly.
 type Prior struct {
 	Outcome Outcome
 	Notes   string
+	Prompt  string
+}
+
+// claimBody is the persisted claim conclusion. JSON gives the three fields an
+// unambiguous encoding (notes may contain newlines; prompts may contain
+// anything); an unparsable or legacy body degrades to OutcomeUnknown, which
+// losers already treat as "skip", the safe default.
+type claimBody struct {
+	Outcome string `json:"outcome"`
+	Notes   string `json:"notes,omitempty"`
+	Prompt  string `json:"prompt,omitempty"`
 }
 
 // Claim attempts to acquire the single-flight claim for prompt within window.
@@ -89,11 +110,11 @@ type Prior struct {
 //
 // Any filesystem error degrades to "won=true, no claim": a transient FS problem
 // must never silently drop the user's enhancement, only its de-duplication.
-func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior Prior, finish func(Outcome, string)) {
+func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior Prior, finish func(Outcome, string, string)) {
 	if window <= 0 {
 		window = DefaultWindow
 	}
-	noop := func(Outcome, string) {}
+	noop := func(Outcome, string, string) {}
 	dir := dedupDir(baseCacheDir)
 	if dir == "" {
 		return true, Prior{}, noop
@@ -106,7 +127,7 @@ func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior P
 	// Fast path: atomically create the claim. Success means we are the winner.
 	if f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
 		_ = f.Close()
-		return true, Prior{}, func(o Outcome, notes string) { record(path, o, notes) }
+		return true, Prior{}, func(o Outcome, notes string, enhanced string) { record(path, o, notes, enhanced) }
 	} else if !os.IsExist(err) {
 		// Unexpected FS error: never drop the enhancement.
 		return true, Prior{}, noop
@@ -129,20 +150,21 @@ func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior P
 	// matters after a crashed winner, and the worst case is a single extra
 	// enhancement.
 	reset(path)
-	return true, Prior{}, func(o Outcome, notes string) { record(path, o, notes) }
+	return true, Prior{}, func(o Outcome, notes string, enhanced string) { record(path, o, notes, enhanced) }
 }
 
-// record stores the flight's conclusion in the claim body — outcome on the
-// first line, disclosure notes verbatim after — and refreshes its modification
-// time (sibling hooks that start after the winner exits must still observe a
-// fresh claim). Best effort: on write failure it degrades to a plain touch so
-// de-duplication itself keeps working.
-func record(path string, outcome Outcome, notes string) {
-	body := string(outcome)
-	if notes != "" {
-		body += "\n" + notes
+// record stores the flight's conclusion (outcome, disclosure notes, and for
+// blocks the enhanced prompt itself) as JSON in the claim body and refreshes
+// its modification time (sibling hooks that start after the winner exits must
+// still observe a fresh claim). Best effort: on failure it degrades to a
+// plain touch so de-duplication itself keeps working.
+func record(path string, outcome Outcome, notes string, enhanced string) {
+	payload, err := json.Marshal(claimBody{Outcome: string(outcome), Notes: notes, Prompt: enhanced})
+	if err != nil {
+		touch(path)
+		return
 	}
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		touch(path)
 	}
 }
@@ -156,20 +178,23 @@ func reset(path string) {
 }
 
 // readPrior parses the claim body written by record. Unrecognised or
-// unreadable content degrades to OutcomeUnknown with no notes (skip — the
-// safe default); notes are only meaningful for a recognised outcome.
+// unreadable content (including bodies written by older binaries) degrades to
+// OutcomeUnknown with no notes (skip — the safe default); notes and prompt
+// are only meaningful for a recognised outcome.
 func readPrior(path string) Prior {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Prior{}
 	}
-	body := string(data)
-	line, notes, _ := strings.Cut(body, "\n")
-	switch Outcome(strings.TrimSpace(line)) {
+	var body claimBody
+	if err := json.Unmarshal(data, &body); err != nil {
+		return Prior{}
+	}
+	switch Outcome(strings.TrimSpace(body.Outcome)) {
 	case OutcomeBlock:
-		return Prior{Outcome: OutcomeBlock, Notes: notes}
+		return Prior{Outcome: OutcomeBlock, Notes: body.Notes, Prompt: body.Prompt}
 	case OutcomeInject:
-		return Prior{Outcome: OutcomeInject, Notes: notes}
+		return Prior{Outcome: OutcomeInject, Notes: body.Notes, Prompt: body.Prompt}
 	default:
 		return Prior{}
 	}
