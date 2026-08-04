@@ -139,10 +139,20 @@ export async function runAutoEnhance(
   // no-history path. We hoist this read out of the try block so the
   // snapshot below can record what we tried to send even when the
   // server call itself blows up.
-  const historyMeta = getRecentHistoryWithMeta();
+  const historyMeta: HistoryMeta =
+    config.historySource === "legacy_trajectory"
+      ? getRecentHistoryWithMeta()
+      : {
+          messages: [],
+          source: "none",
+          totalChars: 0,
+          roles: { user: 0, assistant: 0 },
+        };
   try {
     const resp = await enhancePrompt(config, {
       prompt: original,
+      client: config.client,
+      mode: config.mode,
       history: historyMeta.messages,
       // Consumer-layer token budget; absent → omit on the wire (server
       // default = no shrinking). When the installer was run with
@@ -167,7 +177,33 @@ export async function runAutoEnhance(
       showToast("openPE: server returned empty text.", "error");
       return;
     }
-    const writeOk = await writeEditorText(editorEl, enhanced);
+    if (resp.warnings && resp.warnings.length > 0) {
+      const copyOk = await copyToClipboard(enhanced);
+      const warningSummary = resp.warnings.slice(0, 3).join("; ").slice(0, 240);
+      showToast(
+        copyOk
+          ? `openPE: safety warning — copied for review (${warningSummary})`
+          : `openPE: safety warning — clipboard failed (${warningSummary})`,
+        "warn",
+        { autoDismiss: 8000 },
+      );
+      return;
+    }
+    if (
+      !editorEl.isConnected ||
+      normalizeEditorText(readEditorText(editorEl)) !== normalizeEditorText(original)
+    ) {
+      const copyOk = await copyToClipboard(enhanced);
+      showToast(
+        copyOk
+          ? "openPE: input changed while enhancing — copied for review instead."
+          : "openPE: input changed while enhancing and clipboard failed.",
+        "warn",
+        { autoDismiss: 6000 },
+      );
+      return;
+    }
+    const writeOk = await writeEditorText(editorEl, enhanced, original);
     if (writeOk) {
       showToast("openPE: enhanced ✓  (Ctrl+Z to undo)", "ok", {
         autoDismiss: 3500,
@@ -316,7 +352,17 @@ function readEditorText(el: HTMLElement): string {
   return el.innerText ?? el.textContent ?? "";
 }
 
-async function writeEditorText(el: HTMLElement, text: string): Promise<boolean> {
+async function writeEditorText(
+  el: HTMLElement,
+  text: string,
+  expected: string,
+): Promise<boolean> {
+  if (
+    !el.isConnected ||
+    normalizeEditorText(readEditorText(el)) !== normalizeEditorText(expected)
+  ) {
+    return false;
+  }
   // Path 1: plain HTMLTextAreaElement (older Windsurf builds / VS Code
   // derivatives). Use the prototype value setter so React notices.
   if (el instanceof HTMLTextAreaElement) {
@@ -353,17 +399,15 @@ async function writeEditorText(el: HTMLElement, text: string): Promise<boolean> 
     // One animation frame so focus actually lands on the editor before
     // we start dispatching beforeinput events into it.
     await rafTick();
+    if (
+      !el.isConnected ||
+      normalizeEditorText(readEditorText(el)) !== normalizeEditorText(expected)
+    ) {
+      return false;
+    }
     el.focus({ preventScroll: false });
     selectAllRange(el);
 
-    el.dispatchEvent(
-      new InputEvent("beforeinput", {
-        bubbles: true,
-        cancelable: true,
-        inputType: "deleteContentBackward",
-        data: null,
-      }),
-    );
     el.dispatchEvent(
       new InputEvent("beforeinput", {
         bubbles: true,
@@ -375,6 +419,12 @@ async function writeEditorText(el: HTMLElement, text: string): Promise<boolean> 
 
     await delay(50);
     if (verifyEditorContains(el, text)) return true;
+    if (
+      !el.isConnected ||
+      normalizeEditorText(readEditorText(el)) !== normalizeEditorText(expected)
+    ) {
+      return false;
+    }
 
     selectAllRange(el);
     document.execCommand("insertText", false, text);
@@ -394,15 +444,12 @@ function selectAllRange(el: HTMLElement): void {
   sel.addRange(range);
 }
 
+function normalizeEditorText(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+}
+
 function verifyEditorContains(el: HTMLElement, text: string): boolean {
-  const current = (el.innerText ?? el.textContent ?? "").trim();
-  const target = text.trim();
-  if (current === target) return true;
-  // Lexical may wrap content in <p> tags or add a trailing newline; treat
-  // a substring of the leading 30 characters as confirmation that the
-  // new content actually landed.
-  const probe = target.slice(0, Math.min(30, target.length));
-  return probe.length > 0 && current.includes(probe);
+  return normalizeEditorText(readEditorText(el)) === normalizeEditorText(text);
 }
 
 function rafTick(): Promise<void> {

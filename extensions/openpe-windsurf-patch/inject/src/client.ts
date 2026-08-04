@@ -33,8 +33,8 @@ export interface EnhanceOptions {
 
 export interface EnhanceRequest {
   prompt: string;
-  client?: string;
-  mode?: string;
+  client: string;
+  mode: string;
   cwd?: string;
   history?: EnhanceMessage[];
   options?: EnhanceOptions;
@@ -42,6 +42,7 @@ export interface EnhanceRequest {
 
 export interface EnhanceResponse {
   enhanced_prompt?: string;
+  warnings?: string[];
   metadata?: Record<string, unknown>;
   error?: string;
 }
@@ -64,7 +65,32 @@ export async function enhancePrompt(
   if (!body.prompt.trim()) {
     throw new ClientError("prompt is empty", null);
   }
-  const url = `${config.baseUrl}/v1/prompt-enhance`;
+  const maxContextTokens = body.options?.max_context_tokens;
+  if (
+    maxContextTokens !== undefined &&
+    (!Number.isSafeInteger(maxContextTokens) || maxContextTokens <= 0)
+  ) {
+    throw new ClientError("max_context_tokens must be a positive safe integer", null);
+  }
+  let baseURL: URL;
+  try {
+    baseURL = new URL(config.baseUrl);
+  } catch {
+    throw new ClientError("server base URL is invalid", null);
+  }
+  if (
+    baseURL.protocol !== "http:" ||
+    baseURL.hostname !== "127.0.0.1" ||
+    !baseURL.port ||
+    !["", "/"].includes(baseURL.pathname) ||
+    baseURL.username ||
+    baseURL.password ||
+    baseURL.search ||
+    baseURL.hash
+  ) {
+    throw new ClientError("server must use http://127.0.0.1:<port>", null);
+  }
+  const url = `${baseURL.origin}/v1/prompt-enhance`;
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -73,13 +99,11 @@ export async function enhancePrompt(
     },
     body: JSON.stringify({
       prompt: body.prompt,
-      client: body.client ?? "windsurf",
-      // Match the Windsurf hook adapter (internal/adapters/windsurf/hook.go)
-      // which sends mode="cascade". The enhancer's prompt assembly puts the
-      // mode label into the LLM context verbatim, so a mismatch between hook
-      // and button paths produces visibly different output styles even
-      // though both routes use the same backend enhancer.
-      mode: body.mode ?? "cascade",
+      client: body.client,
+      // Match the selected host adapter's canonical client/mode labels. The
+      // installer embeds them from the product profile so this transport
+      // never guesses a host from a directory or legacy product name.
+      mode: body.mode,
       cwd: body.cwd ?? "",
       // Only attach history when we actually have messages — otherwise the
       // server sees the field absent (matching the existing Windsurf hook
@@ -96,6 +120,8 @@ export async function enhancePrompt(
         : {}),
     }),
     signal,
+    redirect: "error",
+    credentials: "omit",
   });
   let payload: EnhanceResponse;
   try {
@@ -118,5 +144,11 @@ export async function enhancePrompt(
       resp.status,
     );
   }
+  payload.warnings = Array.isArray(payload.warnings)
+    ? payload.warnings.filter(
+        (warning): warning is string =>
+          typeof warning === "string" && warning.trim().length > 0,
+      )
+    : [];
   return payload;
 }

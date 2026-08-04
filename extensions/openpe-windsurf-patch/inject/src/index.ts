@@ -36,6 +36,12 @@ declare global {
       fsProbe?: boolean;
       debug?: boolean;
       version?: string;
+      hostProfileId?: string;
+      productCommit?: string;
+      transactionId?: string;
+      client?: string;
+      mode?: string;
+      historySource?: string;
       // Consumer-layer token budget. Snapshotted by the installer from
       // ``--max-context-tokens`` / ``OPENPE_MAX_CONTEXT_TOKENS``;
       // forwarded by the inject layer to ``options.max_context_tokens``
@@ -78,9 +84,31 @@ function boot(): void {
     warn("already injected; skipping");
     return;
   }
-  window.__openpeInjected = true;
+  try {
+    Object.defineProperty(window, "__openpeInjected", {
+      value: true,
+      writable: false,
+      configurable: false,
+      enumerable: false,
+    });
+  } catch (err) {
+    warn("cannot claim single-instance marker; skipping", err);
+    return;
+  }
 
-  const config = getConfig();
+  let config: ReturnType<typeof getConfig>;
+  try {
+    config = getConfig();
+  } catch (err) {
+    warn("cannot read bootstrap config; skipping", err);
+    return;
+  }
+  if (!config.runtimeEnabled) {
+    warn(
+      `host profile ${config.hostProfileId || "unknown"} is not runtime-enabled; skipping`,
+    );
+    return;
+  }
   runFilesystemProbe(config);
   if (!config.baseUrl || !config.token) {
     warn(
@@ -119,7 +147,9 @@ function boot(): void {
     // if it fails or the trajectory cache is absent, the inject layer
     // continues to call /v1/prompt-enhance with the prompt only — no
     // hook-side behaviour change, no server-side change.
-    startCascadeContextWatcher();
+    if (config.historySource === "legacy_trajectory") {
+      startCascadeContextWatcher();
+    }
     startObserver(config);
     log("ready", {
       baseUrl: config.baseUrl,

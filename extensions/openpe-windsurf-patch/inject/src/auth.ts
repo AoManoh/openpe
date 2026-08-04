@@ -6,9 +6,21 @@
  * fields the UI actually needs to call /v1/prompt-enhance.
  */
 
+export type HistorySource = "none" | "legacy_trajectory";
+
+const DEVIN_EXACT_PRODUCT_COMMIT = "0d4bf12ed4a7597cb8ae9016fe8474468aad98a2";
+const TRANSACTION_ID_PATTERN = /^\d{8}T\d{12}Z-[0-9a-f]{8}$/;
+
 export interface OpenpeConfig {
   baseUrl: string;
   token: string;
+  hostProfileId: string;
+  productCommit: string;
+  transactionId: string;
+  client: string;
+  mode: string;
+  historySource: HistorySource;
+  runtimeEnabled: boolean;
   descriptorPath?: string;
   fsProbe: boolean;
   /**
@@ -50,27 +62,74 @@ export interface OpenpeConfig {
   maxContextTokens?: number;
 }
 
+function ownValue(raw: object, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(raw, key)
+    ? (raw as Record<string, unknown>)[key]
+    : undefined;
+}
+
 export function getConfig(): OpenpeConfig {
-  const raw =
-    typeof window !== "undefined" && window.__openpe ? window.__openpe : {};
-  // Accept maxContextTokens only when it's a finite positive number.
-  // The installer never emits the field for value 0 (matches Go's
-  // omitempty), so seeing a 0 here means a hand-edited bundle — silently
-  // ignore it to keep this layer permissive but conservative.
+  let candidate: unknown = {};
+  if (typeof window !== "undefined") {
+    const descriptor = Object.getOwnPropertyDescriptor(window, "__openpe");
+    if (descriptor && "value" in descriptor) {
+      candidate = descriptor.value;
+    }
+  }
+  const raw = typeof candidate === "object" && candidate !== null ? candidate : {};
+  const profileValue = ownValue(raw, "hostProfileId");
+  const clientValue = ownValue(raw, "client");
+  const modeValue = ownValue(raw, "mode");
+  const historyValue = ownValue(raw, "historySource");
+  const productCommitValue = ownValue(raw, "productCommit");
+  const transactionIdValue = ownValue(raw, "transactionId");
+  const hostProfileId = typeof profileValue === "string" ? profileValue : "";
+  const client = typeof clientValue === "string" ? clientValue.trim() : "";
+  const mode = typeof modeValue === "string" ? modeValue.trim() : "";
+  const runtimeEnabled =
+    (hostProfileId === "windsurf-legacy" &&
+      client === "windsurf" &&
+      mode === "cascade") ||
+    (hostProfileId === "devin-desktop" &&
+      client === "devin" &&
+      mode === "agent" &&
+      productCommitValue === DEVIN_EXACT_PRODUCT_COMMIT &&
+      typeof transactionIdValue === "string" &&
+      TRANSACTION_ID_PATTERN.test(transactionIdValue));
+  const historySource: HistorySource =
+    hostProfileId === "windsurf-legacy" &&
+    runtimeEnabled &&
+    historyValue === "legacy_trajectory"
+      ? "legacy_trajectory"
+      : "none";
+  const maxContextTokens = ownValue(raw, "maxContextTokens");
   const mct =
-    typeof raw.maxContextTokens === "number" &&
-    Number.isFinite(raw.maxContextTokens) &&
-    raw.maxContextTokens > 0
-      ? raw.maxContextTokens
+    typeof maxContextTokens === "number" &&
+    Number.isSafeInteger(maxContextTokens) &&
+    maxContextTokens > 0
+      ? maxContextTokens
       : undefined;
+  const baseUrl = ownValue(raw, "baseUrl");
+  const token = ownValue(raw, "token");
+  const descriptorPath = ownValue(raw, "descriptorPath");
+  const version = ownValue(raw, "version");
   return {
-    baseUrl: typeof raw.baseUrl === "string" ? raw.baseUrl.replace(/\/+$/, "") : "",
-    token: typeof raw.token === "string" ? raw.token : "",
+    baseUrl: typeof baseUrl === "string" ? baseUrl.replace(/\/+$/, "") : "",
+    token: typeof token === "string" ? token : "",
+    hostProfileId,
+    productCommit:
+      typeof productCommitValue === "string" ? productCommitValue : "",
+    transactionId:
+      typeof transactionIdValue === "string" ? transactionIdValue : "",
+    client,
+    mode,
+    historySource,
+    runtimeEnabled,
     descriptorPath:
-      typeof raw.descriptorPath === "string" ? raw.descriptorPath : undefined,
-    fsProbe: raw.fsProbe === true,
-    debug: raw.debug === true,
-    version: typeof raw.version === "string" ? raw.version : undefined,
+      typeof descriptorPath === "string" ? descriptorPath : undefined,
+    fsProbe: runtimeEnabled && ownValue(raw, "fsProbe") === true,
+    debug: runtimeEnabled && ownValue(raw, "debug") === true,
+    version: typeof version === "string" ? version : undefined,
     maxContextTokens: mct,
   };
 }

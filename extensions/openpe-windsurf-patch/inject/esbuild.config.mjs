@@ -19,15 +19,14 @@ await build({
   outfile: outFile,
   bundle: true,
   format: "iife",
-  globalName: "openpeInjectIIFE",
   platform: "browser",
   target: ["es2020"],
   minify: false, // keep readable so users can audit the injected payload
   sourcemap: false,
   legalComments: "inline",
   banner: {
-    js: "/* openPE Windsurf inject payload — see extensions/openpe-windsurf-patch/inject/src for sources */",
+    js: "/* openPE profile-gated IDE inject payload — see extensions/openpe-windsurf-patch/inject/src for sources */",
   },
 });
 
-console.log("openpe-windsurf-inject: built", outFile);
+console.log("openpe-ide-inject: built", outFile);
