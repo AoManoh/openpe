@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openpe-windsurf-patch"
-version = "0.1.0.dev0"
-description = "Experimental Windsurf IDE bundle patch installer for openPE"
+version = "0.2.0.dev0"
+description = "Experimental profile-gated IDE bundle patch installer for openPE"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [{name = "openPE contributors"}]
-keywords = ["openpe", "windsurf", "patch", "installer", "experimental"]
+keywords = ["openpe", "devin", "windsurf", "patch", "installer", "experimental"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -39,7 +39,8 @@ Repository = "https://github.com/AoManoh/openpe"
 Issues = "https://github.com/AoManoh/openpe/issues"
 
 [project.scripts]
-openpe-windsurf-patch = "installer.__main__:main"
+openpe-ide-patch = "installer.cli:main"
+openpe-windsurf-patch = "installer.compat_windsurf:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

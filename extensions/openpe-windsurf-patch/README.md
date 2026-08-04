@@ -1,113 +1,87 @@
-# openpe-windsurf-patch
+# openpe-ide-patch
 
-> **⚠️ 实验性 — 用户自担全部风险 ⚠️**
+> **实验性 — 用户自担全部风险**
 >
-> 该子项目会**就地修补 Windsurf IDE 的 Electron bundle**，在 Cascade
-> 聊天输入工具栏上注入一个 openPE logo Enhance 按钮。它是**显式
-> opt-in**、**默认关闭**、与 openPE 主 hook 路径**完全独立**。
+> 该子项目是 profile-gated 的 Electron bundle patcher。Canonical 入口是
+> `openpe-ide-patch`；`openpe-windsurf-patch` 暂时保留为强制绑定 legacy
+> Windsurf profile 的兼容入口。
 >
-> 运行 installer 即表示你确认：
+> 正式默认集成不是 bundle patch：
 >
-> 1. **EULA 风险** — 修改 Windsurf 应用 bundle 可能违反 Windsurf /
->    Codeium 终端用户许可协议。你的账号可能被暂停或拒绝技术支持。
->    安装前请阅读当前 EULA。
-> 2. **代码签名风险** — 在 macOS 上，重签修补后的 bundle 会使 Apple
->    notarization 失效；Gatekeeper 可能拒绝启动 IDE，直到手动移除
->    quarantine 属性。
-> 3. **修改 checksum 基线** — `product.json` 会被修改以满足 Electron 的资源
->    完整性校验；修补文件的校验值会变成 openPE 注入后的 bundle 值。
-> 4. **升级脆弱性** — Windsurf 每次更新都会覆盖修补后的 bundle；你
->    必须在每次 IDE 升级后重新跑 `install`。之前的备份会保留，但
->    可能与新版 IDE 不匹配。
-> 5. **无任何担保** — installer 按 AS IS 提供。出问题请从备份还原
->    （或重新干净安装 Windsurf）。
+> - Devin CLI / Devin Local：`openpe devin hook install`
+> - legacy Windsurf Cascade：`openpe windsurf hook install`
 >
-> **如果以上任何一条无法接受，请改用 openPE 默认集成路径：**
->
-> - `openpe windsurf hook install`（终端 `pe ...` 关键字）——跨平台默认推荐。
->
-> （早期的 VSIX 编辑器命令插件路径 `extensions/vscode-openpe/` 已整目录删除，
-> 历史原因见主仓 README “VSIX 编辑器命令路径” 节。）
+> Bundle patch 只提供显式 opt-in 的输入框按钮，不替代 native hook，不修改
+> bundled `devin.exe`，不拦截 ACP。
 
----
+## 风险
 
-## 这是什么
+1. 修改 Electron bundle 可能影响 EULA、厂商支持与完整性基线。
+2. macOS 重签不能恢复 vendor 原签名，因此当前 mutation 被禁用。
+3. IDE 更新会覆盖 patch；旧 build backup 绝不能恢复到新 build。
+4. Bootstrap 会把本地 bearer token 快照写入应用 bundle；server 必须只监听
+   loopback，CORS 必须使用 profile 的精确 origin。Exact Devin 入口轮换 token 后
+   必须 restore + reinstall；canonical refresh 当前不对该入口生效。
+5. 私有 DOM、editor 与 storage 契约会随上游更新变化。
 
-一个独立的、MIT 许可的 installer，它会：
+## 当前支持矩阵
 
-- **修改** Windsurf 应用 bundle 内的 `workbench.desktop.main.js`，注入一
-  段约 30 KB 的 JavaScript payload。
-- 注入的 payload 用 `MutationObserver` 监听 Cascade 聊天输入工具栏，在
-  Submit 旁边添加一个 openPE logo 按钮，点击后调用**你本地**的
-  `openpe-server`（仅 loopback），并把增强后的 prompt 写回 Cascade 输入
-  框。按钮 SVG 图案已完整 inline 到 `inject/src/button.ts`，注入 payload
-  为自包含，不依赖任何外部 SVG 文件。
-- 不与 `127.0.0.1` 之外的任何地方通信。无 telemetry、无第三方 gate
-  server、无商业 license key。
+| Profile | `status` / `doctor` | Mutation | Runtime |
+|---|---|---|---|
+| `devin-desktop` | 可识别产品身份与 build | 仅 Windows 1.110.1 / `0d4bf12...` exact build 开放独立 `multi_bundle_patch` 入口；canonical `install/uninstall` 仍禁用 | 2026-07-15 实机确认 Origin、按钮请求与 editor 回填；固定 `history=none` |
+| `windsurf-legacy` | 可识别并保留 allowlisted `1.110.1/8636ab5...` 基线 | 当前禁用 | 已有 Cascade runtime 资产；等待 crash recovery 与条件回滚闭环 |
+| unknown product | 只读报告 unsupported | 拒绝 | 不按目录名猜宿主 |
 
-## 这不是什么
+“当前 Devin exact build 已通过一次实机 E2E”不等于未来 Devin 版本通用支持。
+Build version、commit、workbench、sessions、sessions HTML 或 product 任一 baseline
+变化时，独立入口都会 fail closed。正式默认集成仍是 native Devin hook。
 
-- **不是** WSE（`windsurf-enhance`）的 fork — 不共享代码、不共享 key、
-  不共享 server。只借用“修补 bundle 加按钮”这个公开思路。
-- **不是** openPE hook 路径的替代。hook 仍然是 EULA 安全、跨平台稳定的默认选项。
-- **不会**自动更新。Windsurf 升级 ⇒ 重新跑 `install`。
-- **不是** openPE 主 Go build 的一部分。它住在自己的子项目里，有自己的
-  Python + Node.js 工具链。
+## 安全模型
+
+- 产品由 `product.json` 的 `nameShort`、`applicationName`、`dataFolderName`、
+  `urlProtocol`、`version` 和 `commit` 共同裁决；`--app-dir` 只覆盖位置。
+- 首次 install 前校验 product 记录的 bundle checksum 与 live bundle 一致。
+- Canonical 单 bundle 路径的 transaction manifest 绑定 profile、install root、
+  product version/commit、bundle/product 原始与 patched SHA-256。
+- Exact-build Devin 入口在单个 manifest 中绑定 `sessions`、`workbench`、
+  `sessions.html` 与 `product.json` 四个 artifact 的原始/patched SHA-256；写前逐个
+  验证 backup，失败时只覆盖仍处于已知 before/target 状态的文件。
+- Canonical refresh 只复用 marker 指向的 exact transaction；exact-build Devin
+  入口当前不提供 refresh，token 变化时需先 exact restore 再 install。
+- 恢复只接受同 profile、同 install、同 product build、同路径且 checksum 完整的
+  transaction。任一 live/backup 状态未知都拒绝覆盖。
+- Mutation 前要求 IDE/updater 已停止；进程探针失败时 fail closed。
 
 ## 系统要求
 
-- Python 3.8 或更新版本
-- （可选，从源码构建 inject.js 用）Node.js 18+ 和 npm
-- 一个启用了 lifecycle descriptor 的运行中 `openpe-server`。对于按钮
-  路径，推荐固定本地 token，让按钮在 server 重启后仍能用：
+- Python 3.8+
+- 从源码构建 payload 时需要 Node.js 18+ 与 npm
+- 按钮需要运行中的 loopback `openpe-server`。Exact-build Devin 使用已实测的
+  `vscode-file://vscode-app` Origin：
 
-  ```bash
-  # 生成一次后持续复用，例如放在 ~/.config/openpe/.env。
-  export OPENPE_SERVER_TOKEN="<stable-64-hex-token>"
-  export OPENPE_SERVER_LIFECYCLE_ENABLED=true
-  export OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf
-  openpe-server
+  ```dotenv
+  OPENPE_SERVER_TOKEN=<stable-64-hex-token>
+  OPENPE_SERVER_LIFECYCLE_ENABLED=true
+  OPENPE_SERVER_CORS_ORIGINS=vscode-file://vscode-app
   ```
 
-  installer 会读 `~/.config/openpe/server.json` 拿到 loopback base URL 和
-  bearer token，再把它们快照进修补后的 bundle。
-
-  注意：这个 token 快照会写入 Windsurf 的 `workbench.desktop.main.js`，该
-  bundle 通常是 0644 或等价的本机可读文件。请只把 server 暴露在 loopback，
-  并把 CORS 限定为 `null,app://windsurf`；如果你轮换
-  `OPENPE_SERVER_TOKEN`，需要重新运行 `install` 刷新 bundle 里的快照。
-  若怀疑本机 token 泄漏，先停止 server、轮换 token，再 uninstall/reinstall
-  或干净重装 Windsurf。
-
-## 当前状态
-
-- **现状**：`status`、`install`、`uninstall`、`doctor` 都是真实可用的命令。
-  `install` 会解析 Windsurf bundle、通过 `GET /v1/info` 校验本地
-  `openpe-server` descriptor、备份 bundle 和 `product.json`、注入构建好的
-  `inject/dist/inject.js` payload 和 `globalThis.__openpe` bootstrap、更新
-  bundle 的 checksum 条目为修补后的值、并在 macOS 上重签 app。
-- 注入的 payload 会监听 Cascade 工具栏、添加 openPE logo 按钮、调本地
-  `POST /v1/prompt-enhance`、用 toast 展示执行状态、并尽力把增强后的
-  prompt 写回 Cascade 输入框；写回失败时回退到剪贴板。
-- **平台端到端验证状态**：目前**只在 Windows 本地 Windsurf 上验证过完整
-  install → 按钮注入 → 增强 → 回填 → uninstall 流程**。`installer/paths.py`
-  代码层面对 macOS（`/Applications/Windsurf.app`）和 Linux（`/opt/Windsurf`
-  等）都有路径探测分支，但**尚未做端到端验证**，macOS 的 codesign
-  重签、权限处理、bundle 布局差异、以及 Cascade DOM 选择器适配都可能
-  需要进一步调整。**Remote 场景明确不支持**——Windsurf IDE 在
-  Windows/macOS 本地运行，remote Linux 服务器找不到本地 IDE bundle，
-  无法自然完成本地 IDE 注入。
-- 仍然是实验性、默认关闭的，因为它会修改 Windsurf 应用 bundle，并依赖
-  Cascade 的私有 DOM 选择器。
-
-工作日志详见主 openPE 仓库的
-`docs/development/2026-05-22-windsurf-patch-installer.md`。
+不要为 Devin 猜测 `app://devin` 或放宽为 `*`。如果同一 server 还服务 legacy
+Windsurf，可显式合并为
+`null,app://windsurf,vscode-file://vscode-app`；不需要的 Origin 不应加入。
 
 ## 注意事项与已知限制
 
-### 对话历史抓取是 best-effort（只能拿到当前 trajectory）
+### Devin 上下文与 legacy Windsurf 隔离
 
-点击注入的 openPE 按钮时，若有缓存到消息，payload 会把它们以 `history`
+Exact-build Devin bootstrap 固定 `client=devin`、`mode=agent`、`historySource=none`。
+Inject 不会启动 legacy Windsurf IndexedDB trajectory watcher，请求只携带当前输入框
+prompt；当前也不传 native Devin session history 或 workspace `cwd`。这避免把
+Windsurf trajectory 错配到 Devin，但意味着按钮增强没有 native hook 路径可获得的
+会话历史，也不会触发依赖 `cwd` 的 Openace 检索。
+
+### Legacy Windsurf 对话历史抓取是 best-effort（只能拿到当前 trajectory）
+
+点击 legacy Windsurf 的 openPE 按钮时，若有缓存到消息，payload 会把它们以 `history`
 字段附在本地 `POST /v1/prompt-enhance` 请求里。该字段由
 `inject/src/cascade_context.ts` 里的 renderer 侧 watcher 提供：watcher
 监听 Windsurf 的 IndexedDB（`keyval-store` /
@@ -156,81 +130,127 @@ investigation，**没有**进入计划阶段。后人接手时应先重新用 De
 
 ## 使用方式
 
+### 正式推荐路径
+
+Bundle patch 不是默认集成。Devin 用户优先使用：
+
 ```bash
-# 1. 安装前先启动 openpe-server，启用 lifecycle 和 CORS。
-OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
-OPENPE_SERVER_LIFECYCLE_ENABLED=true \
-OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
-openpe-server
-
-# 2. 源码目录运行时，修改 TypeScript 源码后必须重新构建 inject payload。
-#    通过 Python package 安装时，构建包会把已生成的 inject/dist/inject.js
-#    放入 package data；如果缺失，installer 会明确报错。
-cd extensions/openpe-windsurf-patch/inject
-npm install
-npm run build
-
-# 3. 从子项目根目录安装。
-cd ..
-python3 -m installer doctor
-python3 -m installer status
-python3 -m installer install --i-accept-experimental-risk
+openpe devin hook install
 ```
 
-为了能日常稳定使用，请**不要**每次启动 server 都重新生成
-`OPENPE_SERVER_TOKEN`。生成一次后放在用户级 openPE env 文件或 shell
-profile 里复用，这样已经安装的按钮在 `openpe-server` 重启后仍然保持鉴
-权有效。`OPENPE_SERVER_CORS_ORIGINS` 必须精确包含 `null` 和
-`app://windsurf`，大小写也要一致；installer 会按 Go server 的精确匹配
-语义校验。如果浏览器 console 报 CORS 错误，在 Windsurf DevTools 里看
-请求的 `Origin`，把这个精确 origin 加到 `OPENPE_SERVER_CORS_ORIGINS`。
+Canonical 入口继续提供只读诊断；其 `install/uninstall` 仍保持 fail closed：
 
-安装后重启 Windsurf。openPE logo 按钮应该出现在 Cascade submit 控件旁
-边。点它后会直接调用本地 server，并尽力把增强后的 prompt 写回 Cascade
-输入框；写回失败时会复制到剪贴板。如果 Windsurf 改了私有 DOM 导致按钮不出现，见 `inject/README.md`，扩充
-`findCascadeToolbar()` / `SUBMIT_BUTTON_SELECTORS` 后重新构建
-`inject/dist/inject.js`，再重跑 `install`。
+```bash
+python -m installer.cli status --host auto --app-dir "C:\path\to\IDE"
+python -m installer.cli doctor --host auto --app-dir "C:\path\to\IDE"
+```
 
-所有子命令都接受 `--help`。`status` 和 `doctor --app-dir <path>` 还会汇报
-`button config`。`stale` 结果表示安装时嵌入的 token 或 base URL 与当前
-server descriptor 不一致；用同一个 `OPENPE_SERVER_TOKEN` 重启
-`openpe-server`，或重跑 `install` 刷新 bundle bootstrap。
+### Windows exact-build Devin 按钮
 
-P3 descriptor-read 试验需要带 `--fs-probe` 安装；先用
-`OPENPE_SERVER_LIFECYCLE_ENABLED=true` 启动 `openpe-server`，重启 Windsurf
-后点 openPE 按钮，在 DevTools 看 `[openpe-fs-probe]` 日志。该探针只输出非
-敏感的 descriptor 元信息和 renderer 能否通过 Node `fs` 读到 0600
-descriptor 的状态；它还没改 token 传输方式。
+当前独立入口只接受以下 baseline：
+
+- Devin Desktop `1.110.1`
+- product commit `0d4bf12ed4a7597cb8ae9016fe8474468aad98a2`
+- Windows x64；其它系统、架构和 build 一律拒绝
+- renderer Origin `vscode-file://vscode-app`
+- descriptor base URL 必须是精确的 `http://127.0.0.1:<port>`；CSP 只加入该端口
+
+所有安装、恢复和 server 命令都应在 **Devin 外部的 Windows Terminal / PowerShell**
+执行，不要使用即将被关闭的 IDE 集成终端。磁盘 bundle 变更后必须完整冷启动 Devin；
+`Developer: Reload Window` 不会重启 Electron 主进程，也不会刷新主进程已缓存的
+integrity 表。
+
+#### 准备 payload 与 server
+
+在外部 PowerShell 进入仓库：
+
+```powershell
+cd "C:\path\to\openpe"
+git pull --ff-only origin main
+go build -o openpe-server.exe ./cmd/openpe-server
+cd extensions\openpe-windsurf-patch
+npm --prefix inject ci
+npm --prefix inject run check
+npm --prefix inject run build
+```
+
+在 `~/.config/openpe/.env` 配置 provider，并加入本页“系统要求”中的 stable token、
+lifecycle 和 Devin CORS。在另一个外部 PowerShell 窗口启动 server：
+
+```powershell
+cd "C:\path\to\openpe"
+$env:OPENPE_ENV_FILE = "$HOME\.config\openpe\.env"
+.\openpe-server.exe
+```
+
+该窗口应持续运行并显示监听 `127.0.0.1:18980`（或你的精确 loopback 端口）。
+
+#### 原厂 baseline 首次安装
+
+1. 完整退出 Devin Desktop，并从托盘退出 `WindsurfGate`；确认任务管理器中没有
+   `Devin.exe`、bundled `devin.exe`、`WindsurfGate.exe` 或 `inno_updater.exe`。
+2. 在另一个外部 PowerShell 回到 patch 子项目并执行：
+
+   ```powershell
+   cd "C:\path\to\openpe\extensions\openpe-windsurf-patch"
+   python -m installer.multi_bundle_patch `
+     --app-dir "C:\path\to\IDE" `
+     --payload "inject\dist\inject.js"
+   ```
+
+3. 保存命令在首个 live write 前输出的 transaction ID。它是该次安装唯一的恢复凭据。
+4. 从正常快捷方式冷启动 Devin；不要用 Reload Window 代替冷启动。
+
+#### 从已有 exact patch 升级
+
+独立入口不支持原地 refresh。直接再次执行 install 会因 marker/trusted baseline 门禁
+而失败；必须先恢复旧 transaction，再安装新 payload：
+
+```powershell
+cd "C:\path\to\openpe\extensions\openpe-windsurf-patch"
+
+python -m installer.multi_bundle_patch `
+  --app-dir "C:\path\to\IDE" `
+  --restore "<old-transaction-id>"
+
+python -m installer.multi_bundle_patch `
+  --app-dir "C:\path\to\IDE" `
+  --payload "inject\dist\inject.js"
+```
+
+两个命令之间不要启动 Devin。保存第二个命令输出的新 transaction ID，然后从正常
+快捷方式冷启动。
+
+#### 预期验收结果
+
+- 冷启动后不再出现“Devin 安装似乎损坏”提示；该提示若仍出现，应立即 restore，
+  不要继续扩大测试范围。
+- 无附件、存在截图附件时，每个 prompt editor 都只出现一个 openPE 按钮；当前实现
+  会按唯一 editor 分组，只选择最右侧可见的 Devin action 作为 anchor。
+- 点击按钮后本地 authenticated `POST /v1/prompt-enhance` 返回成功，且仅在原 editor
+  文本未变化时自动回填；请求期间用户继续编辑时只复制结果，不覆盖新输入。
+- Devin 路径固定 `history=none`、`cwd=""`，不会混入 legacy Windsurf trajectory，
+  也不会触发 Openace 代码检索。
+
+2026-07-15 首轮实机已验证按钮、HTTP 200 和 editor 回填；随后发现运行中 patch 会让
+主进程使用旧 integrity 表，并在截图附件场景产生重复 anchor。当前源码已改为冷安装
+流程和“每 editor 仅最右 action”选择，仍需按本节完成冷恢复/重装后的场景矩阵复验。
+
+恢复前同样要完整退出 Devin/WindsurfGate；只允许恢复该 install 输出的 exact
+transaction。IDE 更新后不得把旧 transaction 恢复到新 build；跨 build、路径、
+manifest、live SHA 或 backup SHA 任一不一致都会 fail closed。Legacy timestamp
+backup 只作为审计资产，不参与该恢复路径。
 
 ### 消费层 token 预算 (`--max-context-tokens` / `OPENPE_MAX_CONTEXT_TOKENS`)
 
-按钮路径和 Codex / Claude hook 路径都共享 openPE server 端的同一个 prompt
-增强管线，所以也共享同一个**消费层** token 预算旋钮——配置后
-server 会按 ~4 字符/token 近似把 retrieval / history section 收缩到预算
-之内，必需 section 永远保留。
+Codex / Claude / Windsurf hook 会把 `OPENPE_MAX_CONTEXT_TOKENS` 写入每次
+`enhancer.Request.Options`。按钮虽然共享同一个 `openpe-server` 增强管线，但预算
+是请求字段，不是 server 自动套用的全局默认。
 
-按钮路径用安装时快照模型（不是运行时读取），所以预算在 `install` 时被
-embed 到 bundle bootstrap：
-
-```bash
-# 显式 CLI
-python3 -m installer install --i-accept-experimental-risk --max-context-tokens 8000
-
-# 或者用与 hook 路径一致的环境变量
-OPENPE_MAX_CONTEXT_TOKENS=8000 \
-python3 -m installer install --i-accept-experimental-risk
-
-# 显式禁用（即使 env=非零）：传 0
-python3 -m installer install --i-accept-experimental-risk --max-context-tokens 0
-```
-
-解析优先级：CLI flag 优先于环境变量；都未设 → 不在 wire 上发送
-`options.max_context_tokens` 字段（server 按默认行为，不收缩）；非法 /
-负值 → stderr warning 并视作未设。`install --dry-run` 会回显已解析的预算
-来源（CLI / env / 缺省）。
-
-修改预算需要重跑 `install` 让 bundle bootstrap 重新快照；运行时无法在
-不重装的情况下修改。
+当前 exact-build Devin 入口没有 `--max-context-tokens` 参数，也不会从 dotenv
+快照该字段，因此按钮请求不发送 `options.max_context_tokens`。仅在 server 进程中
+设置同名变量不会给按钮请求启用预算；后续将该选项接入多 renderer transaction 并
+完成 wire 测试前，不能宣称按钮与 hook 共享该配置。
 
 注意区分**消费层** vs **采集层**：
 
@@ -243,7 +263,7 @@ python3 -m installer install --i-accept-experimental-risk --max-context-tokens 0
 
 ### Openace 代码检索上下文（按钮路径当前需要 workspace CWD）
 
-按钮路径走的是本地 `openpe-server` 的 `POST /v1/prompt-enhance`，与
+保留的按钮 wire 设计走本地 `openpe-server` 的 `POST /v1/prompt-enhance`，与
 CLI / hook 入口共享同一套 `enhancer.Service` 构造逻辑。Openace context
 provider 在处理请求的进程启动或构造 service 时注入，所以按钮路径无需
 patch installer 侧再配置任何 Openace 相关变量；但是否真的发起代码检索，
@@ -255,7 +275,7 @@ patch installer 侧再配置任何 Openace 相关变量；但是否真的发起�
 # 启动 openpe-server 时显式启用 Openace（installer 不感知此变量）
 OPENPE_SERVER_TOKEN="<stable-64-hex-token>" \
 OPENPE_SERVER_LIFECYCLE_ENABLED=true \
-OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf \
+OPENPE_SERVER_CORS_ORIGINS=vscode-file://vscode-app \
 OPENPE_OPENACE_ENABLED=true \
 OPENPE_OPENACE_ADDR=127.0.0.1:8765 \
 openpe-server
@@ -275,20 +295,42 @@ workspace 路径，因此发给 server 的 `cwd` 为空；这意味着即使
 
 ## 测试
 
+本地测试资产按仓库治理规则位于 ignored `tests/`：
+
 ```bash
+python3 -m compileall installer
 python3 -m unittest discover -v tests
+cd inject
+npm ci
+npm run check
+npm run build
 ```
 
-不需要任何第三方 Python 依赖。
+Python installer 不需要第三方运行时依赖。发布 wheel 必须使用单一构建入口，它会
+重建 payload 并检查 wheel 中的 payload 和两个 console entry：
+
+```bash
+python3 scripts/build_package.py
+```
+
+Python package distribution 在兼容期仍名为 `openpe-windsurf-patch`；canonical
+console command 已是 `openpe-ide-patch`，旧 data namespace 保留供已安装版本升级。
 
 ## 架构
 
-简要：installer 用 Python 复刻主 openPE 仓库 `internal/integration/`
-包定义的 `Injector` 和 `BundlePatcher` 契约；bundle patch、checksum
-更新、回滚、codesign、descriptor handshake、inject payload 查找都收敛在
-`installer/` 下。未来如需支持其它 IDE（Cursor、VS Code Composer），应
-新增同级子项目，而不是把 IDE 私有 DOM、安装路径或签名规则塞回主 Go
-core。
+Installer 复用主仓 `internal/integration/` 的 marker/atomic-write 契约，但宿主
+差异只放在 Python/TypeScript profile：
+
+- `installer/profiles.py`：manifest identity、build/runtime policy、CORS、wire、process。
+- `installer/paths.py`：位置探测、install identity、transaction namespace。
+- `installer/backup_transaction.py`：canonical 成对 backup、manifest、refresh、restore。
+- `installer/multi_bundle_patch.py`：exact-build Devin 四 artifact transaction、条件写入与恢复。
+- `installer/cli.py`：canonical `openpe-ide-patch`。
+- `installer/compat_windsurf.py`：强制 legacy Windsurf profile 的兼容 shim。
+- `inject/src/auth.ts`：bootstrap profile fail-closed。
+
+Devin native hook、history、dedup 与 `additionalContext` 继续由主 Go adapter
+负责，不复制到 patch installer。
 
 ## 许可证
 
