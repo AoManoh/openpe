@@ -17,6 +17,7 @@ Highlights:
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import tempfile
@@ -51,17 +52,30 @@ def default_marker() -> Marker:
 
 
 def has_marker(bundle_path: Path, marker: Optional[Marker] = None) -> bool:
-    """Return True when both delimiters of ``marker`` are present in the bundle."""
+    """Return True for one complete marker region and reject malformed markers."""
     marker = marker or default_marker()
     marker.validate()
     data = _read_bytes(bundle_path)
-    return marker.begin.encode("utf-8") in data and marker.end.encode("utf-8") in data
+    begin = marker.begin.encode("utf-8")
+    end = marker.end.encode("utf-8")
+    begin_count = data.count(begin)
+    end_count = data.count(end)
+    if begin_count == 0 and end_count == 0:
+        return False
+    if begin_count != 1 or end_count != 1:
+        raise BundleError(
+            f"marker: expected one begin/end pair, got {begin_count}/{end_count}"
+        )
+    if data.find(begin) > data.find(end):
+        raise BundleError("marker: end appears before begin")
+    return True
 
 
 def inject(
     bundle_path: Path,
     payload: str,
     marker: Optional[Marker] = None,
+    expected_sha256: str = "",
 ) -> None:
     """Write ``payload`` into ``bundle_path`` wrapped by ``marker``.
 
@@ -74,6 +88,8 @@ def inject(
     marker = marker or default_marker()
     marker.validate()
     data = _read_bytes(bundle_path)
+    if expected_sha256 and hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise BundleError("inject: live bundle changed before compare-and-swap")
     block = _build_block(payload, marker)
     existing = _locate_existing_marker(data, marker)
     if existing is not None:
@@ -156,9 +172,69 @@ def _locate_existing_marker(data: bytes, marker: Marker) -> Optional[Tuple[int, 
     return (begin_idx, end)
 
 
+def _flush_directory(path: Path) -> None:
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        )
+        create_file.restype = ctypes.c_void_p
+        flush_file_buffers = kernel32.FlushFileBuffers
+        flush_file_buffers.argtypes = (ctypes.c_void_p,)
+        flush_file_buffers.restype = ctypes.c_int
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (ctypes.c_void_p,)
+        close_handle.restype = ctypes.c_int
+        handle = create_file(
+            str(path),
+            0x40000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), f"cannot open directory for flush: {path}")
+        try:
+            if not flush_file_buffers(handle):
+                raise OSError(
+                    ctypes.get_last_error(),
+                    f"cannot flush directory metadata: {path}",
+                )
+        finally:
+            close_handle(handle)
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _durable_mkdir(path: Path, mode: int = 0o700) -> None:
+    if path.exists():
+        if not path.is_dir():
+            raise OSError(f"directory path is not a directory: {path}")
+        return
+    parent = path.parent
+    _durable_mkdir(parent, mode)
+    path.mkdir(mode=mode)
+    _flush_directory(parent)
+    _flush_directory(path)
+
+
 def _atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
     parent = path.parent
-    parent.mkdir(parents=True, exist_ok=True)
+    _durable_mkdir(parent)
     tmp = tempfile.NamedTemporaryFile(
         delete=False,
         dir=parent,
@@ -175,6 +251,7 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
             tmp.close()
         os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
+        _flush_directory(parent)
     except Exception:
         try:
             os.unlink(tmp_name)

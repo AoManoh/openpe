@@ -1,23 +1,19 @@
-"""Command-line entry point for the openpe-windsurf-patch installer.
+"""Canonical CLI orchestration for the profile-gated IDE patch installer.
 
-Implements the four subcommands (install / uninstall / status / doctor)
-on top of the Phase 2-3 modules:
-
-* :mod:`installer.paths` — Windsurf install discovery
-* :mod:`installer.handshake` — local openpe-server descriptor + /v1/info
-* :mod:`installer.bundle` — marker injection + backup / restore
-* :mod:`installer.checksum` — product.json integrity checksum update
-* :mod:`installer.codesign` — macOS ad-hoc re-signing
-
-The EULA / user-assumes-risk disclaimer is enforced at the CLI boundary;
-no mutating operation runs without an explicit user acknowledgement.
+The four subcommands compose manifest-based host discovery, local server
+handshake, marker injection, checksum verification, transaction recovery,
+and platform process/signing gates. Mutation also requires an explicitly
+enabled and verified host profile; current profiles remain read-only.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
+import shutil
 import site
 import sys
 import sysconfig
@@ -26,51 +22,69 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import __version__
-from .bundle import (
-    BundleError,
-    backup as backup_bundle,
-    has_marker,
-    inject as inject_bundle,
-    restore as restore_bundle,
+from .backup_transaction import (
+    BackupTransaction,
+    TransactionError,
+    create_transaction,
+    find_restoring_transaction,
+    load_transaction,
+    recover_restoring_transaction,
+    restore_transaction,
+    validate_transaction_for_restore,
 )
+from .bundle import BundleError, has_marker, inject as inject_bundle
 from .checksum import (
     ChecksumError,
     DEFAULT_BUNDLE_RELPATH,
-    backup_product_json,
     patch_product_json,
-    restore_product_json,
+    verify_bundle_checksum,
+    verify_trusted_baseline,
     vscode_checksum,
 )
-from .codesign import CodesignError, codesign_app, is_macos, remove_quarantine_hint
+from .codesign import CodesignError, codesign_app, is_macos
 from .handshake import (
     DescriptorError,
     HandshakeError,
     LocalServerDescriptor,
     default_descriptor_path,
     read_descriptor,
-    validate_windsurf_cors,
+    validate_profile_cors,
     verify_server,
 )
-from .paths import WindsurfPaths, resolve_paths
+from .locking import LockError, mutation_lock
+from .patch_operation import (
+    OperationError,
+    PatchOperation,
+    apply_operation,
+    complete_operation,
+    finalize_operation_transaction,
+    find_active_operation,
+    prepare_operation,
+    rollback_operation,
+)
+from .paths import IDEPaths, PathResolutionError, resolve_paths
+from .processes import ProcessError, inspect_host_processes, require_host_stopped
+from .profiles import DEVIN_PROFILE, ProfileError, SupportedBuild, require_profile
+from .runtime_probe import ProbeError, build_probe_payload, validate_probe_endpoint
 
 EULA_DISCLAIMER = """\
 ============================================================================
-  ⚠️  EXPERIMENTAL — USER ASSUMES ALL RISK
+  EXPERIMENTAL — USER ASSUMES ALL RISK
 ============================================================================
 
-This installer patches the Windsurf IDE Electron bundle in place. By
+This installer patches a supported IDE Electron bundle in place. By
 proceeding you acknowledge that you have read the README and accept:
 
-  • Possible EULA violation — Windsurf / Codeium may suspend your account
-    or refuse support for a patched install.
-  • Code-signing invalidation on macOS (Gatekeeper may refuse to launch).
-  • Modified checksum baseline for the patched file only.
-  • Upgrade fragility — every Windsurf update overwrites the patch.
-  • No warranty whatsoever.
+  - Possible EULA or support-policy impact.
+  - Code-signing invalidation on platforms that sign application bundles.
+  - A modified checksum baseline for the patched file.
+  - Upgrade fragility because IDE updates overwrite the patch.
+  - No warranty whatsoever.
 
-Default openPE path that DOES NOT carry these risks:
+Default openPE paths that do not modify the IDE bundle:
 
-  • openpe windsurf hook install         (terminal `pe ...` keyword)
+  - openpe devin hook install
+  - openpe windsurf hook install
 
 If you accept the risk, re-run with --i-accept-experimental-risk.
 
@@ -88,17 +102,37 @@ EXIT_INJECT_PAYLOAD_MISSING = 69
 EXIT_BUNDLE_ERROR = 70
 EXIT_NO_BACKUP = 71
 EXIT_CODESIGN_ERROR = 72
+EXIT_PROFILE_ERROR = 73
+EXIT_TRANSACTION_ERROR = 74
+EXIT_PROCESS_RUNNING = 75
+EXIT_UNSUPPORTED_PROFILE = 76
 
 
 def _print_disclaimer() -> None:
     sys.stderr.write(EULA_DISCLAIMER)
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+def _add_host_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--host",
+        choices=("auto", "devin", "windsurf"),
+        default="auto",
+        help="select a detected host profile; --app-dir never overrides product identity",
+    )
+
+
+def _build_parser(prog: str = "openpe-ide-patch") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="openpe-windsurf-patch",
+        prog=prog,
         description=(
-            "Experimental Windsurf IDE bundle patcher for openPE. "
+            "Experimental IDE bundle patcher for openPE. "
             "See README for the full disclaimer."
         ),
     )
@@ -109,12 +143,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser(
         "install",
-        help="patch the Windsurf bundle after explicit experimental-risk acceptance",
+        help="patch a supported IDE bundle after explicit experimental-risk acceptance",
     )
+    _add_host_option(install)
     install.add_argument(
         "--app-dir",
         default=None,
-        help="override the Windsurf application directory (auto-detected by default)",
+        help="override the IDE application directory (auto-detected by default)",
     )
     install.add_argument(
         "--dry-run",
@@ -142,7 +177,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     install.add_argument(
         "--max-context-tokens",
-        type=int,
+        type=_non_negative_int,
         default=None,
         metavar="N",
         help=(
@@ -161,6 +196,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     install.add_argument(
+        "--probe-endpoint",
+        default=None,
+        help=(
+            "install a probe-only payload that sends structural runtime metadata "
+            "to a tokenized http://127.0.0.1 endpoint; bypasses no build/process/transaction gate"
+        ),
+    )
+    install.add_argument(
         "--i-accept-experimental-risk",
         action="store_true",
         help="acknowledge the EULA / user-assumes-risk disclaimer non-interactively",
@@ -168,32 +211,35 @@ def _build_parser() -> argparse.ArgumentParser:
 
     uninstall = subparsers.add_parser(
         "uninstall",
-        help="restore the Windsurf bundle from the most recent backup",
+        help="restore an injected IDE bundle from its exact backup transaction",
     )
+    _add_host_option(uninstall)
     uninstall.add_argument(
         "--app-dir",
         default=None,
-        help="override the Windsurf application directory",
+        help="override the IDE application directory",
     )
 
     status = subparsers.add_parser(
         "status",
-        help="report whether the bundle is currently patched + backup state",
+        help="report product, profile, injection, transaction, and server state",
     )
+    _add_host_option(status)
     status.add_argument(
         "--app-dir",
         default=None,
-        help="override the Windsurf application directory",
+        help="override the IDE application directory",
     )
 
     doctor = subparsers.add_parser(
         "doctor",
-        help="environment self-check (Python version, IDE detected, server descriptor)",
+        help="environment self-check (Python, IDE profile, process, and server)",
     )
+    _add_host_option(doctor)
     doctor.add_argument(
         "--app-dir",
         default=None,
-        help="override the Windsurf application directory",
+        help="override the IDE application directory",
     )
 
     return parser
@@ -268,13 +314,13 @@ def _resolve_max_context_tokens(cli_value: Optional[int]) -> Optional[int]:
         parsed = int(raw)
     except ValueError:
         sys.stderr.write(
-            f"openpe-windsurf-patch: ignoring invalid OPENPE_MAX_CONTEXT_TOKENS={raw!r} "
+            f"openpe-ide-patch: ignoring invalid OPENPE_MAX_CONTEXT_TOKENS={raw!r} "
             "(must be a non-negative integer); falling back to no budget.\n"
         )
         return None
     if parsed < 0:
         sys.stderr.write(
-            f"openpe-windsurf-patch: ignoring negative OPENPE_MAX_CONTEXT_TOKENS={parsed} "
+            f"openpe-ide-patch: ignoring negative OPENPE_MAX_CONTEXT_TOKENS={parsed} "
             "(must be >= 0); falling back to no budget.\n"
         )
         return None
@@ -287,6 +333,13 @@ def _build_payload_prelude(
     fs_probe: bool = False,
     debug: bool = False,
     max_context_tokens: Optional[int] = None,
+    profile_id: str = "",
+    product_commit: str = "",
+    transaction_id: str = "",
+    client: str = "",
+    mode: str = "",
+    history_source: str = "none",
+    legacy_live_patch: bool = False,
 ) -> str:
     """Render the ``globalThis.__openpe`` bootstrap injected before inject.js.
 
@@ -316,6 +369,12 @@ def _build_payload_prelude(
         "baseUrl": descriptor.base_url,
         "token": descriptor.token,
         "version": descriptor.version or "unknown",
+        "hostProfileId": profile_id,
+        "productCommit": product_commit,
+        "transactionId": transaction_id,
+        "client": client,
+        "mode": mode,
+        "historySource": history_source,
     }
     if descriptor_path is not None:
         config["descriptorPath"] = str(descriptor_path)
@@ -325,10 +384,60 @@ def _build_payload_prelude(
         config["debug"] = True
     if max_context_tokens is not None and max_context_tokens > 0:
         config["maxContextTokens"] = int(max_context_tokens)
+    if legacy_live_patch:
+        config["legacyLivePatch"] = True
     return (
         "/* === OPENPE-BOOTSTRAP === */\n"
         "/* rewritten by installer at install time; do not edit by hand */\n"
         f"globalThis.__openpe = {json.dumps(config, ensure_ascii=False)};\n"
+    )
+
+
+def _build_probe_prelude(
+    profile_id: str,
+    product_commit: str,
+    transaction_id: str,
+    client: str,
+    mode: str,
+    history_source: str,
+) -> str:
+    config = {
+        "hostProfileId": profile_id,
+        "productCommit": product_commit,
+        "transactionId": transaction_id,
+        "client": client,
+        "mode": mode,
+        "historySource": history_source,
+        "probeOnly": True,
+    }
+    return (
+        "/* === OPENPE-BOOTSTRAP === */\n"
+        f"globalThis.__openpe = {json.dumps(config, ensure_ascii=False)};\n"
+    )
+
+
+def _is_strict_probe_config(config: Optional[Dict[str, Any]]) -> bool:
+    if config is None or config.get("probeOnly") is not True:
+        return False
+    return set(config) == {
+        "hostProfileId",
+        "productCommit",
+        "transactionId",
+        "client",
+        "mode",
+        "historySource",
+        "probeOnly",
+    }
+
+
+def _is_legacy_live_config(config: Optional[Dict[str, Any]]) -> bool:
+    return (
+        config is not None
+        and config.get("legacyLivePatch") is True
+        and config.get("probeOnly") is not True
+        and config.get("hostProfileId") == DEVIN_PROFILE.profile_id
+        and config.get("client") == DEVIN_PROFILE.client
+        and config.get("mode") == DEVIN_PROFILE.mode
     )
 
 
@@ -359,19 +468,35 @@ def _read_embedded_openpe_config(bundle_file: Path) -> Optional[Dict[str, Any]]:
 
 
 def _button_config_status(
-    paths: Optional[WindsurfPaths],
+    paths: Optional[IDEPaths],
     descriptor: Optional[LocalServerDescriptor],
 ) -> str:
     if paths is None or not paths.exists:
-        return "not checked (Windsurf install not detected)"
+        return "not checked (supported-layout IDE install not detected)"
     config = _read_embedded_openpe_config(paths.bundle_file)
     if config is None:
         return "not embedded (bundle is unpatched or missing OPENPE-BOOTSTRAP)"
+    if _is_strict_probe_config(config):
+        return "probe-only runtime instrumentation; no openPE server credentials embedded"
+    if config.get("probeOnly") is True:
+        return "invalid mixed probe/regular bootstrap"
     base_url = str(config.get("baseUrl", "")).strip()
     token = str(config.get("token", "")).strip()
-    if descriptor is None:
-        return "embedded, but current server descriptor is unavailable; cannot verify freshness"
     mismatches = []
+    if paths.profile is not None:
+        expected_profile = {
+            "hostProfileId": paths.profile.profile_id,
+            "client": paths.profile.client,
+            "mode": paths.profile.mode,
+            "historySource": paths.profile.history_source,
+        }
+        for key, expected in expected_profile.items():
+            if config.get(key) != expected:
+                mismatches.append(f"{key} mismatch")
+    if descriptor is None:
+        if mismatches:
+            return "invalid (" + ", ".join(mismatches) + ")"
+        return "embedded, but current server descriptor is unavailable; cannot verify freshness"
     if base_url != descriptor.base_url:
         mismatches.append("baseUrl mismatch")
     if token != descriptor.token:
@@ -397,23 +522,70 @@ def _find_latest_backup(backup_dir: Path, bundle_name: str) -> Optional[Path]:
     return snapshots[0] if snapshots else None
 
 
-def _resolve_or_explain(override: Optional[str]) -> Optional[WindsurfPaths]:
-    paths = resolve_paths(override=override)
+def _resolve_or_explain(
+    override: Optional[str],
+    requested_host: str = "auto",
+    require_mutation: bool = False,
+) -> Optional[IDEPaths]:
+    try:
+        paths = resolve_paths(override=override)
+    except (PathResolutionError, ProfileError) as exc:
+        sys.stderr.write(f"openpe-ide-patch: cannot resolve IDE: {exc}\n")
+        return None
     if paths is None:
         sys.stderr.write(
-            "openpe-windsurf-patch: could not locate a Windsurf install.\n"
-            "  • pass --app-dir /path/to/Windsurf(.app) to override path detection\n"
-            "  • or install Windsurf at the platform-default location\n"
+            "openpe-ide-patch: could not locate a supported-layout IDE install.\n"
+            "  - pass --app-dir /path/to/IDE to override path detection\n"
+            "  - or install the IDE at a platform-default location\n"
         )
         return None
     if not paths.exists:
         sys.stderr.write(
-            f"openpe-windsurf-patch: Windsurf install at {paths.app_root} is incomplete.\n"
+            f"openpe-ide-patch: IDE install at {paths.app_root} is incomplete.\n"
             f"  expected bundle:  {paths.bundle_file}\n"
             f"  expected product: {paths.product_file}\n"
         )
         return None
+    if paths.product is None:
+        sys.stderr.write("openpe-ide-patch: product identity is unavailable.\n")
+        return None
+    try:
+        profile = require_profile(paths.product, requested_host)
+    except ProfileError as exc:
+        sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+        return None
+    if require_mutation and not profile.allows_mutation(platform.system(), paths.product):
+        sys.stderr.write(
+            f"openpe-ide-patch: {profile.display_name} bundle mutation is not verified "
+            f"on {platform.system()}; use the native hook path instead.\n"
+        )
+        return None
     return paths
+
+
+def _refresh_mutation_preflight(
+    selected: IDEPaths,
+    requested_host: str,
+    probe_only: bool = False,
+    legacy_live_patch: bool = False,
+) -> IDEPaths:
+    current = resolve_paths(override=str(selected.app_root))
+    if current is None or not current.exists or current.product is None:
+        raise TransactionError("IDE layout changed during preflight")
+    profile = require_profile(current.product, requested_host)
+    if current.install_id != selected.install_id:
+        raise TransactionError("IDE install identity changed during preflight")
+    if current.profile != selected.profile or current.product != selected.product:
+        raise TransactionError("IDE product identity changed during preflight")
+    trusted_build = profile.supported_build(platform.system(), current.product)
+    if probe_only or legacy_live_patch:
+        if profile != DEVIN_PROFILE or trusted_build is None:
+            raise TransactionError("IDE build is not in the trusted Devin allowlist")
+    elif not profile.allows_mutation(platform.system(), current.product):
+        raise TransactionError("IDE build is not in the trusted mutation allowlist")
+    if not legacy_live_patch:
+        require_host_stopped(profile)
+    return current
 
 
 def _read_descriptor_or_explain() -> Optional[LocalServerDescriptor]:
@@ -421,7 +593,7 @@ def _read_descriptor_or_explain() -> Optional[LocalServerDescriptor]:
         descriptor = read_descriptor()
     except DescriptorError as exc:
         sys.stderr.write(
-            f"openpe-windsurf-patch: cannot read openpe-server descriptor: {exc}\n"
+            f"openpe-ide-patch: cannot read openpe-server descriptor: {exc}\n"
             "  start openpe-server with OPENPE_SERVER_LIFECYCLE_ENABLED=true,\n"
             f"  or set OPENPE_SERVER_DESCRIPTOR_FILE to override the default path\n"
             f"  ({default_descriptor_path()}).\n"
@@ -431,61 +603,268 @@ def _read_descriptor_or_explain() -> Optional[LocalServerDescriptor]:
 
 
 def _print_status(
-    paths: Optional[WindsurfPaths],
+    paths: Optional[IDEPaths],
     descriptor_outcome: str,
     button_config_outcome: str,
     marker_present: bool,
     backup_path: Optional[Path],
+    legacy_backup_path: Optional[Path],
+    transaction_error: Optional[str],
 ) -> None:
-    sys.stdout.write(f"openpe-windsurf-patch {__version__}\n")
+    sys.stdout.write(f"openpe-ide-patch {__version__}\n")
     if paths is None:
         sys.stdout.write("  ide:             not detected\n")
     else:
+        profile = paths.profile.profile_id if paths.profile is not None else "unsupported"
+        version = paths.product.version if paths.product is not None else "unknown"
+        commit = paths.product.commit if paths.product is not None else "unknown"
         sys.stdout.write(f"  ide root:        {paths.app_root}\n")
+        sys.stdout.write(f"  profile:         {profile}\n")
+        sys.stdout.write(f"  product build:   {version} ({commit})\n")
+        runtime_verified = (
+            paths.profile is not None
+            and paths.product is not None
+            and paths.profile.allows_mutation(platform.system(), paths.product)
+        )
+        sys.stdout.write(
+            f"  runtime verified: {'yes' if runtime_verified else 'no'}\n"
+        )
         sys.stdout.write(f"  bundle:          {paths.bundle_file}\n")
         sys.stdout.write(f"  product:         {paths.product_file}\n")
         sys.stdout.write(f"  injected:        {'yes' if marker_present else 'no'}\n")
         sys.stdout.write(
-            f"  backup present:  {'yes (' + backup_path.name + ')' if backup_path else 'no'}\n"
+            f"  transaction:     {'yes (' + backup_path.parent.name + ')' if backup_path else 'no'}\n"
         )
+        sys.stdout.write(
+            f"  legacy backup:   {'ignored (' + legacy_backup_path.name + ')' if legacy_backup_path else 'none'}\n"
+        )
+        if transaction_error:
+            sys.stdout.write(f"  transaction err: {transaction_error}\n")
     sys.stdout.write(f"  server descriptor: {descriptor_outcome}\n")
     sys.stdout.write(f"  button config:     {button_config_outcome}\n")
 
 
+def _bound_transaction(paths: IDEPaths) -> BackupTransaction:
+    config = _read_embedded_openpe_config(paths.bundle_file)
+    if config is None:
+        raise TransactionError("injected bundle has no readable openPE bootstrap")
+    transaction_id = str(config.get("transactionId", "")).strip()
+    product_commit = str(config.get("productCommit", "")).strip()
+    profile_id = str(config.get("hostProfileId", "")).strip()
+    if not transaction_id or not product_commit or not profile_id:
+        raise TransactionError(
+            "legacy injection has no transaction metadata; automatic mutation is refused"
+        )
+    transaction = load_transaction(paths, product_commit, transaction_id)
+    if transaction.manifest.profile_id != profile_id:
+        raise TransactionError("bundle profile does not match transaction profile")
+    if _is_strict_probe_config(config) != (
+        transaction.manifest.payload_kind == "probe"
+    ):
+        raise TransactionError("bundle payload kind does not match transaction provenance")
+    validate_transaction_for_restore(transaction, paths)
+    return transaction
+
+
+def _trusted_build_id(build: SupportedBuild) -> str:
+    value = "\n".join(
+        (
+            build.system,
+            build.version,
+            build.commit,
+            build.bundle_sha256,
+            build.product_sha256,
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
+
+
+def _authorize_recovery(transaction: BackupTransaction, paths: IDEPaths) -> None:
+    if paths.profile is None or paths.product is None:
+        raise TransactionError("cannot authorize recovery for unsupported product")
+    manifest = transaction.manifest
+    build = paths.profile.supported_build(platform.system(), paths.product)
+    if manifest.payload_kind == "regular":
+        if paths.profile.allows_mutation(platform.system(), paths.product):
+            return
+        if build is None:
+            raise TransactionError("regular mutation recovery is disabled for this profile")
+        trusted_regular = (
+            manifest.trusted_build_id == _trusted_build_id(build)
+            and manifest.trusted_bundle_original_sha256 == build.bundle_sha256
+            and manifest.trusted_product_original_sha256 == build.product_sha256
+            and manifest.bundle_original_sha256 == build.bundle_sha256
+            and manifest.product_original_sha256 == build.product_sha256
+        )
+        if not trusted_regular:
+            raise TransactionError("regular transaction lacks exact trusted provenance")
+        return
+    if paths.profile != DEVIN_PROFILE or build is None:
+        raise TransactionError("probe recovery build is not trusted")
+    expected = (
+        (manifest.trusted_build_id, _trusted_build_id(build), "trusted build id"),
+        (
+            manifest.trusted_bundle_original_sha256,
+            build.bundle_sha256,
+            "trusted bundle original",
+        ),
+        (
+            manifest.trusted_product_original_sha256,
+            build.product_sha256,
+            "trusted product original",
+        ),
+        (
+            manifest.bundle_original_sha256,
+            build.bundle_sha256,
+            "transaction bundle original",
+        ),
+        (
+            manifest.product_original_sha256,
+            build.product_sha256,
+            "transaction product original",
+        ),
+    )
+    for current, trusted, label in expected:
+        if current != trusted:
+            raise TransactionError(f"probe recovery {label} mismatch")
+
+
+def _recover_active_patch_operation(paths: IDEPaths) -> bool:
+    operation = find_active_operation(paths)
+    if operation is None:
+        return False
+    if paths.profile is None:
+        raise OperationError("cannot recover operation for unsupported profile")
+    _authorize_recovery(operation.transaction, paths)
+    require_host_stopped(paths.profile)
+    recovered = rollback_operation(operation, paths)
+    sys.stderr.write(
+        f"openpe-ide-patch: recovered interrupted {recovered.manifest.kind} "
+        f"operation {recovered.manifest.operation_id}.\n"
+    )
+    return True
+
+
 def _cmd_install(args: argparse.Namespace) -> int:
+    paths = _resolve_or_explain(
+        args.app_dir,
+        requested_host=args.host,
+        require_mutation=False,
+    )
+    if paths is None:
+        return EXIT_PROFILE_ERROR
+    assert paths.profile is not None
+    assert paths.product is not None
+    probe_endpoint: Optional[str] = None
+    if args.probe_endpoint is not None:
+        try:
+            probe_endpoint = validate_probe_endpoint(args.probe_endpoint)
+        except ProbeError as exc:
+            sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+            return EXIT_USAGE
+    probe_only = probe_endpoint is not None
+    legacy_live_patch = False
+    if probe_only and legacy_live_patch:
+        sys.stderr.write(
+            "openpe-ide-patch: --probe-endpoint and --legacy-live-patch are mutually exclusive\n"
+        )
+        return EXIT_USAGE
+    try:
+        active_operation = find_active_operation(paths)
+        restoring = find_restoring_transaction(paths)
+        if active_operation is not None and restoring is not None:
+            raise TransactionError("patch and restore recovery are both pending")
+        read_only_recovery = args.dry_run or not args.i_accept_experimental_risk
+        if active_operation is not None and read_only_recovery:
+            sys.stderr.write(
+                f"openpe-ide-patch: interrupted {active_operation.manifest.kind} "
+                f"operation {active_operation.manifest.operation_id} requires recovery; "
+                "this command remained read-only.\n"
+            )
+            return EXIT_TRANSACTION_ERROR
+        if restoring is not None and read_only_recovery:
+            sys.stderr.write(
+                f"openpe-ide-patch: interrupted restore transaction "
+                f"{restoring.manifest.transaction_id} requires recovery; "
+                "this command remained read-only.\n"
+            )
+            return EXIT_TRANSACTION_ERROR
+        if active_operation is not None and _recover_active_patch_operation(paths):
+            sys.stderr.write("  interrupted operation rolled back; rerun install.\n")
+            return EXIT_OK
+        if restoring is not None:
+            _authorize_recovery(restoring, paths)
+            require_host_stopped(paths.profile)
+            recover_restoring_transaction(restoring, paths)
+            sys.stderr.write("  interrupted restore completed; rerun install.\n")
+            return EXIT_OK
+    except ProcessError as exc:
+        sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+        return EXIT_PROCESS_RUNNING
+    except (OperationError, TransactionError) as exc:
+        sys.stderr.write(f"openpe-ide-patch: operation recovery refused: {exc}\n")
+        return EXIT_TRANSACTION_ERROR
     if not args.i_accept_experimental_risk:
         _print_disclaimer()
         return EXIT_DISCLAIMER_NOT_ACCEPTED
-    paths = _resolve_or_explain(args.app_dir)
-    if paths is None:
-        return EXIT_PATH_NOT_FOUND
-    descriptor = _read_descriptor_or_explain()
-    if descriptor is None:
-        return EXIT_DESCRIPTOR_ERROR
+    trusted_build = paths.profile.supported_build(platform.system(), paths.product)
+    if probe_only or legacy_live_patch:
+        if paths.profile != DEVIN_PROFILE or trusted_build is None:
+            sys.stderr.write(
+                "openpe-ide-patch: experimental Devin install requires the exact trusted "
+                "Windows Devin build.\n"
+            )
+            return EXIT_UNSUPPORTED_PROFILE
+    elif not paths.profile.allows_mutation(platform.system(), paths.product):
+        sys.stderr.write(
+            f"openpe-ide-patch: {paths.profile.display_name} bundle mutation is not verified "
+            f"on {platform.system()}; use the native hook path instead.\n"
+        )
+        return EXIT_UNSUPPORTED_PROFILE
+    if not args.dry_run and not legacy_live_patch:
+        try:
+            require_host_stopped(paths.profile)
+        except ProcessError as exc:
+            sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+            return EXIT_PROCESS_RUNNING
+    descriptor: Optional[LocalServerDescriptor] = None
     descriptor_path = default_descriptor_path()
-    try:
-        info = verify_server(descriptor)
-        validate_windsurf_cors(info)
-    except HandshakeError as exc:
-        sys.stderr.write(
-            f"openpe-windsurf-patch: cannot reach openpe-server: {exc}\n"
-            "  is openpe-server actually running, does the descriptor's bearer token match,\n"
-            "  and did you start it with OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf?\n"
-        )
-        return EXIT_HANDSHAKE_ERROR
-    payload_path = _load_inject_payload()
-    if payload_path is None:
-        candidate_lines = "\n".join(
-            f"  - {candidate}" for candidate in _inject_payload_candidates()
-        )
-        sys.stderr.write(
-            "openpe-windsurf-patch: inject payload missing.\n"
-            "  searched:\n"
-            f"{candidate_lines}\n"
-            "  source checkout: run `npm install && npm run build` inside inject/.\n"
-            "  packaged install: rebuild/reinstall the wheel with inject/dist/inject.js included.\n"
-        )
-        return EXIT_INJECT_PAYLOAD_MISSING
+    payload_path: Optional[Path] = None
+    if probe_only:
+        assert probe_endpoint is not None
+        payload_text = build_probe_payload(probe_endpoint)
+    else:
+        descriptor = _read_descriptor_or_explain()
+        if descriptor is None:
+            return EXIT_DESCRIPTOR_ERROR
+        try:
+            info = verify_server(descriptor)
+            validate_profile_cors(
+                info,
+                paths.profile.cors_origins,
+                paths.profile.display_name,
+            )
+        except HandshakeError as exc:
+            sys.stderr.write(f"openpe-ide-patch: cannot use openpe-server: {exc}\n")
+            return EXIT_HANDSHAKE_ERROR
+        payload_path = _load_inject_payload()
+        if payload_path is None:
+            candidate_lines = "\n".join(
+                f"  - {candidate}" for candidate in _inject_payload_candidates()
+            )
+            sys.stderr.write(
+                "openpe-ide-patch: inject payload missing.\n"
+                "  searched:\n"
+                f"{candidate_lines}\n"
+                "  source checkout: run `npm install && npm run build` inside inject/.\n"
+                "  packaged install: rebuild/reinstall the wheel with inject/dist/inject.js included.\n"
+            )
+            return EXIT_INJECT_PAYLOAD_MISSING
+        try:
+            payload_text = payload_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            sys.stderr.write(f"openpe-ide-patch: cannot read inject payload: {exc}\n")
+            return EXIT_INJECT_PAYLOAD_MISSING
     max_context_tokens = _resolve_max_context_tokens(args.max_context_tokens)
     if args.dry_run:
         if max_context_tokens is None:
@@ -500,172 +879,313 @@ def _cmd_install(args: argparse.Namespace) -> int:
             )
             budget_label = f"{max_context_tokens} (from {source})"
         sys.stdout.write(
-            f"DRY RUN — would patch:\n"
+            f"DRY RUN - would patch:\n"
             f"  bundle:  {paths.bundle_file}\n"
             f"  product: {paths.product_file}\n"
-            f"  backup → {paths.backup_dir}\n"
-            f"  payload: {payload_path} ({payload_path.stat().st_size} bytes)\n"
+            f"  backup:  {paths.backup_dir}\n"
+            f"  payload: {'probe-only structural collector' if probe_only else str(payload_path)} "
+            f"({len(payload_text.encode('utf-8'))} bytes)\n"
             f"  fs probe: {'yes' if args.fs_probe else 'no'}\n"
             f"  debug:    {'yes' if args.debug else 'no'}\n"
             f"  max ctx tokens: {budget_label}\n"
             f"  codesign: {'yes (macOS)' if is_macos() else 'no (non-macOS)'}\n"
         )
         return EXIT_OK
-    # Idempotency guard: when the bundle already carries the marker
-    # (e.g. the user re-runs install to refresh the payload), skip the
-    # backup step so we never overwrite the truly-original snapshot
-    # with a patched copy. Without this, uninstall would restore the
-    # patched bundle and effectively become a no-op.
+    try:
+        paths = _refresh_mutation_preflight(
+            paths,
+            args.host,
+            probe_only=probe_only,
+            legacy_live_patch=legacy_live_patch,
+        )
+    except (OSError, PathResolutionError, ProfileError, ProcessError, TransactionError) as exc:
+        sys.stderr.write(f"openpe-ide-patch: final mutation preflight failed: {exc}\n")
+        return EXIT_TRANSACTION_ERROR
+    assert paths.profile is not None
+    assert paths.product is not None
     try:
         already_patched = has_marker(paths.bundle_file)
-    except BundleError:
-        already_patched = False
-    rollback_tmp: Optional[tempfile.TemporaryDirectory] = None
-    rollback_bundle: Optional[Path] = None
-    rollback_product: Optional[Path] = None
+    except BundleError as exc:
+        sys.stderr.write(f"openpe-ide-patch: cannot inspect bundle marker: {exc}\n")
+        return EXIT_BUNDLE_ERROR
     try:
-        rollback_tmp = tempfile.TemporaryDirectory(prefix="openpe-windsurf-patch-rollback-")
-        rollback_dir = Path(rollback_tmp.name)
-        rollback_bundle = backup_bundle(paths.bundle_file, rollback_dir)
-        rollback_product = backup_product_json(paths.product_file, rollback_dir)
         if already_patched:
-            existing_bundle_backup = _find_latest_backup(paths.backup_dir, paths.bundle_file.name)
-            existing_product_backup = _find_latest_backup(paths.backup_dir, paths.product_file.name)
-            if existing_bundle_backup is None or existing_product_backup is None:
-                sys.stderr.write(
-                    "openpe-windsurf-patch: bundle is already patched but no complete backup exists.\n"
-                    f"  searched: {paths.backup_dir}\n"
-                    "  refusing to refresh because a failed install could not be rolled back safely.\n"
+            embedded = _read_embedded_openpe_config(paths.bundle_file)
+            embedded_probe = _is_strict_probe_config(embedded)
+            if probe_only != embedded_probe:
+                raise TransactionError(
+                    "probe-only and regular payloads cannot refresh each other; uninstall first"
                 )
-                if rollback_tmp is not None:
-                    rollback_tmp.cleanup()
-                return EXIT_NO_BACKUP
-            sys.stderr.write(
-                "  ▸ bundle already patched; reusing the existing backup\n"
+            transaction = _bound_transaction(paths)
+            if probe_only:
+                _authorize_recovery(transaction, paths)
+        else:
+            trusted_build = paths.profile.supported_build(platform.system(), paths.product)
+            if trusted_build is None:
+                raise TransactionError("IDE build is not in the trusted mutation allowlist")
+            verify_trusted_baseline(
+                paths.product_file,
+                paths.bundle_file,
+                trusted_build.product_sha256,
+                trusted_build.bundle_sha256,
+            )
+            transaction = create_transaction(
+                paths,
+                __version__,
+                payload_kind="probe" if probe_only else "regular",
+                trusted_build_id=_trusted_build_id(trusted_build),
+                trusted_bundle_original_sha256=trusted_build.bundle_sha256,
+                trusted_product_original_sha256=trusted_build.product_sha256,
+            )
+            if transaction.manifest.bundle_original_sha256 != trusted_build.bundle_sha256:
+                raise TransactionError("transaction bundle snapshot is not trusted baseline")
+            if transaction.manifest.product_original_sha256 != trusted_build.product_sha256:
+                raise TransactionError("transaction product snapshot is not trusted baseline")
+    except (ChecksumError, TransactionError, OSError) as exc:
+        sys.stderr.write(f"openpe-ide-patch: safety preflight failed: {exc}\n")
+        return EXIT_TRANSACTION_ERROR
+    target_dir: Optional[Path] = None
+    operation: Optional[PatchOperation] = None
+    try:
+        expected_bundle = (
+            transaction.manifest.bundle_patched_sha256
+            if already_patched
+            else transaction.manifest.bundle_original_sha256
+        )
+        expected_product = (
+            transaction.manifest.product_patched_sha256
+            if already_patched
+            else transaction.manifest.product_original_sha256
+        )
+        if probe_only:
+            prelude = _build_probe_prelude(
+                profile_id=paths.profile.profile_id,
+                product_commit=paths.product.commit,
+                transaction_id=transaction.manifest.transaction_id,
+                client=paths.profile.client,
+                mode=paths.profile.mode,
+                history_source=paths.profile.history_source,
             )
         else:
-            permanent_bundle_backup = backup_bundle(paths.bundle_file, paths.backup_dir)
-            permanent_product_backup = backup_product_json(paths.product_file, paths.backup_dir)
-            sys.stderr.write(f"  ✓ backup bundle  → {permanent_bundle_backup}\n")
-            sys.stderr.write(f"  ✓ backup product → {permanent_product_backup}\n")
-        prelude = _build_payload_prelude(
-            descriptor,
-            descriptor_path=descriptor_path if args.fs_probe else None,
-            fs_probe=args.fs_probe,
-            debug=args.debug,
-            max_context_tokens=max_context_tokens,
+            assert descriptor is not None
+            prelude = _build_payload_prelude(
+                descriptor,
+                descriptor_path=descriptor_path if args.fs_probe else None,
+                fs_probe=args.fs_probe,
+                debug=args.debug,
+                max_context_tokens=max_context_tokens,
+                profile_id=paths.profile.profile_id,
+                product_commit=paths.product.commit,
+                transaction_id=transaction.manifest.transaction_id,
+                client=paths.profile.client,
+                mode=paths.profile.mode,
+                history_source=paths.profile.history_source,
+                legacy_live_patch=legacy_live_patch,
+            )
+        target_dir = Path(tempfile.mkdtemp(prefix="openpe-ide-patch-target-"))
+        target_bundle_path = target_dir / paths.bundle_file.name
+        target_product_path = target_dir / paths.product_file.name
+        target_bundle_path.write_bytes(paths.bundle_file.read_bytes())
+        target_product_path.write_bytes(paths.product_file.read_bytes())
+        inject_bundle(
+            target_bundle_path,
+            prelude + payload_text,
+            expected_sha256=expected_bundle,
         )
-        payload_text = payload_path.read_text(encoding="utf-8")
-        inject_bundle(paths.bundle_file, prelude + payload_text)
-        sys.stderr.write("  ✓ injected payload into bundle (bootstrap + inject.js)\n")
-        # Windsurf 1.110.x enforces "missing checksums entry == corrupted
-        # install" (vanilla VS Code merely skips verification). Recompute
-        # the SHA-256 of the just-patched bundle and write the new value
-        # into product.json so the host accepts the modified file.
-        new_sum = vscode_checksum(paths.bundle_file)
+        new_sum = vscode_checksum(target_bundle_path)
         patch_product_json(
-            paths.product_file,
+            target_product_path,
             bundle_relpath=DEFAULT_BUNDLE_RELPATH,
             new_value=new_sum,
+            expected_sha256=expected_product,
         )
-        sys.stderr.write(
-            f"  ✓ patched product.json (checksum updated to {new_sum[:12]}...)\n"
+        verify_bundle_checksum(target_product_path, target_bundle_path)
+        target_bundle = target_bundle_path.read_bytes()
+        target_product = target_product_path.read_bytes()
+        operation = prepare_operation(
+            transaction,
+            paths,
+            "refresh" if already_patched else "install",
+            target_bundle,
+            target_product,
         )
-    except (BundleError, ChecksumError, OSError) as exc:
-        sys.stderr.write(f"openpe-windsurf-patch: install failed mid-patch: {exc}\n")
-        _rollback_failed_install(paths, rollback_bundle, rollback_product)
-        if rollback_tmp is not None:
-            rollback_tmp.cleanup()
-        return EXIT_BUNDLE_ERROR
-    if is_macos():
-        try:
+        if not legacy_live_patch:
+            require_host_stopped(paths.profile)
+        apply_operation(operation, paths, target_bundle, target_product)
+        verify_bundle_checksum(paths.product_file, paths.bundle_file)
+        if is_macos():
             codesign_app(paths.app_root)
-            sys.stderr.write("  ✓ codesign (ad-hoc) succeeded\n")
-        except CodesignError as exc:
-            sys.stderr.write(
-                f"openpe-windsurf-patch: codesign failed: {exc}\n"
-                f"  manual fix if rollback is incomplete: {remove_quarantine_hint(paths.app_root)}\n"
-            )
-            _rollback_failed_install(paths, rollback_bundle, rollback_product)
-            if rollback_tmp is not None:
-                rollback_tmp.cleanup()
-            return EXIT_CODESIGN_ERROR
-    if rollback_tmp is not None:
-        rollback_tmp.cleanup()
+        transaction = finalize_operation_transaction(operation, paths)
+        operation = complete_operation(operation, transaction, paths)
+    except (
+        BundleError,
+        ChecksumError,
+        CodesignError,
+        OSError,
+        OperationError,
+        ProcessError,
+        TransactionError,
+    ) as exc:
+        sys.stderr.write(f"openpe-ide-patch: install failed mid-patch: {exc}\n")
+        if operation is not None and operation.manifest.state == "active":
+            try:
+                operation = rollback_operation(operation, paths)
+                sys.stderr.write(
+                    f"  conditionally rolled back operation {operation.manifest.operation_id}\n"
+                )
+            except OperationError as rollback_exc:
+                sys.stderr.write(
+                    f"  conditional rollback refused: {rollback_exc}\n"
+                    f"  active recovery journal retained at {operation.root}\n"
+                )
+                if target_dir is not None:
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                return EXIT_TRANSACTION_ERROR
+        if target_dir is not None:
+            shutil.rmtree(target_dir, ignore_errors=True)
+        return EXIT_BUNDLE_ERROR
+    if target_dir is not None:
+        shutil.rmtree(target_dir, ignore_errors=True)
     sys.stdout.write(
-        "openpe-windsurf-patch: install complete.\n"
-        "  restart Windsurf to pick up the openPE logo button.\n"
-        f"  to revert: python3 -m installer uninstall {('--app-dir ' + args.app_dir) if args.app_dir else ''}\n"
+        f"openpe-ide-patch: {'probe-only' if probe_only else 'legacy-live' if legacy_live_patch else 'install'} complete.\n"
+        f"  profile: {paths.profile.profile_id}\n"
+        f"  transaction: {transaction.manifest.transaction_id}\n"
+        f"  operation: {operation.manifest.operation_id if operation else 'unknown'}\n"
+        f"  {'reload the current window' if legacy_live_patch else 'restart ' + paths.profile.display_name} to "
+        f"{'collect the structural probe' if probe_only else 'load the openPE button'}.\n"
     )
     return EXIT_OK
 
 
-def _rollback_failed_install(
-    paths: WindsurfPaths,
-    bundle_backup: Optional[Path],
-    product_backup: Optional[Path],
-) -> None:
-    """Best-effort rollback for install failures after backups exist."""
-    if bundle_backup is None or product_backup is None:
-        sys.stderr.write("  ! rollback skipped: complete backup pair was not created yet\n")
-        return
-    try:
-        restore_bundle(paths.bundle_file, bundle_backup)
-        sys.stderr.write(f"  ✓ rolled back bundle from {bundle_backup.name}\n")
-    except BundleError as exc:
-        sys.stderr.write(f"  ! rollback failed for bundle: {exc}\n")
-    try:
-        restore_product_json(paths.product_file, product_backup)
-        sys.stderr.write(f"  ✓ rolled back product.json from {product_backup.name}\n")
-    except BundleError as exc:
-        sys.stderr.write(f"  ! rollback failed for product.json: {exc}\n")
-
-
 def _cmd_uninstall(args: argparse.Namespace) -> int:
-    paths = _resolve_or_explain(args.app_dir)
+    paths = _resolve_or_explain(args.app_dir, requested_host=args.host)
     if paths is None:
-        return EXIT_PATH_NOT_FOUND
-    bundle_backup = _find_latest_backup(paths.backup_dir, paths.bundle_file.name)
-    product_backup = _find_latest_backup(paths.backup_dir, paths.product_file.name)
-    if bundle_backup is None or product_backup is None:
-        sys.stderr.write(
-            "openpe-windsurf-patch: no backup found; cannot safely uninstall.\n"
-            f"  searched: {paths.backup_dir}\n"
-            "  if the IDE is unpatched there is nothing to do; otherwise reinstall Windsurf cleanly.\n"
-        )
-        return EXIT_NO_BACKUP
+        return EXIT_PROFILE_ERROR
+    assert paths.profile is not None
+    assert paths.product is not None
     try:
-        restore_bundle(paths.bundle_file, bundle_backup)
-        sys.stderr.write(f"  ✓ restored bundle from {bundle_backup.name}\n")
-        restore_product_json(paths.product_file, product_backup)
-        sys.stderr.write(f"  ✓ restored product.json from {product_backup.name}\n")
-    except BundleError as exc:
-        sys.stderr.write(f"openpe-windsurf-patch: restore failed: {exc}\n")
-        return EXIT_BUNDLE_ERROR
-    if is_macos():
+        if _recover_active_patch_operation(paths):
+            sys.stdout.write("openpe-ide-patch: interrupted patch operation rolled back.\n")
+            return EXIT_OK
+    except ProcessError as exc:
+        sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+        return EXIT_PROCESS_RUNNING
+    except (OperationError, TransactionError) as exc:
+        sys.stderr.write(f"openpe-ide-patch: operation recovery refused: {exc}\n")
+        return EXIT_TRANSACTION_ERROR
+    try:
+        restoring = find_restoring_transaction(paths)
+    except TransactionError as exc:
+        sys.stderr.write(f"openpe-ide-patch: recovery discovery failed: {exc}\n")
+        return EXIT_TRANSACTION_ERROR
+    if restoring is not None:
         try:
-            codesign_app(paths.app_root)
-            sys.stderr.write("  ✓ codesign (ad-hoc) re-applied\n")
-        except CodesignError as exc:
-            sys.stderr.write(
-                f"openpe-windsurf-patch: codesign after restore failed: {exc}\n"
-                f"  manual fix: {remove_quarantine_hint(paths.app_root)}\n"
-            )
-            return EXIT_CODESIGN_ERROR
-    sys.stdout.write("openpe-windsurf-patch: uninstall complete.\n")
+            _authorize_recovery(restoring, paths)
+            require_host_stopped(paths.profile)
+            recover_restoring_transaction(restoring, paths)
+        except ProcessError as exc:
+            sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+            return EXIT_PROCESS_RUNNING
+        except TransactionError as exc:
+            sys.stderr.write(f"openpe-ide-patch: recovery refused: {exc}\n")
+            return EXIT_TRANSACTION_ERROR
+        sys.stdout.write("openpe-ide-patch: interrupted restore recovery complete.\n")
+        return EXIT_OK
+    try:
+        marker_present = has_marker(paths.bundle_file)
+    except BundleError as exc:
+        sys.stderr.write(f"openpe-ide-patch: cannot inspect bundle marker: {exc}\n")
+        return EXIT_BUNDLE_ERROR
+    if not marker_present:
+        sys.stdout.write(
+            "openpe-ide-patch: bundle is not injected; legacy backups were not restored.\n"
+        )
+        return EXIT_OK
+    try:
+        config = _read_embedded_openpe_config(paths.bundle_file)
+        transaction = _bound_transaction(paths)
+    except TransactionError as exc:
+        sys.stderr.write(
+            f"openpe-ide-patch: restore refused: {exc}; use vendor clean reinstall.\n"
+        )
+        return EXIT_TRANSACTION_ERROR
+    probe_only = _is_strict_probe_config(config) and paths.profile == DEVIN_PROFILE
+    legacy_live_patch = _is_legacy_live_config(config) and paths.profile == DEVIN_PROFILE
+    if probe_only or legacy_live_patch:
+        try:
+            _authorize_recovery(transaction, paths)
+        except TransactionError as exc:
+            sys.stderr.write(f"openpe-ide-patch: experimental restore refused: {exc}\n")
+            return EXIT_TRANSACTION_ERROR
+    if (
+        not probe_only
+        and not legacy_live_patch
+        and not paths.profile.allows_mutation(platform.system(), paths.product)
+    ):
+        sys.stderr.write(
+            f"openpe-ide-patch: uninstall mutation for {paths.profile.display_name} "
+            f"is not verified on {platform.system()}; use vendor clean reinstall.\n"
+        )
+        return EXIT_UNSUPPORTED_PROFILE
+    try:
+        require_host_stopped(paths.profile)
+        restore_transaction(transaction, paths)
+    except ProcessError as exc:
+        sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+        return EXIT_PROCESS_RUNNING
+    except TransactionError as exc:
+        sys.stderr.write(
+            f"openpe-ide-patch: restore refused: {exc}; use vendor clean reinstall.\n"
+        )
+        return EXIT_TRANSACTION_ERROR
+    sys.stdout.write("openpe-ide-patch: uninstall complete.\n")
     return EXIT_OK
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    paths = resolve_paths(override=args.app_dir)
+    try:
+        paths = resolve_paths(override=args.app_dir)
+    except (PathResolutionError, ProfileError) as exc:
+        sys.stdout.write(f"openpe-ide-patch: IDE detection failed ({exc})\n")
+        paths = None
+    profile_error: Optional[str] = None
+    if paths is not None and paths.product is not None and args.host != "auto":
+        try:
+            require_profile(paths.product, args.host)
+        except ProfileError as exc:
+            profile_error = str(exc)
     marker_present = False
     backup_path: Optional[Path] = None
+    legacy_backup_path: Optional[Path] = None
+    transaction_error: Optional[str] = None
     if paths is not None and paths.exists:
+        legacy_backup_path = _find_latest_backup(
+            paths.legacy_backup_dir,
+            paths.bundle_file.name,
+        )
         try:
+            active_operation = find_active_operation(paths)
+            restoring = find_restoring_transaction(paths)
+            if active_operation is not None:
+                backup_path = active_operation.bundle_backup
+                transaction_error = (
+                    f"interrupted {active_operation.manifest.kind} rollback is pending"
+                )
+            elif restoring is not None:
+                backup_path = restoring.bundle_backup
+                transaction_error = "interrupted restore recovery is pending"
             marker_present = has_marker(paths.bundle_file)
-        except BundleError:
-            marker_present = False
-        backup_path = _find_latest_backup(paths.backup_dir, paths.bundle_file.name)
+            if (
+                marker_present
+                and paths.product is not None
+                and active_operation is None
+                and restoring is None
+            ):
+                transaction = _bound_transaction(paths)
+                backup_path = transaction.bundle_backup
+        except (BundleError, OperationError, TransactionError) as exc:
+            backup_path = None
+            transaction_error = str(exc)
     descriptor_outcome = "not checked"
     descriptor: Optional[LocalServerDescriptor] = None
     try:
@@ -681,19 +1201,34 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _button_config_status(paths if paths is not None and paths.exists else None, descriptor),
         marker_present,
         backup_path,
+        legacy_backup_path,
+        transaction_error,
     )
+    if profile_error:
+        sys.stdout.write(f"  requested host:    mismatch ({profile_error})\n")
     return EXIT_OK
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    sys.stdout.write(f"openpe-windsurf-patch {__version__} doctor\n")
+    sys.stdout.write(f"openpe-ide-patch {__version__} doctor\n")
     sys.stdout.write(f"  python:           {sys.version.split()[0]} ({sys.executable})\n")
     sys.stdout.write(f"  platform:         {sys.platform}\n")
     sys.stdout.write(f"  codesign needed:  {'yes (macOS)' if is_macos() else 'no'}\n")
-    paths = resolve_paths(override=args.app_dir)
+    try:
+        paths = resolve_paths(override=args.app_dir)
+    except (PathResolutionError, ProfileError) as exc:
+        paths = None
+        sys.stdout.write(f"  ide detection:    FAIL ({exc})\n")
     if paths is None:
         sys.stdout.write("  ide:              not detected at default paths\n")
     else:
+        profile = paths.profile
+        host_mismatch: Optional[str] = None
+        if paths.product is not None and args.host != "auto":
+            try:
+                require_profile(paths.product, args.host)
+            except ProfileError as exc:
+                host_mismatch = str(exc)
         sys.stdout.write(f"  ide app root:     {paths.app_root}\n")
         sys.stdout.write(
             f"  ide bundle:       {paths.bundle_file} (exists={paths.bundle_file.is_file()})\n"
@@ -701,7 +1236,49 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         sys.stdout.write(
             f"  ide product:      {paths.product_file} (exists={paths.product_file.is_file()})\n"
         )
+        sys.stdout.write(
+            f"  profile:          {profile.profile_id if profile is not None else 'unsupported'}\n"
+        )
+        if paths.product is not None:
+            sys.stdout.write(
+                f"  product build:    {paths.product.version or 'unknown'} "
+                f"({paths.product.commit or 'unknown'})\n"
+            )
+        if profile is not None:
+            process = inspect_host_processes(profile)
+            process_detail = ", ".join(process.matches) if process.matches else process.error
+            sys.stdout.write(
+                f"  process state:    {process.state}"
+                f"{(' (' + process_detail + ')') if process_detail else ''}\n"
+            )
+            sys.stdout.write(
+                f"  runtime verified: {'yes' if profile.allows_mutation(platform.system(), paths.product) else 'no'}\n"
+            )
         sys.stdout.write(f"  backup dir:       {paths.backup_dir}\n")
+        sys.stdout.write(f"  legacy backup:    {paths.legacy_backup_dir}\n")
+        try:
+            active_operation = find_active_operation(paths)
+            if active_operation is None:
+                sys.stdout.write("  active operation: none\n")
+            else:
+                sys.stdout.write(
+                    f"  active operation: {active_operation.manifest.kind} "
+                    f"({active_operation.manifest.operation_id})\n"
+                )
+        except OperationError as exc:
+            sys.stdout.write(f"  active operation: FAIL ({exc})\n")
+        try:
+            restoring = find_restoring_transaction(paths)
+            if restoring is None:
+                sys.stdout.write("  restoring txn:   none\n")
+            else:
+                sys.stdout.write(
+                    f"  restoring txn:   {restoring.manifest.transaction_id}\n"
+                )
+        except TransactionError as exc:
+            sys.stdout.write(f"  restoring txn:   FAIL ({exc})\n")
+        if host_mismatch:
+            sys.stdout.write(f"  requested host:   mismatch ({host_mismatch})\n")
     descriptor_path = default_descriptor_path()
     sys.stdout.write(f"  descriptor path:  {descriptor_path}\n")
     descriptor: Optional[LocalServerDescriptor] = None
@@ -713,8 +1290,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             sys.stdout.write(
                 f"  /v1/info:         200 (server version={info.get('version', 'unknown')})\n"
             )
+            if paths is not None and paths.profile is not None:
+                validate_profile_cors(
+                    info,
+                    paths.profile.cors_origins,
+                    paths.profile.display_name,
+                )
+                sys.stdout.write("  CORS profile:     OK\n")
         except HandshakeError as exc:
-            sys.stdout.write(f"  /v1/info:         FAIL ({exc})\n")
+            sys.stdout.write(f"  server profile:   FAIL ({exc})\n")
     except DescriptorError as exc:
         sys.stdout.write(f"  descriptor:       FAIL ({exc})\n")
     sys.stdout.write(f"  button config:    {_button_config_status(paths if paths is not None and paths.exists else None, descriptor)}\n")
@@ -734,9 +1318,20 @@ _DISPATCH = {
 }
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+def main(
+    argv: Optional[Sequence[str]] = None,
+    forced_host: Optional[str] = None,
+    prog: str = "openpe-ide-patch",
+) -> int:
+    parser = _build_parser(prog=prog)
+    values = list(argv if argv is not None else sys.argv[1:])
+    if forced_host is not None:
+        if any(value == "--host" or value.startswith("--host=") for value in values):
+            sys.stderr.write(f"{prog}: --host is not accepted by this compatibility entry\n")
+            return EXIT_USAGE
+        if values:
+            values[1:1] = ["--host", forced_host]
+    args = parser.parse_args(values)
     if not args.command:
         parser.print_help(sys.stderr)
         return EXIT_USAGE
@@ -744,7 +1339,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if handler is None:
         parser.print_help(sys.stderr)
         return EXIT_USAGE
-    return handler(args)
+    needs_lock = args.command == "uninstall" or (
+        args.command == "install"
+        and args.i_accept_experimental_risk
+        and not args.dry_run
+    )
+    if not needs_lock:
+        return handler(args)
+    try:
+        lock_paths = resolve_paths(override=args.app_dir)
+    except (PathResolutionError, ProfileError) as exc:
+        sys.stderr.write(f"openpe-ide-patch: cannot resolve mutation lock target: {exc}\n")
+        return EXIT_PROFILE_ERROR
+    if lock_paths is None:
+        sys.stderr.write("openpe-ide-patch: cannot resolve mutation lock target.\n")
+        return EXIT_PROFILE_ERROR
+    args.app_dir = str(lock_paths.app_root)
+    try:
+        with mutation_lock(lock_paths):
+            return handler(args)
+    except LockError as exc:
+        sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+        return EXIT_TRANSACTION_ERROR
 
 
 if __name__ == "__main__":

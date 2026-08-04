@@ -29,7 +29,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from .bundle import _atomic_write  # type: ignore[attr-defined]
+from .bundle import _atomic_write, checksum as sha256_checksum  # type: ignore[attr-defined]
 
 # Two field names have been used historically. Newer Electron uses the
 # shorter "checksums"; older builds (and a handful of VS Code derivatives)
@@ -45,20 +45,29 @@ class ChecksumError(Exception):
     """Raised for any product.json parsing / patching failure."""
 
 
-def _load(path: Path) -> Dict[str, Any]:
+def _load(path: Path, expected_sha256: str = "") -> Dict[str, Any]:
     try:
-        text = path.read_text(encoding="utf-8")
+        data = path.read_bytes()
     except FileNotFoundError as exc:
         raise ChecksumError(f"product.json not found: {path}") from exc
     except OSError as exc:
         raise ChecksumError(f"read product.json {path}: {exc}") from exc
+    if expected_sha256 and hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise ChecksumError("product.json changed before compare-and-swap")
     try:
+        text = data.decode("utf-8")
         payload = json.loads(text)
+    except UnicodeDecodeError as exc:
+        raise ChecksumError(f"decode product.json {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ChecksumError(f"parse product.json {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ChecksumError(f"product.json {path}: root must be a JSON object")
     return payload
+
+
+def load_product_json(path: Path) -> Dict[str, Any]:
+    return _load(path)
 
 
 def find_table(product: Dict[str, Any]) -> Optional[str]:
@@ -98,11 +107,51 @@ def vscode_checksum(path: Path) -> str:
     return base64.b64encode(h.digest()).decode("ascii").rstrip("=")
 
 
+def verify_bundle_checksum(
+    product_path: Path,
+    bundle_path: Path,
+    bundle_relpath: str = DEFAULT_BUNDLE_RELPATH,
+) -> str:
+    product = _load(product_path)
+    expected = get_checksum(product, bundle_relpath)
+    if expected is None:
+        raise ChecksumError(
+            f"product.json has no checksum entry for {bundle_relpath}"
+        )
+    actual = vscode_checksum(bundle_path)
+    if expected != actual:
+        raise ChecksumError(
+            f"bundle checksum mismatch for {bundle_relpath}: expected {expected}, got {actual}"
+        )
+    return actual
+
+
+def verify_trusted_baseline(
+    product_path: Path,
+    bundle_path: Path,
+    expected_product_sha256: str,
+    expected_bundle_sha256: str,
+    bundle_relpath: str = DEFAULT_BUNDLE_RELPATH,
+) -> None:
+    verify_bundle_checksum(product_path, bundle_path, bundle_relpath)
+    bundle_sha = sha256_checksum(bundle_path)
+    product_sha = sha256_checksum(product_path)
+    if bundle_sha != expected_bundle_sha256:
+        raise ChecksumError(
+            f"bundle SHA-256 is not the trusted build baseline: {bundle_sha}"
+        )
+    if product_sha != expected_product_sha256:
+        raise ChecksumError(
+            f"product SHA-256 is not the trusted build baseline: {product_sha}"
+        )
+
+
 def patch_product_json(
     product_path: Path,
     *,
     bundle_relpath: str = DEFAULT_BUNDLE_RELPATH,
     new_value: str,
+    expected_sha256: str = "",
 ) -> None:
     """Atomically rewrite ``product.json`` to keep the integrity table current
     for ``bundle_relpath``.
@@ -111,12 +160,15 @@ def patch_product_json(
     provide the recomputed checksum and this helper updates the entry in
     place. If the checksum table does not exist the file is left untouched.
     """
-    product = _load(product_path)
+    product = _load(product_path, expected_sha256=expected_sha256)
     field = find_table(product)
     if field is None:
-        # Nothing to patch — file already accepts any payload.
-        return
+        raise ChecksumError("product.json has no resource checksum table")
     table: Dict[str, Any] = product[field]
+    if bundle_relpath not in table:
+        raise ChecksumError(
+            f"product.json has no checksum entry for {bundle_relpath}"
+        )
     table[bundle_relpath] = new_value
     serialised = json.dumps(product, indent=2, sort_keys=False, ensure_ascii=False)
     _atomic_write(product_path, serialised.encode("utf-8") + b"\n", mode=0o644)

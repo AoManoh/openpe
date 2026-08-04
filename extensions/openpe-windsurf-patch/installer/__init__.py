@@ -1,11 +1,9 @@
-"""openpe-windsurf-patch installer package.
+"""Profile-gated experimental IDE bundle patch installer package.
 
-Experimental Windsurf IDE bundle patcher. See the project README for the
-full EULA / user-assumes-risk disclaimer before running any subcommand.
-
-Implementation phases are tracked in
-docs/development/2026-05-22-windsurf-patch-installer.md inside the main
-openPE repository.
+The canonical console entry is ``openpe-ide-patch``. The legacy
+``openpe-windsurf-patch`` entry remains a host-bound compatibility shim.
+All bundle mutation profiles are disabled until runtime and crash-recovery
+verification is complete. See the project README for the risk boundary.
 """
 
 from ._version import __version__

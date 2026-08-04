@@ -21,10 +21,32 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 DEFAULT_DESCRIPTOR_NAME = "server.json"
 WINDSURF_CORS_ORIGINS = ("null", "app://windsurf")
+
+# Upper bound for the /v1/info response body. The endpoint returns a small
+# JSON document; anything larger is not our server. Mirrors the bounded-read
+# posture of runtime_probe (256 KiB) and the Go client-side read limits.
+MAX_INFO_BODY_BYTES = 256 * 1024
+
+
+class _RefuseRedirects(HTTPRedirectHandler):
+    """Refuse every 3xx: the bearer token must never follow a Location.
+
+    ``build_opener`` installs a default ``HTTPRedirectHandler`` that copies
+    request headers — including ``Authorization`` — onto the redirected
+    request, so a compromised or squatted loopback port could bounce the
+    token to an arbitrary origin (CR-001). ``/v1/info`` never legitimately
+    redirects; returning ``None`` here makes urllib surface the 3xx as an
+    ``HTTPError``, which ``verify_server`` maps to a redirect-specific
+    ``HandshakeError``. The TypeScript client enforces the same policy with
+    ``redirect: "error"``.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class DescriptorError(Exception):
@@ -104,16 +126,25 @@ def validate_loopback_base_url(base_url: str) -> None:
     raise DescriptorError("descriptor: base_url must point to a loopback host")
 
 
-def validate_windsurf_cors(info: Dict[str, Any]) -> None:
-    """Ensure the running server allows the injected Electron fetch origin."""
+def validate_profile_cors(
+    info: Dict[str, Any],
+    required_origins: tuple,
+    display_name: str,
+) -> None:
+    """Ensure the running server allows the selected host's Electron origin."""
+    if not required_origins:
+        raise HandshakeError(
+            f"{display_name} renderer origin is not verified; bundle install is disabled"
+        )
     if info.get("auth_enabled") is not True:
         raise HandshakeError(
             "openpe-server auth is disabled; start it with OPENPE_SERVER_TOKEN set"
         )
     if info.get("cors_enabled") is not True:
+        required = ",".join(required_origins)
         raise HandshakeError(
             "openpe-server CORS is disabled; start it with "
-            "OPENPE_SERVER_CORS_ORIGINS=null,app://windsurf"
+            f"OPENPE_SERVER_CORS_ORIGINS={required}"
         )
     raw_origins = info.get("cors_origins")
     if not isinstance(raw_origins, list):
@@ -121,16 +152,20 @@ def validate_windsurf_cors(info: Dict[str, Any]) -> None:
     origins = {str(origin).strip() for origin in raw_origins if str(origin).strip()}
     if "*" in origins:
         raise HandshakeError(
-            "openpe-server CORS wildcard origin is not accepted for Windsurf patch installs"
+            f"openpe-server CORS wildcard origin is not accepted for {display_name} patch installs"
         )
-    required_origins = set(WINDSURF_CORS_ORIGINS)
-    missing = sorted(required_origins - origins)
+    required_set = set(required_origins)
+    missing = sorted(required_set - origins)
     if not missing:
         return
-    required = ", ".join(WINDSURF_CORS_ORIGINS)
+    required = ", ".join(required_origins)
     raise HandshakeError(
         f"openpe-server CORS origins must exactly include all of: {required}"
     )
+
+
+def validate_windsurf_cors(info: Dict[str, Any]) -> None:
+    validate_profile_cors(info, WINDSURF_CORS_ORIGINS, "Windsurf")
 
 
 def default_descriptor_path() -> Path:
@@ -207,8 +242,9 @@ def verify_server(
     # Always bypass the system HTTP proxy: openpe-server lives on the
     # loopback interface and routing through an HTTP/HTTPS proxy would
     # only delay the request or return 502 if the proxy refuses to
-    # forward to 127.0.0.1.
-    opener = build_opener(ProxyHandler({}))
+    # forward to 127.0.0.1. Redirects are refused outright (CR-001): the
+    # Authorization header must never travel to a Location target.
+    opener = build_opener(ProxyHandler({}), _RefuseRedirects())
     try:
         with opener.open(req, timeout=timeout) as resp:  # nosec B310 (loopback only)
             status = getattr(resp, "status", None)
@@ -216,13 +252,29 @@ def verify_server(
                 status = resp.getcode()
             if status != 200:
                 raise HandshakeError(f"server /v1/info returned status {status}")
-            body = resp.read().decode("utf-8")
+            # Defense in depth alongside _RefuseRedirects: the final URL must
+            # still be the descriptor origin (same strictness as the
+            # TypeScript client's URL gate).
+            _require_descriptor_origin(resp.geturl(), descriptor)
+            raw = resp.read(MAX_INFO_BODY_BYTES + 1)
+            if len(raw) > MAX_INFO_BODY_BYTES:
+                raise HandshakeError(
+                    f"/v1/info response exceeds {MAX_INFO_BODY_BYTES} bytes; not an openpe-server"
+                )
+            body = raw.decode("utf-8")
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise HandshakeError(
+                f"refusing to follow HTTP {exc.code} redirect from /v1/info; "
+                "the bearer token is only ever sent to the descriptor origin"
+            ) from exc
         raise HandshakeError(f"server rejected request: HTTP {exc.code}") from exc
     except URLError as exc:
         raise HandshakeError(f"cannot reach openpe-server: {exc.reason}") from exc
     except TimeoutError as exc:
         raise HandshakeError(f"openpe-server /v1/info timed out: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise HandshakeError(f"malformed /v1/info response: {exc}") from exc
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -230,3 +282,18 @@ def verify_server(
     if not isinstance(parsed, dict):
         raise HandshakeError("malformed /v1/info response: root must be a JSON object")
     return parsed
+
+
+def _require_descriptor_origin(final_url: str, descriptor: LocalServerDescriptor) -> None:
+    """Reject responses whose final URL left the descriptor origin."""
+    expected = urlparse(descriptor.base_url.strip())
+    actual = urlparse(str(final_url).strip())
+    if (
+        actual.scheme != expected.scheme
+        or (actual.hostname or "").lower() != (expected.hostname or "").lower()
+        or actual.port != expected.port
+    ):
+        raise HandshakeError(
+            f"/v1/info answered from unexpected origin {final_url!r}; "
+            f"expected {descriptor.base_url!r}"
+        )
