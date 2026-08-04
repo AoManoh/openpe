@@ -241,14 +241,6 @@ func LastPromptPath() (string, error) {
 	return delivery.LastPromptPath("codex")
 }
 
-func compactPreview(value string, limit int) string {
-	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
-	if limit > 0 && len([]rune(value)) > limit {
-		return string([]rune(value)[:limit]) + "..."
-	}
-	return value
-}
-
 func AdditionalContext(enhanced string) string {
 	return strings.TrimSpace(`openPE generated an enhanced version of the user's prompt.
 
