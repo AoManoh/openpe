@@ -25,18 +25,66 @@ interface ObserverState {
   config: OpenpeConfig;
 }
 
+let activeObserver: MutationObserver | null = null;
+let scanScheduled = false;
+let pageTransitionHooksInstalled = false;
+let observerGeneration = 0;
+let lastConfig: OpenpeConfig | null = null;
+
 export function startObserver(config: OpenpeConfig): void {
-  if (typeof document === "undefined" || typeof MutationObserver === "undefined") {
+  if (
+    activeObserver ||
+    typeof document === "undefined" ||
+    typeof MutationObserver === "undefined"
+  ) {
     return;
   }
+  lastConfig = config;
   const state: ObserverState = { config };
-  // Try immediately in case the toolbar is already in the DOM.
   tryMount(state);
-  const observer = new MutationObserver(() => tryMount(state));
-  observer.observe(document.documentElement, {
+  activeObserver = new MutationObserver((records) => {
+    // 只在新增/删除元素可能改变 toolbar 时触发，并按 animation frame
+    // 合并 mutation storm；旧实现每条 mutation 都全 document 扫描。
+    if (records.some((record) => record.addedNodes.length || record.removedNodes.length)) {
+      scheduleReconcile(state);
+    }
+  });
+  activeObserver.observe(document.documentElement, {
     childList: true,
     subtree: true,
   });
+  if (!pageTransitionHooksInstalled && typeof window !== "undefined") {
+    pageTransitionHooksInstalled = true;
+    window.addEventListener("pagehide", () => stopObserver());
+    window.addEventListener("pageshow", (event) => {
+      if ((event as PageTransitionEvent).persisted && lastConfig) {
+        startObserver(lastConfig);
+      }
+    });
+  }
+}
+
+export function stopObserver(): void {
+  activeObserver?.disconnect();
+  activeObserver = null;
+  scanScheduled = false;
+  observerGeneration++;
+}
+
+function scheduleReconcile(state: ObserverState): void {
+  if (scanScheduled) return;
+  scanScheduled = true;
+  const generation = observerGeneration;
+  const run = (): void => {
+    if (generation !== observerGeneration) return;
+    scanScheduled = false;
+    if (activeObserver) tryMount(state);
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(run);
+  } else {
+    setTimeout(run, 16);
+  }
 }
 
 function tryMount(state: ObserverState): void {

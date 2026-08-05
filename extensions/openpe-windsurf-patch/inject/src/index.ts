@@ -24,14 +24,15 @@ import { ensureStyles } from "./styles.js";
 import { startObserver } from "./observer.js";
 
 declare global {
-  // Marker the installer writes onto globalThis to expose the bearer
-  // token + base URL. Kept loose so future protocol revisions can extend
-  // without breaking the type signature.
+  // 安装器写入的一次性 bootstrap 交接槽；getConfig 读取后立即删除。
+  // Exact Devin 不含 token，只声明 preload capability transport；legacy
+  // 兼容路径的 token 也只进入模块闭包，不再常驻 globalThis。
   // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
   interface Window {
     __openpe?: {
       baseUrl?: string;
       token?: string;
+      credentialMode?: string;
       descriptorPath?: string;
       fsProbe?: boolean;
       debug?: boolean;
@@ -49,6 +50,10 @@ declare global {
       // ``auth.ts`` for the full lifecycle.
       maxContextTokens?: number;
     };
+    __openpeBridge?: Readonly<{
+      enhance: (requestId: string, body: unknown) => Promise<unknown>;
+      cancel: (requestId: string) => void;
+    }>;
     __openpeInjected?: boolean;
     /**
      * Read-only dev/test diagnostic namespace. Only attached when the
@@ -80,6 +85,15 @@ function boot(): void {
   if (typeof window === "undefined") {
     return;
   }
+  // 先消费并删除一次性 bootstrap；即使 single-instance marker 已存在，
+  // 旧 bearer bootstrap 也不能因早退继续留在 globalThis。
+  let config: ReturnType<typeof getConfig>;
+  try {
+    config = getConfig();
+  } catch (err) {
+    warn("cannot read bootstrap config; skipping", err);
+    return;
+  }
   if (window.__openpeInjected) {
     warn("already injected; skipping");
     return;
@@ -96,13 +110,6 @@ function boot(): void {
     return;
   }
 
-  let config: ReturnType<typeof getConfig>;
-  try {
-    config = getConfig();
-  } catch (err) {
-    warn("cannot read bootstrap config; skipping", err);
-    return;
-  }
   if (!config.runtimeEnabled) {
     warn(
       `host profile ${config.hostProfileId || "unknown"} is not runtime-enabled; skipping`,
@@ -110,10 +117,14 @@ function boot(): void {
     return;
   }
   runFilesystemProbe(config);
-  if (!config.baseUrl || !config.token) {
-    warn(
-      "globalThis.__openpe missing baseUrl/token; installer should have set these before injection",
-    );
+  const secureBridgeReady =
+    config.credentialMode === "preload-capability-v1" &&
+    typeof window.__openpeBridge?.enhance === "function" &&
+    typeof window.__openpeBridge?.cancel === "function";
+  const legacyBearerReady =
+    config.credentialMode === "bearer" && !!config.baseUrl && !!config.token;
+  if (!secureBridgeReady && !legacyBearerReady) {
+    warn("openPE credential transport is unavailable; reinstall the patch");
     return;
   }
 

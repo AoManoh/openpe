@@ -11,9 +11,12 @@ export type HistorySource = "none" | "legacy_trajectory";
 const DEVIN_EXACT_PRODUCT_COMMIT = "0d4bf12ed4a7597cb8ae9016fe8474468aad98a2";
 const TRANSACTION_ID_PATTERN = /^\d{8}T\d{12}Z-[0-9a-f]{8}$/;
 
+export type CredentialMode = "bearer" | "preload-capability-v1";
+
 export interface OpenpeConfig {
   baseUrl: string;
   token: string;
+  credentialMode: CredentialMode;
   hostProfileId: string;
   productCommit: string;
   transactionId: string;
@@ -72,8 +75,12 @@ export function getConfig(): OpenpeConfig {
   let candidate: unknown = {};
   if (typeof window !== "undefined") {
     const descriptor = Object.getOwnPropertyDescriptor(window, "__openpe");
-    if (descriptor && "value" in descriptor) {
+    if (descriptor && "value" in descriptor && descriptor.configurable !== false) {
       candidate = descriptor.value;
+      // Bootstrap 只作为一次性交接槽：读取后立即删除，token（legacy）或
+      // 非敏感 exact 配置只保留在模块闭包中。同 realm 脚本不再能在启动后
+      // 读取或篡改 globalThis.__openpe；不可删除的属性直接 fail closed。
+      delete window.__openpe;
     }
   }
   const raw = typeof candidate === "object" && candidate !== null ? candidate : {};
@@ -83,16 +90,23 @@ export function getConfig(): OpenpeConfig {
   const historyValue = ownValue(raw, "historySource");
   const productCommitValue = ownValue(raw, "productCommit");
   const transactionIdValue = ownValue(raw, "transactionId");
+  const credentialValue = ownValue(raw, "credentialMode");
   const hostProfileId = typeof profileValue === "string" ? profileValue : "";
   const client = typeof clientValue === "string" ? clientValue.trim() : "";
   const mode = typeof modeValue === "string" ? modeValue.trim() : "";
+  const credentialMode: CredentialMode =
+    credentialValue === "preload-capability-v1"
+      ? "preload-capability-v1"
+      : "bearer";
   const runtimeEnabled =
     (hostProfileId === "windsurf-legacy" &&
       client === "windsurf" &&
-      mode === "cascade") ||
+      mode === "cascade" &&
+      credentialMode === "bearer") ||
     (hostProfileId === "devin-desktop" &&
       client === "devin" &&
       mode === "agent" &&
+      credentialMode === "preload-capability-v1" &&
       productCommitValue === DEVIN_EXACT_PRODUCT_COMMIT &&
       typeof transactionIdValue === "string" &&
       TRANSACTION_ID_PATTERN.test(transactionIdValue));
@@ -116,6 +130,7 @@ export function getConfig(): OpenpeConfig {
   return {
     baseUrl: typeof baseUrl === "string" ? baseUrl.replace(/\/+$/, "") : "",
     token: typeof token === "string" ? token : "",
+    credentialMode,
     hostProfileId,
     productCommit:
       typeof productCommitValue === "string" ? productCommitValue : "",

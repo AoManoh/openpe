@@ -91,10 +91,9 @@ const IDB_DB_NAME = "keyval-store";
 const IDB_STORE_NAME = "keyval";
 const TRAJ_KEY_PREFIX = "windsurf:cache:cachedActiveTrajectory:";
 const REFRESH_THROTTLE_MS = 200;
-const ACTIVE_KEY_SCAN_LIMIT = 30;
-const TIMESTAMP_MIN = 1_700_000_000; // 2023-11-14
-const TIMESTAMP_MAX = 1_900_000_000; // 2030-03-17
-const STEP_TEXT_TRUNCATE = 4000;
+// 与公开的 collector 契约保持一致：每条最多 6000 字符。旧 parser 先在
+// 4000 截断，使后续 6000 预算永远不可达。
+const STEP_TEXT_TRUNCATE = 6000;
 // History budget — empirically tuned against a 287 KB live trajectory
 // observed during the Phase 5 bring-up. The previous 8-msg / 1500-char
 // cap was leaving 95%+ of the available trajectory on the floor; a
@@ -123,11 +122,15 @@ const PREVIEW_CHARS = 80;
 let started = false;
 let cachedMessages: CascadeMessage[] = [];
 let lastWrittenKey: string | null = null;
+let lastTrajectoryId: string | null = null;
 let refreshScheduled = false;
 let refreshInFlight = false;
+let refreshDirty = false;
 let lastError: string | null = null;
 let lastRefreshAt = 0;
 let historySource: HistorySource = "none";
+const openDatabases = new Set<IDBDatabase>();
+let pagehideHookInstalled = false;
 // Dev/test diagnostic gate. Set by ``setDebugEnabled(true)`` which the
 // inject boot calls when ``config.debug === true`` (i.e. when the
 // installer was run with ``--debug``). When false the ``dbg()`` helper
@@ -164,14 +167,14 @@ export function startCascadeContextWatcher(): void {
     return;
   }
   started = true;
+  installDatabaseCloseHook();
   try {
     installIdbPutHook();
   } catch (err) {
     dbg("install IDB hook failed", err);
   }
-  // Initial best-effort scan in case a trajectory already exists from a
-  // previous session before our IDB hook is in place to observe writes.
-  void refreshFromActiveTrajectory();
+  // 不再启动时扫描并猜“最近 trajectory”：未亲眼观察到当前 renderer 的
+  // put 就没有身份依据，宁可无历史也不能把旧 chat 明文带入新 chat。
 }
 
 /**
@@ -404,18 +407,28 @@ function installIdbPutHook(): void {
     value: unknown,
     key?: IDBValidKey,
   ): IDBRequest {
+    const request = original.call(this, value as never, key as never);
     try {
       if (typeof key === "string" && key.startsWith(TRAJ_KEY_PREFIX)) {
+        // 一观察到写入意图就先把旧 cache 标为不可信；仅在 transaction
+        // complete 后读取，失败/延迟 commit 不会重新发布旧值。
+        clearCachedTrajectory();
         lastWrittenKey = key;
-        scheduleRefresh();
+        this.transaction.addEventListener("complete", scheduleRefresh, { once: true });
       }
     } catch {
       // Never let the openPE observer interfere with Windsurf's own
       // database writes — silently swallow.
     }
-    return original.call(this, value as never, key as never);
+    return request;
   } as typeof proto.put;
   proto.__openpePutHooked = true;
+}
+
+function clearCachedTrajectory(): void {
+  cachedMessages = [];
+  historySource = "none";
+  lastTrajectoryId = null;
 }
 
 function scheduleRefresh(): void {
@@ -423,124 +436,129 @@ function scheduleRefresh(): void {
   refreshScheduled = true;
   setTimeout(() => {
     refreshScheduled = false;
-    void refreshFromActiveTrajectory();
+    void refreshFromObservedTrajectory();
   }, REFRESH_THROTTLE_MS);
 }
 
-async function refreshFromActiveTrajectory(): Promise<void> {
-  if (refreshInFlight) return;
+async function refreshFromObservedTrajectory(): Promise<void> {
+  if (refreshInFlight) {
+    // refresh 期间的新 put 不能丢；完成后按最新 key 再跑一轮。
+    refreshDirty = true;
+    return;
+  }
   refreshInFlight = true;
   try {
-    const key = lastWrittenKey ?? (await findActiveTrajectoryKey());
-    if (!key) {
-      return;
-    }
-    const bin = await readTrajectoryBytes(key);
-    if (!bin || bin.length === 0) {
-      return;
-    }
-    const msgs = extractTrajectoryMessages(bin);
-    // Keep every parsed message. An earlier draft dropped the trailing
-    // step under the theory that it duplicates the user's in-flight
-    // prompt, but live-trace verification (Step 3 of the bring-up
-    // smoke test) showed that `cachedActiveTrajectory` actually holds
-    // the previous *completed* exchange (user + assistant), so the
-    // trim was lopping off the assistant turn and halving the
-    // available history the LLM gets. The PE button is only clickable
-    // before a new prompt is sent, so there is no real in-flight
-    // duplicate to dedup against — `getRecentHistory`'s tail-only slice
-    // already bounds the count handed to the wire.
-    cachedMessages = msgs;
-    historySource = msgs.length > 0 ? "latest_trajectory" : "none";
-    lastRefreshAt = Date.now();
-    lastError = null;
+    do {
+      refreshDirty = false;
+      const key = lastWrittenKey;
+      if (!key) {
+        clearCachedTrajectory();
+        return;
+      }
+      const bin = await readTrajectoryBytes(key);
+      // 异步读取期间 key 已切换：丢弃旧结果并立即重跑。
+      if (key !== lastWrittenKey) {
+        refreshDirty = true;
+        continue;
+      }
+      if (!bin || bin.length === 0) {
+        clearCachedTrajectory();
+        continue;
+      }
+      const trajectoryId = extractTrajectoryId(bin);
+      if (!trajectoryId) {
+        clearCachedTrajectory();
+        lastError = "trajectory identity is missing";
+        continue;
+      }
+      if (lastTrajectoryId !== null && lastTrajectoryId !== trajectoryId) {
+        // 同一 workspace 起新 task 时先清旧 chat，再发布新解析结果。
+        clearCachedTrajectory();
+      }
+      const msgs = extractTrajectoryMessages(bin);
+      lastTrajectoryId = trajectoryId;
+      cachedMessages = msgs;
+      historySource = msgs.length > 0 ? "latest_trajectory" : "none";
+      lastRefreshAt = Date.now();
+      lastError = null;
+    } while (refreshDirty);
   } catch (err) {
+    clearCachedTrajectory();
     lastError = describeError(err);
-    // Do NOT zero out historySource on transient parse errors: previous
-    // cachedMessages may still be valid and useful. If parsing
-    // permanently breaks (e.g. schema change), describeHistory's
-    // ``lastError`` field surfaces that to anyone running with --debug.
     dbg("refresh failed", err);
   } finally {
     refreshInFlight = false;
   }
 }
 
-function openTrajectoryStore(
-  mode: IDBTransactionMode,
-): Promise<IDBObjectStore | null> {
+function installDatabaseCloseHook(): void {
+  if (pagehideHookInstalled || typeof window === "undefined") return;
+  pagehideHookInstalled = true;
+  window.addEventListener("pagehide", () => {
+    for (const db of openDatabases) db.close();
+    openDatabases.clear();
+  });
+}
+
+function withTrajectoryStore<T>(
+  operation: (store: IDBObjectStore, settle: (value: T) => void) => void,
+  fallback: T,
+): Promise<T> {
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (value: IDBObjectStore | null): void => {
+    let db: IDBDatabase | null = null;
+    const settle = (value: T): void => {
       if (settled) return;
       settled = true;
       resolve(value);
+    };
+    const close = (): void => {
+      if (!db) return;
+      openDatabases.delete(db);
+      db.close();
+      db = null;
     };
     try {
       const req = indexedDB.open(IDB_DB_NAME);
       req.onsuccess = () => {
         try {
-          const db = req.result;
+          db = req.result;
+          openDatabases.add(db);
+          db.onversionchange = close;
           if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
-            settle(null);
+            close();
+            settle(fallback);
             return;
           }
-          const tx = db.transaction(IDB_STORE_NAME, mode);
-          settle(tx.objectStore(IDB_STORE_NAME));
+          const tx = db.transaction(IDB_STORE_NAME, "readonly");
+          tx.oncomplete = close;
+          tx.onabort = close;
+          tx.onerror = close;
+          operation(tx.objectStore(IDB_STORE_NAME), settle);
         } catch {
-          settle(null);
+          close();
+          settle(fallback);
         }
       };
-      req.onerror = () => settle(null);
-      req.onblocked = () => settle(null);
+      req.onerror = () => settle(fallback);
+      req.onblocked = () => settle(fallback);
     } catch {
-      settle(null);
+      close();
+      settle(fallback);
     }
   });
 }
 
-function listTrajectoryKeys(): Promise<string[]> {
-  return new Promise((resolve) => {
-    void openTrajectoryStore("readonly").then((store) => {
-      if (!store) {
-        resolve([]);
-        return;
-      }
-      try {
-        const req = store.getAllKeys();
-        req.onsuccess = () => {
-          const keys = (req.result ?? []) as IDBValidKey[];
-          const traj = keys
-            .map((k) => String(k))
-            .filter((k) => k.startsWith(TRAJ_KEY_PREFIX));
-          resolve(traj);
-        };
-        req.onerror = () => resolve([]);
-      } catch {
-        resolve([]);
-      }
-    });
-  });
-}
-
 function readTrajectoryBytes(key: string): Promise<Uint8Array | null> {
-  return new Promise((resolve) => {
-    void openTrajectoryStore("readonly").then((store) => {
-      if (!store) {
-        resolve(null);
-        return;
-      }
-      try {
-        const req = store.get(key);
-        req.onsuccess = () => {
-          resolve(decodeTrajectoryEntry(req.result));
-        };
-        req.onerror = () => resolve(null);
-      } catch {
-        resolve(null);
-      }
-    });
-  });
+  return withTrajectoryStore<Uint8Array | null>((store, settle) => {
+    try {
+      const req = store.get(key);
+      req.onsuccess = () => settle(decodeTrajectoryEntry(req.result));
+      req.onerror = () => settle(null);
+    } catch {
+      settle(null);
+    }
+  }, null);
 }
 
 // Windsurf stores trajectory entries either as a JSON-serialised
@@ -573,46 +591,6 @@ function base64ToBytes(b64: string): Uint8Array | null {
   } catch {
     return null;
   }
-}
-
-// When the IDB put hook has not fired yet (e.g. on a fresh boot before
-// the user interacts with Cascade), fall back to picking the key whose
-// trajectory contains the most recent Unix-second timestamp. Windsurf
-// embeds a timestamp { seconds, nanos } in every step's metadata; the
-// per-trajectory maximum is the trajectory's last activity moment.
-async function findActiveTrajectoryKey(): Promise<string | null> {
-  const keys = await listTrajectoryKeys();
-  if (keys.length === 0) return null;
-  if (keys.length === 1) return keys[0]!;
-  const sampled = keys.slice(0, ACTIVE_KEY_SCAN_LIMIT);
-  let bestKey: string | null = null;
-  let bestTs = 0;
-  for (const k of sampled) {
-    const bin = await readTrajectoryBytes(k);
-    if (!bin) continue;
-    const ts = findMaxTimestamp(bin);
-    if (ts > bestTs) {
-      bestTs = ts;
-      bestKey = k;
-    }
-  }
-  return bestKey;
-}
-
-function findMaxTimestamp(bin: Uint8Array): number {
-  let maxTs = 0;
-  for (let i = 0; i < bin.length - 4; i++) {
-    try {
-      const [v] = pbReadVarint(bin, i);
-      const n = Number(v);
-      if (n > TIMESTAMP_MIN && n < TIMESTAMP_MAX && n > maxTs) {
-        maxTs = n;
-      }
-    } catch {
-      // not a varint at this offset — slide forward and keep scanning
-    }
-  }
-  return maxTs;
 }
 
 // ---------------------------------------------------------------------------
@@ -813,6 +791,22 @@ function parseStep(
   return null;
 }
 
+export function extractTrajectoryId(bin: Uint8Array): string | null {
+  let identity: string | null = null;
+  try {
+    pbIterFields(bin, 0, bin.length, (num, wt, value) => {
+      if (identity !== null || num !== 1 || wt !== 2 || value.kind !== "delim") return;
+      const text = new TextDecoder("utf-8", { fatal: true })
+        .decode(value.bytes.subarray(value.start, value.end))
+        .trim();
+      if (text) identity = text;
+    });
+  } catch {
+    return null;
+  }
+  return identity;
+}
+
 function extractTrajectoryMessages(bin: Uint8Array): CascadeMessage[] {
   const out: CascadeMessage[] = [];
   try {
@@ -836,7 +830,10 @@ function extractTrajectoryMessages(bin: Uint8Array): CascadeMessage[] {
 
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
-  return s.slice(0, max) + "...";
+  if (max <= 3) return s.slice(0, max);
+  // 省略号计入硬上限；旧实现先取 max 再追加 "..."，让所谓 6000
+  // 字符上限实际变成 6003。
+  return s.slice(0, max - 3) + "...";
 }
 
 function describeError(err: unknown): string {

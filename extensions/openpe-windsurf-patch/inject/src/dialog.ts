@@ -19,9 +19,10 @@
 
 import type { OpenpeConfig } from "./auth.js";
 import type { HistoryMeta, HistorySource } from "./cascade_context.js";
-import { getRecentHistoryWithMeta } from "./cascade_context.js";
 import type { EnhanceResponse } from "./client.js";
 import { ClientError, enhancePrompt } from "./client.js";
+import { editorTextsEqual, normalizeEditorText } from "./editor_state.js";
+import { historyForEnhance } from "./history_policy.js";
 
 const TOAST_CONTAINER_ID = "openpe-toast-container";
 
@@ -103,7 +104,21 @@ export interface LastEnhanceSnapshot {
   };
 }
 
-let inFlight = false;
+const REQUEST_DEADLINE_MS = 30_000;
+
+interface EditorFlight {
+  controller: AbortController;
+  revision: number;
+}
+
+// 每个 editor 独立 single-flight；一个慢 editor 不再锁死其它输入框。
+const flights = new WeakMap<HTMLElement, EditorFlight>();
+const activeControllers = new Set<AbortController>();
+const editorRevisions = new WeakMap<HTMLElement, number>();
+const trackedEditors = new WeakSet<HTMLElement>();
+const composingEditors = new WeakSet<HTMLElement>();
+const internalWriteEditors = new WeakSet<HTMLElement>();
+let pagehideHookInstalled = false;
 let lastEnhanceSnapshot: LastEnhanceSnapshot | null = null;
 
 /**
@@ -119,7 +134,11 @@ export async function runAutoEnhance(
   config: OpenpeConfig,
   editorEl: HTMLElement,
 ): Promise<void> {
-  if (inFlight) {
+  trackEditorRevision(editorEl);
+  if (flights.has(editorEl)) {
+    showToast("openPE: this input is already being enhanced.", "info", {
+      autoDismiss: 2500,
+    });
     return;
   }
   const original = readEditorText(editorEl);
@@ -127,43 +146,42 @@ export async function runAutoEnhance(
     showToast("openPE: input is empty — type a prompt first.", "warn");
     return;
   }
-  inFlight = true;
+  installPagehideAbortHook();
+  const controller = new AbortController();
+  const revision = currentRevision(editorEl);
+  flights.set(editorEl, { controller, revision });
+  activeControllers.add(controller);
+  const deadline = setTimeout(() => {
+    controller.abort(new DOMException("openPE request timed out", "TimeoutError"));
+  }, REQUEST_DEADLINE_MS);
   const dismissLoading = showToast("openPE: enhancing…", "info", {
     persist: true,
   });
-  // History is best-effort: getRecentHistoryWithMeta returns an empty
-  // ``messages`` array when the Cascade trajectory watcher has nothing
-  // cached (e.g. fresh chat, schema mismatch, or IndexedDB
-  // unavailable). The client omits the ``history`` field entirely in
-  // that case so the request stays wire-equivalent to the historical
-  // no-history path. We hoist this read out of the try block so the
-  // snapshot below can record what we tried to send even when the
-  // server call itself blows up.
-  const historyMeta: HistoryMeta =
-    config.historySource === "legacy_trajectory"
-      ? getRecentHistoryWithMeta()
-      : {
-          messages: [],
-          source: "none",
-          totalChars: 0,
-          roles: { user: 0, assistant: 0 },
-        };
+  // renderer 内没有可证明的 editor/chat ↔ trajectory 身份映射。旧逻辑
+  // 猜“最近 trajectory”并把全局缓存交给任意 editor，新 chat 首次增强会
+  // 泄漏旧 chat 明文。无法证明身份时按隐私契约 fail closed：collector
+  // 仍可供 debug 形态诊断，但 enhancement wire 永不携带这份未绑定历史。
+  const historyMeta = historyForEnhance();
   try {
-    const resp = await enhancePrompt(config, {
-      prompt: original,
-      client: config.client,
-      mode: config.mode,
-      history: historyMeta.messages,
-      // Consumer-layer token budget; absent → omit on the wire (server
-      // default = no shrinking). When the installer was run with
-      // ``--max-context-tokens N`` or with ``OPENPE_MAX_CONTEXT_TOKENS``
-      // set, ``getConfig()`` surfaces the positive int here and we
-      // forward it via ``options.max_context_tokens`` so the server
-      // shrinks retrieval / history sections to fit.
-      ...(config.maxContextTokens
-        ? { options: { max_context_tokens: config.maxContextTokens } }
-        : {}),
-    });
+    const resp = await enhancePrompt(
+      config,
+      {
+        prompt: original,
+        client: config.client,
+        mode: config.mode,
+        history: historyMeta.messages,
+        // Consumer-layer token budget; absent → omit on the wire (server
+        // default = no shrinking). When the installer was run with
+        // ``--max-context-tokens N`` or with ``OPENPE_MAX_CONTEXT_TOKENS``
+        // set, ``getConfig()`` surfaces the positive int here and we
+        // forward it via ``options.max_context_tokens`` so the server
+        // shrinks retrieval / history sections to fit.
+        ...(config.maxContextTokens
+          ? { options: { max_context_tokens: config.maxContextTokens } }
+          : {}),
+      },
+      controller.signal,
+    );
     // Snapshot BEFORE writing back / showing toasts so the inspection
     // surface is populated even if the editor write path or the toast
     // helper throws. Success is defined by whether
@@ -189,10 +207,7 @@ export async function runAutoEnhance(
       );
       return;
     }
-    if (
-      !editorEl.isConnected ||
-      normalizeEditorText(readEditorText(editorEl)) !== normalizeEditorText(original)
-    ) {
+    if (!editorStateMatches(editorEl, original, revision)) {
       const copyOk = await copyToClipboard(enhanced);
       showToast(
         copyOk
@@ -203,13 +218,20 @@ export async function runAutoEnhance(
       );
       return;
     }
-    const writeOk = await writeEditorText(editorEl, enhanced, original);
+    const writeOk = await writeEditorText(
+      editorEl,
+      enhanced,
+      original,
+      revision,
+      controller.signal,
+    );
     if (writeOk) {
       showToast("openPE: enhanced ✓  (Ctrl+Z to undo)", "ok", {
         autoDismiss: 3500,
       });
       return;
     }
+    if (controller.signal.aborted) return;
     const copyOk = await copyToClipboard(enhanced);
     showToast(
       copyOk
@@ -223,7 +245,12 @@ export async function runAutoEnhance(
     dismissLoading();
     showToast("openPE: " + describeError(err), "error", { autoDismiss: 6000 });
   } finally {
-    inFlight = false;
+    clearTimeout(deadline);
+    dismissLoading();
+    activeControllers.delete(controller);
+    if (flights.get(editorEl)?.controller === controller) {
+      flights.delete(editorEl);
+    }
   }
 }
 
@@ -352,15 +379,54 @@ function readEditorText(el: HTMLElement): string {
   return el.innerText ?? el.textContent ?? "";
 }
 
+function currentRevision(el: HTMLElement): number {
+  return editorRevisions.get(el) ?? 0;
+}
+
+function trackEditorRevision(el: HTMLElement): void {
+  if (trackedEditors.has(el)) return;
+  trackedEditors.add(el);
+  editorRevisions.set(el, 0);
+  const bump = (event: Event): void => {
+    if (event.isTrusted && !internalWriteEditors.has(el)) {
+      editorRevisions.set(el, currentRevision(el) + 1);
+    }
+  };
+  el.addEventListener("beforeinput", bump);
+  el.addEventListener("input", bump);
+  el.addEventListener("compositionstart", (event) => {
+    if (!event.isTrusted || internalWriteEditors.has(el)) return;
+    composingEditors.add(el);
+    editorRevisions.set(el, currentRevision(el) + 1);
+  });
+  el.addEventListener("compositionend", (event) => {
+    if (!event.isTrusted || internalWriteEditors.has(el)) return;
+    composingEditors.delete(el);
+    editorRevisions.set(el, currentRevision(el) + 1);
+  });
+}
+
+function editorStateMatches(
+  el: HTMLElement,
+  expected: string,
+  revision: number,
+): boolean {
+  return (
+    el.isConnected &&
+    !composingEditors.has(el) &&
+    currentRevision(el) === revision &&
+    editorTextsEqual(el instanceof HTMLTextAreaElement, readEditorText(el), expected)
+  );
+}
+
 async function writeEditorText(
   el: HTMLElement,
   text: string,
   expected: string,
+  revision: number,
+  signal: AbortSignal,
 ): Promise<boolean> {
-  if (
-    !el.isConnected ||
-    normalizeEditorText(readEditorText(el)) !== normalizeEditorText(expected)
-  ) {
+  if (signal.aborted || !editorStateMatches(el, expected, revision)) {
     return false;
   }
   // Path 1: plain HTMLTextAreaElement (older Windsurf builds / VS Code
@@ -371,13 +437,18 @@ async function writeEditorText(
         HTMLTextAreaElement.prototype,
         "value",
       )?.set;
-      if (setter) {
-        setter.call(el, text);
-      } else {
-        el.value = text;
+      internalWriteEditors.add(el);
+      try {
+        if (setter) {
+          setter.call(el, text);
+        } else {
+          el.value = text;
+        }
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } finally {
+        internalWriteEditors.delete(el);
       }
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
       el.focus({ preventScroll: false });
       return el.value === text;
     } catch {
@@ -399,37 +470,57 @@ async function writeEditorText(
     // One animation frame so focus actually lands on the editor before
     // we start dispatching beforeinput events into it.
     await rafTick();
-    if (
-      !el.isConnected ||
-      normalizeEditorText(readEditorText(el)) !== normalizeEditorText(expected)
-    ) {
+    if (signal.aborted || !editorStateMatches(el, expected, revision)) {
       return false;
     }
     el.focus({ preventScroll: false });
     selectAllRange(el);
 
-    el.dispatchEvent(
-      new InputEvent("beforeinput", {
-        bubbles: true,
-        cancelable: true,
-        inputType: "insertText",
-        data: text,
-      }),
-    );
+    const userRevisionBeforeDispatch = currentRevision(el);
+    internalWriteEditors.add(el);
+    try {
+      el.dispatchEvent(
+        new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: text,
+        }),
+      );
+    } finally {
+      internalWriteEditors.delete(el);
+    }
 
     await delay(50);
-    if (verifyEditorContains(el, text)) return true;
     if (
+      signal.aborted ||
       !el.isConnected ||
-      normalizeEditorText(readEditorText(el)) !== normalizeEditorText(expected)
+      composingEditors.has(el) ||
+      currentRevision(el) !== userRevisionBeforeDispatch
     ) {
+      return false;
+    }
+    if (verifyEditorContains(el, text)) return true;
+    if (!editorTextsEqual(false, readEditorText(el), expected)) {
       return false;
     }
 
     selectAllRange(el);
-    document.execCommand("insertText", false, text);
+    const userRevisionBeforeFallback = currentRevision(el);
+    internalWriteEditors.add(el);
+    try {
+      document.execCommand("insertText", false, text);
+    } finally {
+      internalWriteEditors.delete(el);
+    }
     await delay(50);
-    return verifyEditorContains(el, text);
+    return (
+      !signal.aborted &&
+      el.isConnected &&
+      !composingEditors.has(el) &&
+      currentRevision(el) === userRevisionBeforeFallback &&
+      verifyEditorContains(el, text)
+    );
   } catch {
     return false;
   }
@@ -442,10 +533,6 @@ function selectAllRange(el: HTMLElement): void {
   range.selectNodeContents(el);
   sel.removeAllRanges();
   sel.addRange(range);
-}
-
-function normalizeEditorText(text: string): string {
-  return text.replace(/\r\n?/g, "\n").replace(/\n$/, "");
 }
 
 function verifyEditorContains(el: HTMLElement, text: string): boolean {
@@ -464,6 +551,17 @@ function rafTick(): Promise<void> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function installPagehideAbortHook(): void {
+  if (pagehideHookInstalled || typeof window === "undefined") return;
+  pagehideHookInstalled = true;
+  window.addEventListener("pagehide", () => {
+    for (const controller of activeControllers) {
+      controller.abort(new DOMException("page hidden", "AbortError"));
+    }
+    activeControllers.clear();
+  });
 }
 
 async function copyToClipboard(text: string): Promise<boolean> {
@@ -485,6 +583,9 @@ async function copyToClipboard(text: string): Promise<boolean> {
 function describeError(err: unknown): string {
   if (err instanceof ClientError) {
     return err.status ? `${err.message} (HTTP ${err.status})` : err.message;
+  }
+  if (err instanceof DOMException && err.name === "TimeoutError") {
+    return "request timed out";
   }
   if (err instanceof DOMException && err.name === "AbortError") {
     return "cancelled";

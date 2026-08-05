@@ -47,6 +47,23 @@ export interface EnhanceResponse {
   error?: string;
 }
 
+interface OpenpeBridge {
+  enhance(requestId: string, body: EnhanceRequest): Promise<EnhanceResponse>;
+  cancel(requestId: string): void;
+}
+
+function preloadBridge(): OpenpeBridge | null {
+  if (typeof window === "undefined") return null;
+  const descriptor = Object.getOwnPropertyDescriptor(window, "__openpeBridge");
+  if (!descriptor || !("value" in descriptor)) return null;
+  const candidate = descriptor.value as Partial<OpenpeBridge> | null;
+  return candidate &&
+    typeof candidate.enhance === "function" &&
+    typeof candidate.cancel === "function"
+    ? (candidate as OpenpeBridge)
+    : null;
+}
+
 export class ClientError extends Error {
   readonly status: number | null;
 
@@ -71,6 +88,25 @@ export async function enhancePrompt(
     (!Number.isSafeInteger(maxContextTokens) || maxContextTokens <= 0)
   ) {
     throw new ClientError("max_context_tokens must be a positive safe integer", null);
+  }
+  if (config.credentialMode === "preload-capability-v1") {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("cancelled", "AbortError");
+    }
+    const bridge = preloadBridge();
+    if (!bridge) {
+      throw new ClientError("secure openPE preload capability is unavailable", null);
+    }
+    const requestId = newRequestId();
+    const payload = await raceAbort(
+      bridge.enhance(requestId, body),
+      signal,
+      () => bridge.cancel(requestId),
+    );
+    return validateResponse(payload, null);
+  }
+  if (!config.token) {
+    throw new ClientError("server token is missing", null);
   }
   let baseURL: URL;
   try {
@@ -138,10 +174,17 @@ export async function enhancePrompt(
       resp.status,
     );
   }
-  if (!payload.enhanced_prompt) {
+  return validateResponse(payload, resp.status);
+}
+
+function validateResponse(
+  payload: EnhanceResponse,
+  status: number | null,
+): EnhanceResponse {
+  if (!payload || typeof payload !== "object" || !payload.enhanced_prompt) {
     throw new ClientError(
-      payload.error ?? "server returned an empty enhanced_prompt",
-      resp.status,
+      payload?.error ?? "server returned an empty enhanced_prompt",
+      status,
     );
   }
   payload.warnings = Array.isArray(payload.warnings)
@@ -151,4 +194,40 @@ export async function enhancePrompt(
       )
     : [];
   return payload;
+}
+
+function newRequestId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+}
+
+function raceAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+  cancel?: () => void,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    cancel?.();
+    return Promise.reject(signal.reason ?? new DOMException("cancelled", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => {
+      cancel?.();
+      reject(signal.reason ?? new DOMException("cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }
