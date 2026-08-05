@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/AoManoh/openpe/internal/fsatomic"
 )
 
 // LocalServerDescriptor is the handshake payload openPE's local HTTP server
@@ -48,8 +50,8 @@ func (d LocalServerDescriptor) Validate() error {
 	if strings.TrimSpace(d.BaseURL) == "" {
 		return errors.New("descriptor: base_url is required")
 	}
-	if strings.TrimSpace(d.Token) == "" {
-		return errors.New("descriptor: token is required")
+	if err := ValidateTokenShape(strings.TrimSpace(d.Token)); err != nil {
+		return fmt.Errorf("descriptor: invalid token: %w", err)
 	}
 	if d.PID <= 0 {
 		return errors.New("descriptor: pid must be positive")
@@ -80,10 +82,17 @@ func DefaultDescriptorPath() (string, error) {
 
 // WriteDescriptor atomically persists d to path with mode 0600. Parent
 // directories are created with mode 0700. The write uses a temp file + rename
-// so concurrent readers always see either the previous or the new payload.
+// so concurrent readers always see either the previous or the new payload,
+// and holds the descriptor's cross-process lock so a sibling's
+// ownership-checked cleanup can never interleave with this publish (the
+// read-check-remove TOCTOU: A verifies ownership, B replaces the file, A
+// removes B's descriptor).
 func WriteDescriptor(path string, d LocalServerDescriptor) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("descriptor path is required")
+	}
+	if err := rejectDescriptorSymlink(path); err != nil {
+		return err
 	}
 	if err := d.Validate(); err != nil {
 		return err
@@ -92,33 +101,25 @@ func WriteDescriptor(path string, d LocalServerDescriptor) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create descriptor dir: %w", err)
 	}
+	unlock, err := fsatomic.Lock(path)
+	if err != nil {
+		return fmt.Errorf("lock descriptor: %w", err)
+	}
+	defer unlock()
 	payload, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal descriptor: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".server-*.json.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp descriptor: %w", err)
+	payload = append(payload, '\n')
+	prepare := func(tempPath string) error {
+		return restrictDescriptorPermissions(path, tempPath)
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-	if _, err := tmp.Write(payload); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("write temp descriptor: %w", err)
+	if err := fsatomic.WriteFilePreparedExact(path, payload, 0o600, prepare); err != nil {
+		return fmt.Errorf("write descriptor: %w", err)
 	}
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("chmod temp descriptor: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("close temp descriptor: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		cleanup()
-		return fmt.Errorf("rename descriptor: %w", err)
+	if err := validateDescriptorPermissions(path); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("validate published descriptor permissions: %w", err)
 	}
 	return nil
 }
@@ -131,17 +132,18 @@ func ReadDescriptor(path string) (LocalServerDescriptor, error) {
 	if strings.TrimSpace(path) == "" {
 		return d, errors.New("descriptor path is required")
 	}
+	if err := rejectDescriptorSymlink(path); err != nil {
+		return d, err
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return d, err
 	}
-	// NTFS does not honour POSIX mode bits: os.Chmod(0o600) only toggles
-	// the read-only flag on Windows and Stat().Mode().Perm() reports 0o666
-	// for any writable file, so the check would unconditionally reject any
-	// descriptor on Windows. Rely on the default %USERPROFILE% ACL there,
-	// matching OpenSSH's StrictModes-on-Windows behaviour.
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return d, fmt.Errorf("descriptor file %s has insecure mode %#o (want 0600 or stricter)", path, info.Mode().Perm())
+	}
+	if err := validateDescriptorPermissions(path); err != nil {
+		return d, fmt.Errorf("descriptor file %s has insecure permissions: %w", path, err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -154,6 +156,20 @@ func ReadDescriptor(path string) (LocalServerDescriptor, error) {
 		return d, err
 	}
 	return d, nil
+}
+
+func rejectDescriptorSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect descriptor path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("descriptor path %s must not be a symlink", path)
+	}
+	return nil
 }
 
 // RemoveDescriptor deletes the descriptor file if it exists. A missing file
@@ -172,14 +188,27 @@ func RemoveDescriptor(path string) error {
 // RemoveDescriptorIfOwned deletes the descriptor only when it still belongs
 // to this instance (same PID and token). A second openpe-server that failed
 // to bind must not tear down the running instance's descriptor on its way
-// out (CR-002): the file it would delete is the ONLY discovery channel IDE
-// installers have. A missing file is fine; a foreign or unreadable file is
-// left in place — leaving a stale file behind is recoverable, deleting a
-// live sibling's descriptor is not.
+// out: the file it would delete is the ONLY discovery channel IDE installers
+// have. A missing file is fine; a foreign or unreadable file is left in
+// place — leaving a stale file behind is recoverable, deleting a live
+// sibling's descriptor is not.
+//
+// The read-verify-remove sequence runs under the descriptor's cross-process
+// lock, shared with WriteDescriptor: without it a sibling could republish
+// between this function's read and its remove, and the wrong descriptor
+// would be deleted despite the ownership check.
 func RemoveDescriptorIfOwned(path string, pid int, token string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("descriptor path is required")
 	}
+	if err := rejectDescriptorSymlink(path); err != nil {
+		return err
+	}
+	unlock, err := fsatomic.Lock(path)
+	if err != nil {
+		return fmt.Errorf("lock descriptor: %w", err)
+	}
+	defer unlock()
 	d, err := ReadDescriptor(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

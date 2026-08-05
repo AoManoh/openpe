@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"strings"
 )
 
 // TokenByteLength is the entropy size used for bearer tokens. 32 bytes
@@ -49,6 +50,9 @@ func ValidateTokenShape(token string) error {
 	}
 	if len(token) != TokenStringLength {
 		return errors.New("token: unexpected length")
+	}
+	if token != strings.ToLower(token) {
+		return errors.New("token: must use lower-case hex")
 	}
 	if _, err := hex.DecodeString(token); err != nil {
 		return errors.New("token: not hex-encoded")
