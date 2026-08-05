@@ -18,8 +18,9 @@ import site
 import sys
 import sysconfig
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import __version__
 from .backup_transaction import (
@@ -52,6 +53,12 @@ from .handshake import (
     verify_server,
 )
 from .locking import LockError, mutation_lock
+from .multi_bundle_patch import (
+    EXACT_PATCH_KIND,
+    MultiPatchError,
+    describe_transaction as describe_exact_transaction,
+    discover_transactions as discover_exact_transactions,
+)
 from .patch_operation import (
     OperationError,
     PatchOperation,
@@ -106,6 +113,13 @@ EXIT_PROFILE_ERROR = 73
 EXIT_TRANSACTION_ERROR = 74
 EXIT_PROCESS_RUNNING = 75
 EXIT_UNSUPPORTED_PROFILE = 76
+# Recovery of an interrupted operation/restore completed, but the install the
+# user actually asked for did NOT run — rerun it. Previously folded into
+# EXIT_OK, which let automation believe the install had happened.
+EXIT_RECOVERY_COMPLETED = 77
+# status/doctor detected at least one FAIL / mismatch. Previously both
+# commands returned 0 unconditionally, making them useless as script gates.
+EXIT_DIAGNOSTIC_FAIL = 78
 
 
 def _print_disclaimer() -> None:
@@ -341,55 +355,29 @@ def _build_payload_prelude(
     history_source: str = "none",
     legacy_live_patch: bool = False,
 ) -> str:
-    """Render the ``globalThis.__openpe`` bootstrap injected before inject.js.
+    """拒绝把 bearer token 写进普通 renderer bundle。
 
-    ``inject/src/auth.ts`` reads ``window.__openpe`` for the live server
-    base_url / token, and ``inject/src/index.ts`` silently aborts when
-    either field is missing. Without this prelude the inject IIFE would
-    load on every Windsurf launch but never render the button — install
-    must snapshot the descriptor into the bundle.
-
-    Caveat: this embeds the bearer token into the on-disk bundle. When
-    openpe-server is restarted with a new token (the default ``ephemeral
-    (lifecycle auto-generated)`` mode), re-run ``installer install`` so
-    the bundle picks up the fresh token. ``uninstall`` byte-restores the
-    pre-install bundle.
-
-    The ``max_context_tokens`` argument is the consumer-layer token
-    budget resolved by :func:`_resolve_max_context_tokens`. We only
-    embed the field when it's a positive int — matching the Go side's
-    ``json:"max_context_tokens,omitempty"`` so a value of 0 stays
-    indistinguishable from absent on the wire (both mean "no shrinking"
-    on the server). When the user explicitly passes
-    ``--max-context-tokens 0`` we still omit it because the on-wire
-    semantics are identical and the smaller bootstrap is cheaper to
-    re-render on every Windsurf launch.
+    Regular/probe 以外的 renderer mutation 当前本来就由 profile 门禁关闭；
+    若未来重新开放，必须先实现与 exact Devin 相同的 preload capability
+    transaction，不能退回 ``globalThis.__openpe.token``。保留签名只用于让
+    现有 install 编排在安全门禁变化时给出明确、可测试的 fail-closed 错误。
     """
-    config = {
-        "baseUrl": descriptor.base_url,
-        "token": descriptor.token,
-        "version": descriptor.version or "unknown",
-        "hostProfileId": profile_id,
-        "productCommit": product_commit,
-        "transactionId": transaction_id,
-        "client": client,
-        "mode": mode,
-        "historySource": history_source,
-    }
-    if descriptor_path is not None:
-        config["descriptorPath"] = str(descriptor_path)
-    if fs_probe:
-        config["fsProbe"] = True
-    if debug:
-        config["debug"] = True
-    if max_context_tokens is not None and max_context_tokens > 0:
-        config["maxContextTokens"] = int(max_context_tokens)
-    if legacy_live_patch:
-        config["legacyLivePatch"] = True
-    return (
-        "/* === OPENPE-BOOTSTRAP === */\n"
-        "/* rewritten by installer at install time; do not edit by hand */\n"
-        f"globalThis.__openpe = {json.dumps(config, ensure_ascii=False)};\n"
+    del (
+        descriptor,
+        descriptor_path,
+        fs_probe,
+        debug,
+        max_context_tokens,
+        profile_id,
+        product_commit,
+        transaction_id,
+        client,
+        mode,
+        history_source,
+        legacy_live_patch,
+    )
+    raise BundleError(
+        "regular renderer bearer bootstrap is disabled; use a profile-specific preload capability transaction"
     )
 
 
@@ -428,6 +416,13 @@ def _is_strict_probe_config(config: Optional[Dict[str, Any]]) -> bool:
         "historySource",
         "probeOnly",
     }
+
+
+def _is_exact_multi_config(config: Optional[Dict[str, Any]]) -> bool:
+    """True when the embedded bootstrap marks an exact multi-bundle install
+    (its transaction manifest lives under multi-transactions/, not the
+    canonical transactions/ tree)."""
+    return config is not None and config.get("patchKind") == EXACT_PATCH_KIND
 
 
 def _is_legacy_live_config(config: Optional[Dict[str, Any]]) -> bool:
@@ -482,6 +477,7 @@ def _button_config_status(
         return "invalid mixed probe/regular bootstrap"
     base_url = str(config.get("baseUrl", "")).strip()
     token = str(config.get("token", "")).strip()
+    credential_mode = str(config.get("credentialMode", "")).strip()
     mismatches = []
     if paths.profile is not None:
         expected_profile = {
@@ -497,6 +493,12 @@ def _button_config_status(
         if mismatches:
             return "invalid (" + ", ".join(mismatches) + ")"
         return "embedded, but current server descriptor is unavailable; cannot verify freshness"
+    if credential_mode == "preload-capability-v1":
+        if token:
+            mismatches.append("secure preload bootstrap unexpectedly embeds a token")
+        if mismatches:
+            return "invalid (" + ", ".join(mismatches) + ")"
+        return "fresh (secure preload capability; bearer token is not embedded in renderer bundles)"
     if base_url != descriptor.base_url:
         mismatches.append("baseUrl mismatch")
     if token != descriptor.token:
@@ -745,70 +747,121 @@ def _recover_active_patch_operation(paths: IDEPaths) -> bool:
     return True
 
 
-def _cmd_install(args: argparse.Namespace) -> int:
-    paths = _resolve_or_explain(
-        args.app_dir,
-        requested_host=args.host,
-        require_mutation=False,
-    )
-    if paths is None:
-        return EXIT_PROFILE_ERROR
-    assert paths.profile is not None
-    assert paths.product is not None
+@dataclass(frozen=True)
+class _InstallMode:
+    probe_endpoint: Optional[str]
+    legacy_live_patch: bool
+
+    @property
+    def probe_only(self) -> bool:
+        return self.probe_endpoint is not None
+
+
+@dataclass(frozen=True)
+class _InstallRecovery:
+    active_operation: Optional[PatchOperation]
+    restoring: Optional[BackupTransaction]
+    read_only: bool
+
+
+@dataclass(frozen=True)
+class _InstallPayload:
+    text: str
+    path: Optional[Path]
+    descriptor: Optional[LocalServerDescriptor]
+    descriptor_path: Path
+
+
+@dataclass(frozen=True)
+class _InstallTransactionPlan:
+    transaction: BackupTransaction
+    already_patched: bool
+
+
+@dataclass(frozen=True)
+class _InstallTargetPlan:
+    expected_bundle: str
+    expected_product: str
+    prelude: str
+
+
+@dataclass(frozen=True)
+class _InstallTargets:
+    directory: Path
+    bundle: bytes
+    product: bytes
+
+
+def _resolve_install_mode(
+    args: argparse.Namespace,
+) -> Tuple[Optional[_InstallMode], Optional[int]]:
     probe_endpoint: Optional[str] = None
     if args.probe_endpoint is not None:
         try:
             probe_endpoint = validate_probe_endpoint(args.probe_endpoint)
         except ProbeError as exc:
             sys.stderr.write(f"openpe-ide-patch: {exc}\n")
-            return EXIT_USAGE
-    probe_only = probe_endpoint is not None
+            return None, EXIT_USAGE
     legacy_live_patch = False
-    if probe_only and legacy_live_patch:
+    if probe_endpoint is not None and legacy_live_patch:
         sys.stderr.write(
             "openpe-ide-patch: --probe-endpoint and --legacy-live-patch are mutually exclusive\n"
         )
-        return EXIT_USAGE
-    try:
-        active_operation = find_active_operation(paths)
-        restoring = find_restoring_transaction(paths)
-        if active_operation is not None and restoring is not None:
-            raise TransactionError("patch and restore recovery are both pending")
-        read_only_recovery = args.dry_run or not args.i_accept_experimental_risk
-        if active_operation is not None and read_only_recovery:
-            sys.stderr.write(
-                f"openpe-ide-patch: interrupted {active_operation.manifest.kind} "
-                f"operation {active_operation.manifest.operation_id} requires recovery; "
-                "this command remained read-only.\n"
-            )
-            return EXIT_TRANSACTION_ERROR
-        if restoring is not None and read_only_recovery:
-            sys.stderr.write(
-                f"openpe-ide-patch: interrupted restore transaction "
-                f"{restoring.manifest.transaction_id} requires recovery; "
-                "this command remained read-only.\n"
-            )
-            return EXIT_TRANSACTION_ERROR
-        if active_operation is not None and _recover_active_patch_operation(paths):
-            sys.stderr.write("  interrupted operation rolled back; rerun install.\n")
-            return EXIT_OK
-        if restoring is not None:
-            _authorize_recovery(restoring, paths)
-            require_host_stopped(paths.profile)
-            recover_restoring_transaction(restoring, paths)
-            sys.stderr.write("  interrupted restore completed; rerun install.\n")
-            return EXIT_OK
-    except ProcessError as exc:
-        sys.stderr.write(f"openpe-ide-patch: {exc}\n")
-        return EXIT_PROCESS_RUNNING
-    except (OperationError, TransactionError) as exc:
-        sys.stderr.write(f"openpe-ide-patch: operation recovery refused: {exc}\n")
+        return None, EXIT_USAGE
+    return _InstallMode(probe_endpoint, legacy_live_patch), None
+
+
+def _discover_install_recovery(
+    paths: IDEPaths,
+    read_only: bool,
+) -> _InstallRecovery:
+    active_operation = find_active_operation(paths)
+    restoring = find_restoring_transaction(paths)
+    if active_operation is not None and restoring is not None:
+        raise TransactionError("patch and restore recovery are both pending")
+    return _InstallRecovery(active_operation, restoring, read_only)
+
+
+def _run_install_recovery(
+    recovery: _InstallRecovery,
+    paths: IDEPaths,
+) -> Optional[int]:
+    if recovery.active_operation is not None and recovery.read_only:
+        sys.stderr.write(
+            f"openpe-ide-patch: interrupted {recovery.active_operation.manifest.kind} "
+            f"operation {recovery.active_operation.manifest.operation_id} requires recovery; "
+            "this command remained read-only.\n"
+        )
         return EXIT_TRANSACTION_ERROR
-    if not args.i_accept_experimental_risk:
-        _print_disclaimer()
-        return EXIT_DISCLAIMER_NOT_ACCEPTED
+    if recovery.restoring is not None and recovery.read_only:
+        sys.stderr.write(
+            f"openpe-ide-patch: interrupted restore transaction "
+            f"{recovery.restoring.manifest.transaction_id} requires recovery; "
+            "this command remained read-only.\n"
+        )
+        return EXIT_TRANSACTION_ERROR
+    if recovery.active_operation is not None and _recover_active_patch_operation(paths):
+        sys.stderr.write("  interrupted operation rolled back; rerun install.\n")
+        return EXIT_RECOVERY_COMPLETED
+    if recovery.restoring is not None:
+        assert paths.profile is not None
+        _authorize_recovery(recovery.restoring, paths)
+        require_host_stopped(paths.profile)
+        recover_restoring_transaction(recovery.restoring, paths)
+        sys.stderr.write("  interrupted restore completed; rerun install.\n")
+        return EXIT_RECOVERY_COMPLETED
+    return None
+
+
+def _check_install_authorization(
+    paths: IDEPaths,
+    mode: _InstallMode,
+    dry_run: bool,
+) -> Optional[int]:
+    assert paths.profile is not None
+    assert paths.product is not None
     trusted_build = paths.profile.supported_build(platform.system(), paths.product)
-    if probe_only or legacy_live_patch:
+    if mode.probe_only or mode.legacy_live_patch:
         if paths.profile != DEVIN_PROFILE or trusted_build is None:
             sys.stderr.write(
                 "openpe-ide-patch: experimental Devin install requires the exact trusted "
@@ -821,22 +874,30 @@ def _cmd_install(args: argparse.Namespace) -> int:
             f"on {platform.system()}; use the native hook path instead.\n"
         )
         return EXIT_UNSUPPORTED_PROFILE
-    if not args.dry_run and not legacy_live_patch:
+    if not dry_run and not mode.legacy_live_patch:
         try:
             require_host_stopped(paths.profile)
         except ProcessError as exc:
             sys.stderr.write(f"openpe-ide-patch: {exc}\n")
             return EXIT_PROCESS_RUNNING
+    return None
+
+
+def _prepare_install_payload(
+    paths: IDEPaths,
+    mode: _InstallMode,
+) -> Tuple[Optional[_InstallPayload], Optional[int]]:
+    assert paths.profile is not None
     descriptor: Optional[LocalServerDescriptor] = None
     descriptor_path = default_descriptor_path()
     payload_path: Optional[Path] = None
-    if probe_only:
-        assert probe_endpoint is not None
-        payload_text = build_probe_payload(probe_endpoint)
+    if mode.probe_only:
+        assert mode.probe_endpoint is not None
+        payload_text = build_probe_payload(mode.probe_endpoint)
     else:
         descriptor = _read_descriptor_or_explain()
         if descriptor is None:
-            return EXIT_DESCRIPTOR_ERROR
+            return None, EXIT_DESCRIPTOR_ERROR
         try:
             info = verify_server(descriptor)
             validate_profile_cors(
@@ -846,7 +907,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
             )
         except HandshakeError as exc:
             sys.stderr.write(f"openpe-ide-patch: cannot use openpe-server: {exc}\n")
-            return EXIT_HANDSHAKE_ERROR
+            return None, EXIT_HANDSHAKE_ERROR
         payload_path = _load_inject_payload()
         if payload_path is None:
             candidate_lines = "\n".join(
@@ -859,44 +920,309 @@ def _cmd_install(args: argparse.Namespace) -> int:
                 "  source checkout: run `npm install && npm run build` inside inject/.\n"
                 "  packaged install: rebuild/reinstall the wheel with inject/dist/inject.js included.\n"
             )
-            return EXIT_INJECT_PAYLOAD_MISSING
+            return None, EXIT_INJECT_PAYLOAD_MISSING
         try:
             payload_text = payload_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             sys.stderr.write(f"openpe-ide-patch: cannot read inject payload: {exc}\n")
-            return EXIT_INJECT_PAYLOAD_MISSING
+            return None, EXIT_INJECT_PAYLOAD_MISSING
+    return (
+        _InstallPayload(payload_text, payload_path, descriptor, descriptor_path),
+        None,
+    )
+
+
+def _install_budget_label(
+    max_context_tokens: Optional[int],
+    cli_value: Optional[int],
+) -> str:
+    if max_context_tokens is None:
+        return "none (server default = no shrinking)"
+    if max_context_tokens == 0:
+        return "0 (explicit disable; same wire effect as none)"
+    source = (
+        "CLI --max-context-tokens"
+        if cli_value is not None
+        else "OPENPE_MAX_CONTEXT_TOKENS env"
+    )
+    return f"{max_context_tokens} (from {source})"
+
+
+def _render_install_dry_run(
+    paths: IDEPaths,
+    args: argparse.Namespace,
+    mode: _InstallMode,
+    payload: _InstallPayload,
+    max_context_tokens: Optional[int],
+) -> None:
+    budget_label = _install_budget_label(
+        max_context_tokens,
+        args.max_context_tokens,
+    )
+    sys.stdout.write(
+        f"DRY RUN - would patch:\n"
+        f"  bundle:  {paths.bundle_file}\n"
+        f"  product: {paths.product_file}\n"
+        f"  backup:  {paths.backup_dir}\n"
+        f"  payload: {'probe-only structural collector' if mode.probe_only else str(payload.path)} "
+        f"({len(payload.text.encode('utf-8'))} bytes)\n"
+        f"  fs probe: {'yes' if args.fs_probe else 'no'}\n"
+        f"  debug:    {'yes' if args.debug else 'no'}\n"
+        f"  max ctx tokens: {budget_label}\n"
+        f"  codesign: {'yes (macOS)' if is_macos() else 'no (non-macOS)'}\n"
+    )
+
+
+def _prepare_install_transaction(
+    paths: IDEPaths,
+    mode: _InstallMode,
+    already_patched: bool,
+) -> _InstallTransactionPlan:
+    assert paths.profile is not None
+    assert paths.product is not None
+    if already_patched:
+        embedded = _read_embedded_openpe_config(paths.bundle_file)
+        embedded_probe = _is_strict_probe_config(embedded)
+        if mode.probe_only != embedded_probe:
+            raise TransactionError(
+                "probe-only and regular payloads cannot refresh each other; uninstall first"
+            )
+        transaction = _bound_transaction(paths)
+        if mode.probe_only:
+            _authorize_recovery(transaction, paths)
+    else:
+        trusted_build = paths.profile.supported_build(platform.system(), paths.product)
+        if trusted_build is None:
+            raise TransactionError("IDE build is not in the trusted mutation allowlist")
+        verify_trusted_baseline(
+            paths.product_file,
+            paths.bundle_file,
+            trusted_build.product_sha256,
+            trusted_build.bundle_sha256,
+        )
+        transaction = create_transaction(
+            paths,
+            __version__,
+            payload_kind="probe" if mode.probe_only else "regular",
+            trusted_build_id=_trusted_build_id(trusted_build),
+            trusted_bundle_original_sha256=trusted_build.bundle_sha256,
+            trusted_product_original_sha256=trusted_build.product_sha256,
+        )
+        if transaction.manifest.bundle_original_sha256 != trusted_build.bundle_sha256:
+            raise TransactionError("transaction bundle snapshot is not trusted baseline")
+        if transaction.manifest.product_original_sha256 != trusted_build.product_sha256:
+            raise TransactionError("transaction product snapshot is not trusted baseline")
+    return _InstallTransactionPlan(transaction, already_patched)
+
+
+def _prepare_install_target_plan(
+    paths: IDEPaths,
+    args: argparse.Namespace,
+    mode: _InstallMode,
+    payload: _InstallPayload,
+    transaction_plan: _InstallTransactionPlan,
+    max_context_tokens: Optional[int],
+) -> _InstallTargetPlan:
+    assert paths.profile is not None
+    assert paths.product is not None
+    transaction = transaction_plan.transaction
+    expected_bundle = (
+        transaction.manifest.bundle_patched_sha256
+        if transaction_plan.already_patched
+        else transaction.manifest.bundle_original_sha256
+    )
+    expected_product = (
+        transaction.manifest.product_patched_sha256
+        if transaction_plan.already_patched
+        else transaction.manifest.product_original_sha256
+    )
+    if mode.probe_only:
+        prelude = _build_probe_prelude(
+            profile_id=paths.profile.profile_id,
+            product_commit=paths.product.commit,
+            transaction_id=transaction.manifest.transaction_id,
+            client=paths.profile.client,
+            mode=paths.profile.mode,
+            history_source=paths.profile.history_source,
+        )
+    else:
+        assert payload.descriptor is not None
+        prelude = _build_payload_prelude(
+            payload.descriptor,
+            descriptor_path=payload.descriptor_path if args.fs_probe else None,
+            fs_probe=args.fs_probe,
+            debug=args.debug,
+            max_context_tokens=max_context_tokens,
+            profile_id=paths.profile.profile_id,
+            product_commit=paths.product.commit,
+            transaction_id=transaction.manifest.transaction_id,
+            client=paths.profile.client,
+            mode=paths.profile.mode,
+            history_source=paths.profile.history_source,
+            legacy_live_patch=mode.legacy_live_patch,
+        )
+    return _InstallTargetPlan(expected_bundle, expected_product, prelude)
+
+
+def _construct_install_targets(
+    directory: Path,
+    paths: IDEPaths,
+    payload: _InstallPayload,
+    plan: _InstallTargetPlan,
+) -> _InstallTargets:
+    target_bundle_path = directory / paths.bundle_file.name
+    target_product_path = directory / paths.product_file.name
+    target_bundle_path.write_bytes(paths.bundle_file.read_bytes())
+    target_product_path.write_bytes(paths.product_file.read_bytes())
+    inject_bundle(
+        target_bundle_path,
+        plan.prelude + payload.text,
+        expected_sha256=plan.expected_bundle,
+    )
+    new_sum = vscode_checksum(target_bundle_path)
+    patch_product_json(
+        target_product_path,
+        bundle_relpath=DEFAULT_BUNDLE_RELPATH,
+        new_value=new_sum,
+        expected_sha256=plan.expected_product,
+    )
+    verify_bundle_checksum(target_product_path, target_bundle_path)
+    return _InstallTargets(
+        directory,
+        target_bundle_path.read_bytes(),
+        target_product_path.read_bytes(),
+    )
+
+
+def _prepare_install_operation(
+    plan: _InstallTransactionPlan,
+    paths: IDEPaths,
+    targets: _InstallTargets,
+) -> PatchOperation:
+    return prepare_operation(
+        plan.transaction,
+        paths,
+        "refresh" if plan.already_patched else "install",
+        targets.bundle,
+        targets.product,
+    )
+
+
+def _apply_install_targets(
+    operation: PatchOperation,
+    paths: IDEPaths,
+    targets: _InstallTargets,
+    mode: _InstallMode,
+) -> Tuple[BackupTransaction, PatchOperation]:
+    assert paths.profile is not None
+    if not mode.legacy_live_patch:
+        require_host_stopped(paths.profile)
+    apply_operation(operation, paths, targets.bundle, targets.product)
+    verify_bundle_checksum(paths.product_file, paths.bundle_file)
+    if is_macos():
+        codesign_app(paths.app_root)
+    transaction = finalize_operation_transaction(operation, paths)
+    completed = complete_operation(operation, transaction, paths)
+    return transaction, completed
+
+
+def _remove_install_targets(directory: Optional[Path]) -> None:
+    if directory is not None:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _report_install_failure(
+    exc: BaseException,
+    operation: Optional[PatchOperation],
+    paths: IDEPaths,
+    target_dir: Optional[Path],
+) -> int:
+    sys.stderr.write(f"openpe-ide-patch: install failed mid-patch: {exc}\n")
+    if operation is not None and operation.manifest.state == "active":
+        try:
+            operation = rollback_operation(operation, paths)
+            sys.stderr.write(
+                f"  conditionally rolled back operation {operation.manifest.operation_id}\n"
+            )
+        except OperationError as rollback_exc:
+            sys.stderr.write(
+                f"  conditional rollback refused: {rollback_exc}\n"
+                f"  active recovery journal retained at {operation.root}\n"
+            )
+            _remove_install_targets(target_dir)
+            return EXIT_TRANSACTION_ERROR
+    _remove_install_targets(target_dir)
+    return EXIT_BUNDLE_ERROR
+
+
+def _report_install_success(
+    paths: IDEPaths,
+    mode: _InstallMode,
+    transaction: BackupTransaction,
+    operation: Optional[PatchOperation],
+    target_dir: Optional[Path],
+) -> int:
+    assert paths.profile is not None
+    _remove_install_targets(target_dir)
+    sys.stdout.write(
+        f"openpe-ide-patch: {'probe-only' if mode.probe_only else 'legacy-live' if mode.legacy_live_patch else 'install'} complete.\n"
+        f"  profile: {paths.profile.profile_id}\n"
+        f"  transaction: {transaction.manifest.transaction_id}\n"
+        f"  operation: {operation.manifest.operation_id if operation else 'unknown'}\n"
+        f"  {'reload the current window' if mode.legacy_live_patch else 'restart ' + paths.profile.display_name} to "
+        f"{'collect the structural probe' if mode.probe_only else 'load the openPE button'}.\n"
+    )
+    return EXIT_OK
+
+
+def _cmd_install(args: argparse.Namespace) -> int:
+    paths = _resolve_or_explain(
+        args.app_dir,
+        requested_host=args.host,
+        require_mutation=False,
+    )
+    if paths is None:
+        return EXIT_PROFILE_ERROR
+    assert paths.profile is not None
+    assert paths.product is not None
+    mode, mode_exit = _resolve_install_mode(args)
+    if mode_exit is not None:
+        return mode_exit
+    assert mode is not None
+    try:
+        recovery = _discover_install_recovery(
+            paths,
+            args.dry_run or not args.i_accept_experimental_risk,
+        )
+        recovery_exit = _run_install_recovery(recovery, paths)
+        if recovery_exit is not None:
+            return recovery_exit
+    except ProcessError as exc:
+        sys.stderr.write(f"openpe-ide-patch: {exc}\n")
+        return EXIT_PROCESS_RUNNING
+    except (OperationError, TransactionError) as exc:
+        sys.stderr.write(f"openpe-ide-patch: operation recovery refused: {exc}\n")
+        return EXIT_TRANSACTION_ERROR
+    if not args.i_accept_experimental_risk:
+        _print_disclaimer()
+        return EXIT_DISCLAIMER_NOT_ACCEPTED
+    authorization_exit = _check_install_authorization(paths, mode, args.dry_run)
+    if authorization_exit is not None:
+        return authorization_exit
+    payload, payload_exit = _prepare_install_payload(paths, mode)
+    if payload_exit is not None:
+        return payload_exit
+    assert payload is not None
     max_context_tokens = _resolve_max_context_tokens(args.max_context_tokens)
     if args.dry_run:
-        if max_context_tokens is None:
-            budget_label = "none (server default = no shrinking)"
-        elif max_context_tokens == 0:
-            budget_label = "0 (explicit disable; same wire effect as none)"
-        else:
-            source = (
-                "CLI --max-context-tokens"
-                if args.max_context_tokens is not None
-                else "OPENPE_MAX_CONTEXT_TOKENS env"
-            )
-            budget_label = f"{max_context_tokens} (from {source})"
-        sys.stdout.write(
-            f"DRY RUN - would patch:\n"
-            f"  bundle:  {paths.bundle_file}\n"
-            f"  product: {paths.product_file}\n"
-            f"  backup:  {paths.backup_dir}\n"
-            f"  payload: {'probe-only structural collector' if probe_only else str(payload_path)} "
-            f"({len(payload_text.encode('utf-8'))} bytes)\n"
-            f"  fs probe: {'yes' if args.fs_probe else 'no'}\n"
-            f"  debug:    {'yes' if args.debug else 'no'}\n"
-            f"  max ctx tokens: {budget_label}\n"
-            f"  codesign: {'yes (macOS)' if is_macos() else 'no (non-macOS)'}\n"
-        )
+        _render_install_dry_run(paths, args, mode, payload, max_context_tokens)
         return EXIT_OK
     try:
         paths = _refresh_mutation_preflight(
             paths,
             args.host,
-            probe_only=probe_only,
-            legacy_live_patch=legacy_live_patch,
+            probe_only=mode.probe_only,
+            legacy_live_patch=mode.legacy_live_patch,
         )
     except (OSError, PathResolutionError, ProfileError, ProcessError, TransactionError) as exc:
         sys.stderr.write(f"openpe-ide-patch: final mutation preflight failed: {exc}\n")
@@ -909,114 +1235,40 @@ def _cmd_install(args: argparse.Namespace) -> int:
         sys.stderr.write(f"openpe-ide-patch: cannot inspect bundle marker: {exc}\n")
         return EXIT_BUNDLE_ERROR
     try:
-        if already_patched:
-            embedded = _read_embedded_openpe_config(paths.bundle_file)
-            embedded_probe = _is_strict_probe_config(embedded)
-            if probe_only != embedded_probe:
-                raise TransactionError(
-                    "probe-only and regular payloads cannot refresh each other; uninstall first"
-                )
-            transaction = _bound_transaction(paths)
-            if probe_only:
-                _authorize_recovery(transaction, paths)
-        else:
-            trusted_build = paths.profile.supported_build(platform.system(), paths.product)
-            if trusted_build is None:
-                raise TransactionError("IDE build is not in the trusted mutation allowlist")
-            verify_trusted_baseline(
-                paths.product_file,
-                paths.bundle_file,
-                trusted_build.product_sha256,
-                trusted_build.bundle_sha256,
-            )
-            transaction = create_transaction(
-                paths,
-                __version__,
-                payload_kind="probe" if probe_only else "regular",
-                trusted_build_id=_trusted_build_id(trusted_build),
-                trusted_bundle_original_sha256=trusted_build.bundle_sha256,
-                trusted_product_original_sha256=trusted_build.product_sha256,
-            )
-            if transaction.manifest.bundle_original_sha256 != trusted_build.bundle_sha256:
-                raise TransactionError("transaction bundle snapshot is not trusted baseline")
-            if transaction.manifest.product_original_sha256 != trusted_build.product_sha256:
-                raise TransactionError("transaction product snapshot is not trusted baseline")
+        transaction_plan = _prepare_install_transaction(
+            paths,
+            mode,
+            already_patched,
+        )
     except (ChecksumError, TransactionError, OSError) as exc:
         sys.stderr.write(f"openpe-ide-patch: safety preflight failed: {exc}\n")
         return EXIT_TRANSACTION_ERROR
     target_dir: Optional[Path] = None
     operation: Optional[PatchOperation] = None
+    transaction = transaction_plan.transaction
     try:
-        expected_bundle = (
-            transaction.manifest.bundle_patched_sha256
-            if already_patched
-            else transaction.manifest.bundle_original_sha256
-        )
-        expected_product = (
-            transaction.manifest.product_patched_sha256
-            if already_patched
-            else transaction.manifest.product_original_sha256
-        )
-        if probe_only:
-            prelude = _build_probe_prelude(
-                profile_id=paths.profile.profile_id,
-                product_commit=paths.product.commit,
-                transaction_id=transaction.manifest.transaction_id,
-                client=paths.profile.client,
-                mode=paths.profile.mode,
-                history_source=paths.profile.history_source,
-            )
-        else:
-            assert descriptor is not None
-            prelude = _build_payload_prelude(
-                descriptor,
-                descriptor_path=descriptor_path if args.fs_probe else None,
-                fs_probe=args.fs_probe,
-                debug=args.debug,
-                max_context_tokens=max_context_tokens,
-                profile_id=paths.profile.profile_id,
-                product_commit=paths.product.commit,
-                transaction_id=transaction.manifest.transaction_id,
-                client=paths.profile.client,
-                mode=paths.profile.mode,
-                history_source=paths.profile.history_source,
-                legacy_live_patch=legacy_live_patch,
-            )
-        target_dir = Path(tempfile.mkdtemp(prefix="openpe-ide-patch-target-"))
-        target_bundle_path = target_dir / paths.bundle_file.name
-        target_product_path = target_dir / paths.product_file.name
-        target_bundle_path.write_bytes(paths.bundle_file.read_bytes())
-        target_product_path.write_bytes(paths.product_file.read_bytes())
-        inject_bundle(
-            target_bundle_path,
-            prelude + payload_text,
-            expected_sha256=expected_bundle,
-        )
-        new_sum = vscode_checksum(target_bundle_path)
-        patch_product_json(
-            target_product_path,
-            bundle_relpath=DEFAULT_BUNDLE_RELPATH,
-            new_value=new_sum,
-            expected_sha256=expected_product,
-        )
-        verify_bundle_checksum(target_product_path, target_bundle_path)
-        target_bundle = target_bundle_path.read_bytes()
-        target_product = target_product_path.read_bytes()
-        operation = prepare_operation(
-            transaction,
+        target_plan = _prepare_install_target_plan(
             paths,
-            "refresh" if already_patched else "install",
-            target_bundle,
-            target_product,
+            args,
+            mode,
+            payload,
+            transaction_plan,
+            max_context_tokens,
         )
-        if not legacy_live_patch:
-            require_host_stopped(paths.profile)
-        apply_operation(operation, paths, target_bundle, target_product)
-        verify_bundle_checksum(paths.product_file, paths.bundle_file)
-        if is_macos():
-            codesign_app(paths.app_root)
-        transaction = finalize_operation_transaction(operation, paths)
-        operation = complete_operation(operation, transaction, paths)
+        target_dir = Path(tempfile.mkdtemp(prefix="openpe-ide-patch-target-"))
+        targets = _construct_install_targets(
+            target_dir,
+            paths,
+            payload,
+            target_plan,
+        )
+        operation = _prepare_install_operation(transaction_plan, paths, targets)
+        transaction, operation = _apply_install_targets(
+            operation,
+            paths,
+            targets,
+            mode,
+        )
     except (
         BundleError,
         ChecksumError,
@@ -1026,35 +1278,8 @@ def _cmd_install(args: argparse.Namespace) -> int:
         ProcessError,
         TransactionError,
     ) as exc:
-        sys.stderr.write(f"openpe-ide-patch: install failed mid-patch: {exc}\n")
-        if operation is not None and operation.manifest.state == "active":
-            try:
-                operation = rollback_operation(operation, paths)
-                sys.stderr.write(
-                    f"  conditionally rolled back operation {operation.manifest.operation_id}\n"
-                )
-            except OperationError as rollback_exc:
-                sys.stderr.write(
-                    f"  conditional rollback refused: {rollback_exc}\n"
-                    f"  active recovery journal retained at {operation.root}\n"
-                )
-                if target_dir is not None:
-                    shutil.rmtree(target_dir, ignore_errors=True)
-                return EXIT_TRANSACTION_ERROR
-        if target_dir is not None:
-            shutil.rmtree(target_dir, ignore_errors=True)
-        return EXIT_BUNDLE_ERROR
-    if target_dir is not None:
-        shutil.rmtree(target_dir, ignore_errors=True)
-    sys.stdout.write(
-        f"openpe-ide-patch: {'probe-only' if probe_only else 'legacy-live' if legacy_live_patch else 'install'} complete.\n"
-        f"  profile: {paths.profile.profile_id}\n"
-        f"  transaction: {transaction.manifest.transaction_id}\n"
-        f"  operation: {operation.manifest.operation_id if operation else 'unknown'}\n"
-        f"  {'reload the current window' if legacy_live_patch else 'restart ' + paths.profile.display_name} to "
-        f"{'collect the structural probe' if probe_only else 'load the openPE button'}.\n"
-    )
-    return EXIT_OK
+        return _report_install_failure(exc, operation, paths, target_dir)
+    return _report_install_success(paths, mode, transaction, operation, target_dir)
 
 
 def _cmd_uninstall(args: argparse.Namespace) -> int:
@@ -1101,8 +1326,19 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
             "openpe-ide-patch: bundle is not injected; legacy backups were not restored.\n"
         )
         return EXIT_OK
+    config = _read_embedded_openpe_config(paths.bundle_file)
+    if _is_exact_multi_config(config):
+        # Exact multi-bundle installs restore through their own four-artifact
+        # transaction; the canonical single-bundle restore below would only
+        # misreport them as transaction errors.
+        transaction_id = str(config.get("transactionId", "")).strip() if config else ""
+        sys.stderr.write(
+            "openpe-ide-patch: this is an exact multi-bundle install; restore it with:\n"
+            f"  python -m installer.multi_bundle_patch --restore {transaction_id or '<transaction-id>'} "
+            f"--app-dir \"{paths.app_root}\"\n"
+        )
+        return EXIT_TRANSACTION_ERROR
     try:
-        config = _read_embedded_openpe_config(paths.bundle_file)
         transaction = _bound_transaction(paths)
     except TransactionError as exc:
         sys.stderr.write(
@@ -1143,17 +1379,24 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
+    failures: List[str] = []
     try:
         paths = resolve_paths(override=args.app_dir)
     except (PathResolutionError, ProfileError) as exc:
         sys.stdout.write(f"openpe-ide-patch: IDE detection failed ({exc})\n")
         paths = None
+        failures.append("ide detection failed")
+    if paths is None and "ide detection failed" not in failures:
+        failures.append("ide not detected")
+    elif paths is not None and paths.profile is None:
+        failures.append("unsupported profile")
     profile_error: Optional[str] = None
     if paths is not None and paths.product is not None and args.host != "auto":
         try:
             require_profile(paths.product, args.host)
         except ProfileError as exc:
             profile_error = str(exc)
+            failures.append("requested host mismatch")
     marker_present = False
     backup_path: Optional[Path] = None
     legacy_backup_path: Optional[Path] = None
@@ -1175,17 +1418,50 @@ def _cmd_status(args: argparse.Namespace) -> int:
                 backup_path = restoring.bundle_backup
                 transaction_error = "interrupted restore recovery is pending"
             marker_present = has_marker(paths.bundle_file)
+            exact_journals = (
+                discover_exact_transactions(paths)
+                if paths.profile == DEVIN_PROFILE and paths.product is not None
+                else []
+            )
+            for exact in exact_journals:
+                problems = ", ".join(exact.get("problems", []))
+                sys.stdout.write(
+                    f"  exact journal:     {exact['transaction_id']} "
+                    f"(state={exact['state']}"
+                    f"{'; ' + problems if problems else ''})\n"
+                )
+                if exact.get("active") or not exact.get("healthy"):
+                    failures.append(f"exact transaction {exact['transaction_id']}")
             if (
                 marker_present
                 and paths.product is not None
                 and active_operation is None
                 and restoring is None
             ):
-                transaction = _bound_transaction(paths)
-                backup_path = transaction.bundle_backup
-        except (BundleError, OperationError, TransactionError) as exc:
+                # Dispatch on the embedded patchKind: an exact multi-bundle
+                # install keeps its manifest under multi-transactions/, and
+                # the canonical transactions/ lookup used to misreport it as
+                # a transaction error.
+                embedded = _read_embedded_openpe_config(paths.bundle_file)
+                if embedded is not None and _is_exact_multi_config(embedded):
+                    exact = describe_exact_transaction(
+                        paths, str(embedded.get("transactionId", "")).strip()
+                    )
+                    backup_path = exact["root"]
+                    sys.stdout.write(
+                        f"  exact multi txn:   {exact['transaction_id']} "
+                        f"(state={exact['state']}; restore with "
+                        f"python -m installer.multi_bundle_patch --restore {exact['transaction_id']} "
+                        f"--app-dir \"{paths.app_root}\")\n"
+                    )
+                else:
+                    transaction = _bound_transaction(paths)
+                    backup_path = transaction.bundle_backup
+        except (BundleError, OperationError, TransactionError, MultiPatchError) as exc:
             backup_path = None
             transaction_error = str(exc)
+        if transaction_error:
+            failures.append("transaction error")
     descriptor_outcome = "not checked"
     descriptor: Optional[LocalServerDescriptor] = None
     try:
@@ -1194,11 +1470,20 @@ def _cmd_status(args: argparse.Namespace) -> int:
             f"present (base_url={descriptor.base_url}, pid={descriptor.pid}, version={descriptor.version or 'unknown'})"
         )
     except DescriptorError as exc:
+        # Informational: a stopped server is a normal state for `status`,
+        # not a diagnosed failure.
         descriptor_outcome = f"unavailable ({exc})"
+    button_outcome = _button_config_status(
+        paths if paths is not None and paths.exists else None, descriptor
+    )
+    if button_outcome.startswith(("stale", "invalid")):
+        failures.append("button config")
+    if marker_present and descriptor is None:
+        failures.append("descriptor unavailable")
     _print_status(
         paths,
         descriptor_outcome,
-        _button_config_status(paths if paths is not None and paths.exists else None, descriptor),
+        button_outcome,
         marker_present,
         backup_path,
         legacy_backup_path,
@@ -1206,10 +1491,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
     )
     if profile_error:
         sys.stdout.write(f"  requested host:    mismatch ({profile_error})\n")
+    if failures:
+        sys.stdout.write("status: FAIL (" + ", ".join(failures) + ")\n")
+        return EXIT_DIAGNOSTIC_FAIL
     return EXIT_OK
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
+    failures: List[str] = []
     sys.stdout.write(f"openpe-ide-patch {__version__} doctor\n")
     sys.stdout.write(f"  python:           {sys.version.split()[0]} ({sys.executable})\n")
     sys.stdout.write(f"  platform:         {sys.platform}\n")
@@ -1219,10 +1508,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     except (PathResolutionError, ProfileError) as exc:
         paths = None
         sys.stdout.write(f"  ide detection:    FAIL ({exc})\n")
+        failures.append("ide detection")
     if paths is None:
         sys.stdout.write("  ide:              not detected at default paths\n")
+        if "ide detection" not in failures:
+            failures.append("ide not detected")
     else:
         profile = paths.profile
+        if profile is None:
+            failures.append("unsupported profile")
         host_mismatch: Optional[str] = None
         if paths.product is not None and args.host != "auto":
             try:
@@ -1254,6 +1548,18 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             sys.stdout.write(
                 f"  runtime verified: {'yes' if profile.allows_mutation(platform.system(), paths.product) else 'no'}\n"
             )
+            if process.state == "unknown":
+                failures.append("process state unknown")
+            if profile == DEVIN_PROFILE and paths.product is not None:
+                for exact in discover_exact_transactions(paths):
+                    problems = ", ".join(exact.get("problems", []))
+                    sys.stdout.write(
+                        f"  exact journal:    {exact['transaction_id']} "
+                        f"(state={exact['state']}"
+                        f"{'; ' + problems if problems else ''})\n"
+                    )
+                    if exact.get("active") or not exact.get("healthy"):
+                        failures.append(f"exact transaction {exact['transaction_id']}")
         sys.stdout.write(f"  backup dir:       {paths.backup_dir}\n")
         sys.stdout.write(f"  legacy backup:    {paths.legacy_backup_dir}\n")
         try:
@@ -1267,6 +1573,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 )
         except OperationError as exc:
             sys.stdout.write(f"  active operation: FAIL ({exc})\n")
+            failures.append("active operation")
         try:
             restoring = find_restoring_transaction(paths)
             if restoring is None:
@@ -1277,8 +1584,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 )
         except TransactionError as exc:
             sys.stdout.write(f"  restoring txn:   FAIL ({exc})\n")
+            failures.append("restoring txn")
         if host_mismatch:
             sys.stdout.write(f"  requested host:   mismatch ({host_mismatch})\n")
+            failures.append("requested host")
     descriptor_path = default_descriptor_path()
     sys.stdout.write(f"  descriptor path:  {descriptor_path}\n")
     descriptor: Optional[LocalServerDescriptor] = None
@@ -1299,14 +1608,29 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 sys.stdout.write("  CORS profile:     OK\n")
         except HandshakeError as exc:
             sys.stdout.write(f"  server profile:   FAIL ({exc})\n")
+            failures.append("server profile")
     except DescriptorError as exc:
         sys.stdout.write(f"  descriptor:       FAIL ({exc})\n")
-    sys.stdout.write(f"  button config:    {_button_config_status(paths if paths is not None and paths.exists else None, descriptor)}\n")
+        failures.append("descriptor")
+    button_outcome = _button_config_status(
+        paths if paths is not None and paths.exists else None, descriptor
+    )
+    sys.stdout.write(f"  button config:    {button_outcome}\n")
+    if button_outcome.startswith(("stale", "invalid")):
+        failures.append("button config")
     payload = _load_inject_payload()
     if payload is None:
         sys.stdout.write("  inject payload:   missing (run `npm run build` inside inject/)\n")
+        failures.append("inject payload")
     else:
         sys.stdout.write(f"  inject payload:   {payload} ({payload.stat().st_size} bytes)\n")
+    # Doctor exists to answer "is this environment ready?": any FAIL line is
+    # a NO and must be scriptable — the command used to return 0 even while
+    # printing failures.
+    if failures:
+        sys.stdout.write("doctor: FAIL (" + ", ".join(failures) + ")\n")
+        return EXIT_DIAGNOSTIC_FAIL
+    sys.stdout.write("doctor: OK\n")
     return EXIT_OK
 
 

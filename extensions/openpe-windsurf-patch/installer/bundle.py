@@ -20,6 +20,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import secrets
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,19 +57,7 @@ def has_marker(bundle_path: Path, marker: Optional[Marker] = None) -> bool:
     marker = marker or default_marker()
     marker.validate()
     data = _read_bytes(bundle_path)
-    begin = marker.begin.encode("utf-8")
-    end = marker.end.encode("utf-8")
-    begin_count = data.count(begin)
-    end_count = data.count(end)
-    if begin_count == 0 and end_count == 0:
-        return False
-    if begin_count != 1 or end_count != 1:
-        raise BundleError(
-            f"marker: expected one begin/end pair, got {begin_count}/{end_count}"
-        )
-    if data.find(begin) > data.find(end):
-        raise BundleError("marker: end appears before begin")
-    return True
+    return _validate_marker_layout(data, marker) is not None
 
 
 def inject(
@@ -87,11 +76,15 @@ def inject(
         raise BundleError("inject: payload is empty")
     marker = marker or default_marker()
     marker.validate()
+    # payload 自带 marker 分隔符会在写入后形成重复 marker——之后的每一次
+    # has_marker/inject 都会把 bundle 判为畸形并拒绝处理，先在源头拒绝。
+    if marker.begin in payload or marker.end in payload:
+        raise BundleError("inject: payload must not contain the marker delimiters")
     data = _read_bytes(bundle_path)
     if expected_sha256 and hashlib.sha256(data).hexdigest() != expected_sha256:
         raise BundleError("inject: live bundle changed before compare-and-swap")
     block = _build_block(payload, marker)
-    existing = _locate_existing_marker(data, marker)
+    existing = _validate_marker_layout(data, marker)
     if existing is not None:
         start, end = existing
         new_data = data[:start] + block + data[end:]
@@ -123,8 +116,10 @@ def backup(bundle_path: Path, backup_dir: Path) -> Path:
         # Best-effort: tightening mode is non-critical on platforms where
         # we don't own the directory (e.g. /tmp under some configurations).
         pass
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    target = backup_dir / f"{bundle_path.name}.{timestamp}.original"
+    # 微秒 + 随机后缀：秒级时间戳曾让同一秒内的两次备份互相覆盖，
+    # 丢失其中一份原始文件。
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = backup_dir / f"{bundle_path.name}.{timestamp}-{secrets.token_hex(4)}.original"
     _atomic_write(target, data, mode=0o600)
     return target
 
@@ -155,18 +150,22 @@ def _build_block(payload: str, marker: Marker) -> bytes:
     return f"{marker.begin}\n{body}{marker.end}\n".encode("utf-8")
 
 
-def _locate_existing_marker(data: bytes, marker: Marker) -> Optional[Tuple[int, int]]:
+def _validate_marker_layout(data: bytes, marker: Marker) -> Optional[Tuple[int, int]]:
     begin_bytes = marker.begin.encode("utf-8")
     end_bytes = marker.end.encode("utf-8")
+    begin_count = data.count(begin_bytes)
+    end_count = data.count(end_bytes)
+    if begin_count == 0 and end_count == 0:
+        return None
+    if begin_count != 1 or end_count != 1:
+        raise BundleError(
+            f"marker: expected one begin/end pair, got {begin_count}/{end_count}"
+        )
     begin_idx = data.find(begin_bytes)
-    if begin_idx < 0:
-        return None
-    tail_idx = data.find(end_bytes, begin_idx)
-    if tail_idx < 0:
-        return None
-    end = tail_idx + len(end_bytes)
-    # Extend the span over a single trailing newline so repeated injects do
-    # not accumulate blank lines around the marker region.
+    end_idx = data.find(end_bytes)
+    if begin_idx > end_idx:
+        raise BundleError("marker: end appears before begin")
+    end = end_idx + len(end_bytes)
     if end < len(data) and data[end : end + 1] == b"\n":
         end += 1
     return (begin_idx, end)

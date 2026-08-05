@@ -169,7 +169,7 @@ PROFILES = (DEVIN_PROFILE, WINDSURF_PROFILE)
 def read_product_identity(path: Path) -> ProductIdentity:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProfileError(f"cannot read product identity from {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ProfileError(f"product identity at {path} must be a JSON object")

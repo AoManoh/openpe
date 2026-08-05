@@ -12,8 +12,10 @@ implementation in ``internal/integration`` of the main openPE repository.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -84,8 +86,8 @@ class LocalServerDescriptor:
         if not self.base_url:
             raise DescriptorError("descriptor: base_url is required")
         validate_loopback_base_url(self.base_url)
-        if not self.token:
-            raise DescriptorError("descriptor: token is required")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.token):
+            raise DescriptorError("descriptor: token must be 64 lower-case hex characters")
         if self.pid <= 0:
             raise DescriptorError("descriptor: pid must be positive")
 
@@ -184,6 +186,175 @@ def default_descriptor_path() -> Path:
     return base / "openpe" / DEFAULT_DESCRIPTOR_NAME
 
 
+def _validate_windows_descriptor_acl(path: Path) -> None:
+    """要求 descriptor DACL 受保护且仅含当前用户一个 allow ACE。
+
+    Go server 在发布 descriptor 时设置同一策略；installer 重新验证，避免
+    preload 从可被其它本地用户读取/替换的 credential 文件取 token。
+    """
+    if os.name != "nt":
+        return
+    try:
+        from ctypes import wintypes
+
+        class ACL_HEADER(ctypes.Structure):
+            _fields_ = [
+                ("AclRevision", ctypes.c_ubyte),
+                ("Sbz1", ctypes.c_ubyte),
+                ("AclSize", wintypes.WORD),
+                ("AceCount", wintypes.WORD),
+                ("Sbz2", wintypes.WORD),
+            ]
+
+        class ACE_HEADER(ctypes.Structure):
+            _fields_ = [
+                ("AceType", ctypes.c_ubyte),
+                ("AceFlags", ctypes.c_ubyte),
+                ("AceSize", wintypes.WORD),
+            ]
+
+        class ACCESS_ALLOWED_ACE(ctypes.Structure):
+            _fields_ = [
+                ("Header", ACE_HEADER),
+                ("Mask", wintypes.DWORD),
+                ("SidStart", wintypes.DWORD),
+            ]
+
+        class SID_AND_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+        class TOKEN_USER(ctypes.Structure):
+            _fields_ = [("User", SID_AND_ATTRIBUTES)]
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_named = advapi32.GetNamedSecurityInfoW
+        get_named.argtypes = (
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        get_named.restype = wintypes.DWORD
+        get_control = advapi32.GetSecurityDescriptorControl
+        get_control.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.WORD),
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        get_control.restype = wintypes.BOOL
+        get_ace = advapi32.GetAce
+        get_ace.argtypes = (
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        get_ace.restype = wintypes.BOOL
+        equal_sid = advapi32.EqualSid
+        equal_sid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        equal_sid.restype = wintypes.BOOL
+        open_token = advapi32.OpenProcessToken
+        open_token.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.HANDLE),
+        )
+        open_token.restype = wintypes.BOOL
+        get_token = advapi32.GetTokenInformation
+        get_token.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        get_token.restype = wintypes.BOOL
+        get_current_process = kernel32.GetCurrentProcess
+        get_current_process.argtypes = ()
+        get_current_process.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        local_free = kernel32.LocalFree
+        local_free.argtypes = (ctypes.c_void_p,)
+        local_free.restype = ctypes.c_void_p
+
+        owner = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        security_descriptor = ctypes.c_void_p()
+        result = get_named(
+            str(path),
+            1,  # SE_FILE_OBJECT
+            0x00000001 | 0x00000004,  # OWNER + DACL_SECURITY_INFORMATION
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result != 0:
+            raise OSError(result, "GetNamedSecurityInfoW failed")
+        try:
+            control = wintypes.WORD()
+            revision = wintypes.DWORD()
+            if not get_control(
+                security_descriptor, ctypes.byref(control), ctypes.byref(revision)
+            ):
+                raise OSError(ctypes.get_last_error(), "GetSecurityDescriptorControl failed")
+            if control.value & 0x1000 == 0:  # SE_DACL_PROTECTED
+                raise DescriptorError("descriptor DACL is not protected")
+            if not dacl.value:
+                raise DescriptorError("descriptor DACL is missing")
+            ace_count = ctypes.cast(dacl, ctypes.POINTER(ACL_HEADER)).contents.AceCount
+            if ace_count != 1:
+                raise DescriptorError("descriptor DACL must contain exactly one ACE")
+            ace = ctypes.c_void_p()
+            if not get_ace(dacl, 0, ctypes.byref(ace)):
+                raise OSError(ctypes.get_last_error(), "GetAce failed")
+            allowed_ace = ctypes.cast(
+                ace, ctypes.POINTER(ACCESS_ALLOWED_ACE)
+            ).contents
+            if allowed_ace.Header.AceType != 0 or allowed_ace.Header.AceFlags & 0x08:
+                raise DescriptorError("descriptor DACL entry is not a direct allow ACE")
+            file_read_write = 0x00120089 | 0x00120116
+            if allowed_ace.Mask & file_read_write != file_read_write:
+                raise DescriptorError("descriptor DACL does not grant read/write")
+            ace_sid = ctypes.c_void_p(ace.value + ACCESS_ALLOWED_ACE.SidStart.offset)
+
+            token = wintypes.HANDLE()
+            if not open_token(get_current_process(), 0x0008, ctypes.byref(token)):
+                raise OSError(ctypes.get_last_error(), "OpenProcessToken failed")
+            try:
+                needed = wintypes.DWORD()
+                get_token(token, 1, None, 0, ctypes.byref(needed))  # TokenUser
+                if needed.value == 0:
+                    raise OSError(ctypes.get_last_error(), "GetTokenInformation size failed")
+                buffer = ctypes.create_string_buffer(needed.value)
+                if not get_token(
+                    token, 1, buffer, needed.value, ctypes.byref(needed)
+                ):
+                    raise OSError(ctypes.get_last_error(), "GetTokenInformation failed")
+                current_sid = ctypes.cast(
+                    buffer, ctypes.POINTER(TOKEN_USER)
+                ).contents.User.Sid
+                if not equal_sid(owner, current_sid):
+                    raise DescriptorError("descriptor owner is not current user")
+                if not equal_sid(ace_sid, current_sid):
+                    raise DescriptorError("descriptor DACL is not owned by current user")
+            finally:
+                close_handle(token)
+        finally:
+            local_free(security_descriptor)
+    except DescriptorError:
+        raise
+    except (AttributeError, OSError, ValueError) as exc:
+        raise DescriptorError(f"cannot validate descriptor DACL: {exc}") from exc
+
+
 def read_descriptor(path: Optional[Path] = None) -> LocalServerDescriptor:
     """Read and validate a descriptor file.
 
@@ -193,6 +364,8 @@ def read_descriptor(path: Optional[Path] = None) -> LocalServerDescriptor:
     """
     if path is None:
         path = default_descriptor_path()
+    if path.is_symlink():
+        raise DescriptorError(f"descriptor path must not be a symlink: {path}")
     if not path.is_file():
         raise DescriptorError(f"descriptor file not found: {path}")
     try:
@@ -200,18 +373,14 @@ def read_descriptor(path: Optional[Path] = None) -> LocalServerDescriptor:
     except OSError as exc:
         raise DescriptorError(f"stat descriptor {path}: {exc}") from exc
     mode = stat.S_IMODE(st.st_mode)
-    # NTFS does not honour POSIX mode bits: Go's os.Chmod(0o600) only toggles
-    # the read-only flag on Windows, and Path.stat().st_mode reports 0o666
-    # for any writable file. The check would unconditionally reject any
-    # descriptor on Windows; rely on the default %USERPROFILE% ACL instead,
-    # matching OpenSSH's StrictModes-on-Windows behaviour.
     if os.name == "posix" and mode & 0o077 != 0:
         raise DescriptorError(
             f"descriptor file {path} has insecure mode {oct(mode)} (want 0o600 or stricter)"
         )
+    _validate_windows_descriptor_acl(path)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DescriptorError(f"parse descriptor {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise DescriptorError(f"descriptor {path}: root must be a JSON object")
@@ -263,12 +432,18 @@ def verify_server(
                 )
             body = raw.decode("utf-8")
     except HTTPError as exc:
-        if 300 <= exc.code < 400:
-            raise HandshakeError(
-                f"refusing to follow HTTP {exc.code} redirect from /v1/info; "
-                "the bearer token is only ever sent to the descriptor origin"
-            ) from exc
-        raise HandshakeError(f"server rejected request: HTTP {exc.code}") from exc
+        # HTTPError doubles as a response object holding an open socket;
+        # close it before raising or every rejected handshake (including the
+        # refused-redirect path) leaks the connection until GC.
+        try:
+            if 300 <= exc.code < 400:
+                raise HandshakeError(
+                    f"refusing to follow HTTP {exc.code} redirect from /v1/info; "
+                    "the bearer token is only ever sent to the descriptor origin"
+                ) from exc
+            raise HandshakeError(f"server rejected request: HTTP {exc.code}") from exc
+        finally:
+            exc.close()
     except URLError as exc:
         raise HandshakeError(f"cannot reach openpe-server: {exc.reason}") from exc
     except TimeoutError as exc:
