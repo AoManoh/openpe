@@ -19,9 +19,7 @@
 1. 修改 Electron bundle 可能影响 EULA、厂商支持与完整性基线。
 2. macOS 重签不能恢复 vendor 原签名，因此当前 mutation 被禁用。
 3. IDE 更新会覆盖 patch；旧 build backup 绝不能恢复到新 build。
-4. Bootstrap 会把本地 bearer token 快照写入应用 bundle；server 必须只监听
-   loopback，CORS 必须使用 profile 的精确 origin。Exact Devin 入口轮换 token 后
-   必须 restore + reinstall；canonical refresh 当前不对该入口生效。
+4. Bearer token **不会进入 renderer bundle、sandbox preload isolate 或 `globalThis`**。Preload 只允许固定 schema IPC；Electron main 以同一 fd + Windows owner/protected-DACL 校验读取 descriptor、持有 token 并发 HTTP。server 仍只监听 loopback，CORS 使用 profile 精确 origin；轮换 token 不再要求重写 renderer bundle。
 5. 私有 DOM、editor 与 storage 契约会随上游更新变化。
 
 ## 当前支持矩阵
@@ -33,8 +31,7 @@
 | unknown product | 只读报告 unsupported | 拒绝 | 不按目录名猜宿主 |
 
 “当前 Devin exact build 已通过一次实机 E2E”不等于未来 Devin 版本通用支持。
-Build version、commit、workbench、sessions、sessions HTML 或 product 任一 baseline
-变化时，独立入口都会 fail closed。正式默认集成仍是 native Devin hook。
+Build version、commit、workbench、sessions、sessions HTML、sandbox preload 或 product 任一 baseline 变化时，独立入口都会 fail closed。正式默认集成仍是 native Devin hook。
 
 ## 安全模型
 
@@ -43,11 +40,8 @@ Build version、commit、workbench、sessions、sessions HTML 或 product 任一
 - 首次 install 前校验 product 记录的 bundle checksum 与 live bundle 一致。
 - Canonical 单 bundle 路径的 transaction manifest 绑定 profile、install root、
   product version/commit、bundle/product 原始与 patched SHA-256。
-- Exact-build Devin 入口在单个 manifest 中绑定 `sessions`、`workbench`、
-  `sessions.html` 与 `product.json` 四个 artifact 的原始/patched SHA-256；写前逐个
-  验证 backup，失败时只覆盖仍处于已知 before/target 状态的文件。
-- Canonical refresh 只复用 marker 指向的 exact transaction；exact-build Devin
-  入口当前不提供 refresh，token 变化时需先 exact restore 再 install。
+- Exact-build Devin 入口在单个 manifest 中绑定 Electron `out/main.js`、`sessions`、`workbench`、`sessions.html`、sandbox `preload.js` 与 `product.json` 六个 artifact；Windows 事务持有六个 `dwShareMode=0` 独占句柄和一个 `Devin.exe` 只读 guard，backup、write-intent、写入、校验和最终 manifest 提交都在句柄释放前完成。部分写失败通过同一 handle 强制回滚 verified backup。
+- Canonical refresh 只复用 marker 指向的 exact transaction；exact-build Devin 当前不提供 refresh。token 由 Electron main 动态读取 descriptor，单纯轮换不要求重装；payload/IPC bridge 变更仍需 exact restore + install。status/doctor 不依赖 marker 扫描 journal，并把 prepared/installing/restoring/mixed 报为非零。
 - 恢复只接受同 profile、同 install、同 product build、同路径且 checksum 完整的
   transaction。任一 live/backup 状态未知都拒绝覆盖。
 - Mutation 前要求 IDE/updater 已停止；进程探针失败时 fail closed。
@@ -55,7 +49,7 @@ Build version、commit、workbench、sessions、sessions HTML 或 product 任一
 ## 系统要求
 
 - Python 3.8+
-- 从源码构建 payload 时需要 Node.js 18+ 与 npm
+- 从源码构建和运行 TS 测试需要 Node.js **22.18+** 与 npm（tests 直接 import `.ts`，依赖默认 type stripping）；bundler 使用 `esbuild-wasm`，同一工作树在 Windows/WSL 间切换不会再因 native binary 平台错配而失败（代价是构建稍慢）
 - 按钮需要运行中的 loopback `openpe-server`。Exact-build Devin 使用已实测的
   `vscode-file://vscode-app` Origin：
 
@@ -79,15 +73,11 @@ prompt；当前也不传 native Devin session history 或 workspace `cwd`。这�
 Windsurf trajectory 错配到 Devin，但意味着按钮增强没有 native hook 路径可获得的
 会话历史，也不会触发依赖 `cwd` 的 Openace 检索。
 
-### Legacy Windsurf 对话历史抓取是 best-effort（只能拿到当前 trajectory）
+### Legacy Windsurf trajectory 仅诊断采集，不进入增强请求
 
-点击 legacy Windsurf 的 openPE 按钮时，若有缓存到消息，payload 会把它们以 `history`
-字段附在本地 `POST /v1/prompt-enhance` 请求里。该字段由
-`inject/src/cascade_context.ts` 里的 renderer 侧 watcher 提供：watcher
-监听 Windsurf 的 IndexedDB（`keyval-store` /
-`windsurf:cache:cachedActiveTrajectory:<workspace>`）里**当前进行中那个
-trajectory** 的完整字节，按尾切片返回——最多 32 条消息，每条截到 6 000
-字符，总字符数硬上限 80 000（超额时优先丢最旧的）。
+Renderer 没有可证明的 editor/chat ↔ trajectory identity。旧实现猜“最近 trajectory”并把一个全局 cache 交给任意 editor，新 chat 首次增强可能携带旧 chat 明文。当前按隐私边界 fail closed：`cascade_context.ts` 仍可观察**当前 renderer 亲眼见到的** IndexedDB put，按 workspace key 与 protobuf `trajectory_id` 切换清缓存，并提供 debug 形态诊断；但 `dialog.ts` 永远不给 `/v1/prompt-enhance` 附加这份未绑定 `history`。
+
+Collector 本身仍执行 32 条、每条 6 000 字符（省略号计入上限）、总计 80 000 字符的边界，IndexedDB connection 在 transaction 完成/pagehide 时关闭，refresh 期间的新 put 通过 dirty-loop 重跑，不再丢更新。只有未来获得稳定 chat identity 并完成绑定测试后，才可重新打开 wire history。
 
 它**抓不到**同一 chat session 里早期已经结束的 task。Phase 5 bring-up
 （2026-05-22）逆向了 renderer 可见的状态，给出了原因：
@@ -138,7 +128,7 @@ Bundle patch 不是默认集成。Devin 用户优先使用：
 openpe devin hook install
 ```
 
-Canonical 入口继续提供只读诊断；其 `install/uninstall` 仍保持 fail closed：
+Canonical 入口继续提供只读诊断；其 `install/uninstall` 仍保持 fail closed。`status` / `doctor` 只有在诊断通过时退出 0；任何打印的 `FAIL`、host mismatch、transaction error、缺失 payload/descriptor 都返回专用非零码，适合作为脚本门禁。Exact bootstrap 会按 `patchKind` 查询 `multi-transactions/`，不再误用 canonical `transactions/`：
 
 ```bash
 python -m installer.cli status --host auto --app-dir "C:\path\to\IDE"
@@ -227,8 +217,8 @@ python -m installer.multi_bundle_patch `
   不要继续扩大测试范围。
 - 无附件、存在截图附件时，每个 prompt editor 都只出现一个 openPE 按钮；当前实现
   会按唯一 editor 分组，只选择最右侧可见的 Devin action 作为 anchor。
-- 点击按钮后本地 authenticated `POST /v1/prompt-enhance` 返回成功，且仅在原 editor
-  文本未变化时自动回填；请求期间用户继续编辑时只复制结果，不覆盖新输入。
+- 点击按钮后 renderer→sandbox preload→Electron main IPC 调用本地 authenticated `POST /v1/prompt-enhance`；renderer/preload 看不到 bearer token。每个 editor 独立 single-flight，30 秒 main wall-clock deadline，pagehide/renderer abort 会按 request ID 销毁底层 HTTP；一个慢 editor 不会锁住其它 editor。
+- 自动回填以 input/composition revision 为并发版本；textarea 原始 value 逐字比较（包括末尾换行），请求期间任何用户编辑都只复制结果、不覆盖新输入。
 - Devin 路径固定 `history=none`、`cwd=""`，不会混入 legacy Windsurf trajectory，
   也不会触发 Openace 代码检索。
 
@@ -243,14 +233,9 @@ backup 只作为审计资产，不参与该恢复路径。
 
 ### 消费层 token 预算 (`--max-context-tokens` / `OPENPE_MAX_CONTEXT_TOKENS`)
 
-Codex / Claude / Windsurf hook 会把 `OPENPE_MAX_CONTEXT_TOKENS` 写入每次
-`enhancer.Request.Options`。按钮虽然共享同一个 `openpe-server` 增强管线，但预算
-是请求字段，不是 server 自动套用的全局默认。
+Codex / Claude / Windsurf hook 会把 `OPENPE_MAX_CONTEXT_TOKENS` 写入每次 `enhancer.Request.Options`；HTTP/button 未显式传值时则由 `openpe-server` 套用自身同名配置。
 
-当前 exact-build Devin 入口没有 `--max-context-tokens` 参数，也不会从 dotenv
-快照该字段，因此按钮请求不发送 `options.max_context_tokens`。仅在 server 进程中
-设置同名变量不会给按钮请求启用预算；后续将该选项接入多 renderer transaction 并
-完成 wire 测试前，不能宣称按钮与 hook 共享该配置。
+当前 exact-build Devin 入口不把该值快照进 renderer bundle；按钮未显式发送 `options.max_context_tokens` 时，`openpe-server` 会把自身启动配置中的 `OPENPE_MAX_CONTEXT_TOKENS` 作为请求默认值。因此 hook 与按钮可共享同一 server 预算；如果未来 capability 明确传正整数，则请求值优先。预算覆盖 system、required task、history/reference 全部 provider message，required floor 放不下时返回错误。
 
 注意区分**消费层** vs **采集层**：
 

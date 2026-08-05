@@ -1,8 +1,7 @@
 # openpe-ide-inject
 
 Profile-gated IDE patch payload 的 TypeScript 源码。它被构建为单个自包含
-IIFE；canonical 路径写入 `workbench.desktop.main.js`，exact-build Devin
-入口同时写入 sessions/workbench 两个 renderer bundle。
+IIFE；canonical 路径当前 mutation 门禁关闭，exact-build Devin 把 UI payload 写入 sessions/workbench、把 IPC-only `enhance()/cancel()` capability 写入 sandbox preload、把 descriptor/authenticated HTTP handler 写入 Electron `out/main.js`。Bearer token 只进入 main process，不进入 renderer/preload bundle 或 global。
 
 缺失或未知 `hostProfileId` 一律 fail closed。`windsurf-legacy` 只在
 `client=windsurf`、`mode=cascade` 时启用；`devin-desktop` 只在
@@ -15,7 +14,8 @@ IIFE；canonical 路径写入 `workbench.desktop.main.js`，exact-build Devin
 cd extensions/openpe-windsurf-patch/inject
 npm ci
 npm run check
-npm run build    # → dist/inject.js
+npm test
+npm run build    # esbuild-wasm → dist/inject.js；Windows/WSL 共用工作树不受 native binary 影响
 ```
 
 Python installer 的 `install` 子命令会读 `dist/inject.js`，缺这个文件就
@@ -33,14 +33,16 @@ npm run check    # tsc --noEmit
 |---|---|
 | `src/anchor_selection.ts` | 按唯一 editor 分组并只选择最右侧 Devin action，避免附件区同 class 按钮产生重复 anchor。 |
 | `src/index.ts`           | IIFE 入口；单实例守卫；unknown/mismatched profile 拒绝启动；已验证 profile 启动 observer，只有 legacy Windsurf 启动 history watcher。 |
-| `src/auth.ts`            | 解析 installer bootstrap：server、transaction、client/mode、history source 与 runtime gate。 |
-| `src/fs_probe.ts`        | 可选的 P3 诊断探针，验证 Windsurf renderer 能否通过 Node `fs` 读到本地 0600 descriptor。 |
-| `src/client.ts`          | `fetch` 调本地 `POST /v1/prompt-enhance`。有缓存时附带可选的 `history` 字段。 |
-| `src/observer.ts`        | `MutationObserver` 定位 Cascade 输入工具栏并触发注入。 |
+| `src/auth.ts`            | 一次性读取并删除 installer bootstrap；解析 transaction、client/mode、credential mode 与 runtime gate。 |
+| `src/fs_probe.ts`        | 可选的 P3 诊断探针，验证 Windsurf renderer 能否通过 Node `fs` 读到本地 descriptor。 |
+| `src/client.ts`          | Exact 走 preload `enhance()` capability；legacy bearer 兼容路径才直接 `fetch`。两者都支持 deadline/abort。 |
+| `src/observer.ts`        | `MutationObserver` 定位输入工具栏；按 animation frame 合并 mutation storm，pagehide 时 disconnect。 |
 | `src/button.ts`          | openPE logo 按钮的 DOM 创建；样式委托给 `styles.ts`。图标 SVG 完整 inline 在本文件内（`OPENPE_LOGO_SVG`），模块加载时编码成 data URI，运行时不依赖任何外部 SVG 文件。 |
-| `src/dialog.ts`          | 点击增强流程：读 editor → 调 enhancer → 写回。 |
+| `src/dialog.ts`          | 点击增强流程：per-editor single-flight、30 秒 deadline、input/composition revision 保护、读 editor → 调 enhancer → 安全写回。 |
+| `src/editor_state.ts`    | textarea 无损比较与 contenteditable 渲染换行规范化。 |
+| `src/history_policy.ts`  | 无稳定 chat identity 时禁止未绑定 trajectory 进入 enhancement wire。 |
 | `src/styles.ts`          | 尊重 `var(--vscode-*)` 主题变量的 CSS 变量。 |
-| `src/cascade_context.ts` | 从 IndexedDB trajectory 缓存里镜像当前 Cascade 对话，让 `dialog.ts` 能把最近消息作为 `enhancer.Request.History` 附上。纯 renderer 侧观察；不需要 hook adapter、server 或 enhancer 任何改动。 |
+| `src/cascade_context.ts` | debug-only trajectory collector：只信当前 renderer 观察到的 put，key/id 切换清缓存，dirty refresh loop，transaction/pagehide 关闭 IDB。 |
 
 ## 真实宿主 DOM 注意
 
@@ -68,9 +70,7 @@ python3 -m installer.cli install --host windsurf --i-accept-experimental-risk --
 ```
 
 重启 Windsurf 后点 openPE 按钮，在 DevTools 看 `[openpe-fs-probe]`。
-探针只输出 descriptor 路径、字节数、文件 mode 和 schema 形状；不能
-打印 bearer token。这是把"安装时嵌入 token"替换成"运行时读 descriptor"
-之前的临时诊断网关。
+探针只输出 descriptor 路径、字节数、文件 mode 和 schema 形状；不能打印 bearer token。Exact Devin 已完成“Electron main 同 fd/ACL 校验读取 descriptor + preload IPC-only + renderer 仅持 capability”的迁移；`--fs-probe` 仅保留为 canonical bring-up 诊断工具。
 
 ## Dev/test 诊断网关 (`--debug`)
 
@@ -135,14 +135,11 @@ window.__openpeDebug.describeLastEnhance()
 | accessor | preview 上限 / 条 | 用途 |
 |---|---|---|
 | `describeHistory()` | **80 字符** | 任何时间安全瞄一眼当前缓存形状 |
-| `describeLastEnhance().request.messagePreviews[]` | **200 字符** | 验证"方案1/方案A 这种模糊指代的定义是不是真的被打包进 history 一起发出去了"——一条典型的定义/上下文通常 50-150 字符，200 字符够装下 |
+| `describeLastEnhance().request.messagePreviews[]` | **200 字符** | 当前 wire history fail closed，因此应为空；未来只有在稳定 chat identity 绑定后重新开放时才用于验证发送形态 |
 | `describeLastEnhance().request.originalPromptPreview` | **400 字符** | 看用户点 PE 那一刻输入框里写了什么 |
 | `describeLastEnhance().response.enhancedPromptPreview` | **400 字符** | 看 enhancer 返回了什么——同一份文本本来就已经在 Cascade 输入框里可见，debug 视图里展示前 400 字符不会带来新泄漏 |
 
-`__openpeDebug` 不暴露 bearer token 或 `Authorization` header，但会暴露上述
-有界内容 preview；短于上限的 prompt/message 会完整显示，因此只应在可信本机调试
-会话中启用。debug 模式和生产模式的
-**历史抓取行为、wire 行为完全一致**，只是诊断可见性不同。`describeLastEnhance()` 在生产模式下（未带 `--debug`）**整个不挂载**，
+`__openpeDebug` 不暴露 bearer token 或 `Authorization` header，但会暴露上述有界内容 preview；短于上限的 prompt/message 会完整显示，因此只应在可信本机调试会话中启用。Collector 可显示未绑定 trajectory 形态，但 enhancement wire 始终 fail closed 为 `history=none`；debug 只增加可见性，不改变该隐私策略。`describeLastEnhance()` 在生产模式下（未带 `--debug`）**整个不挂载**，
 快照本身在模块内存里也保持私有。
 
 ```bash
@@ -153,28 +150,25 @@ python3 -m installer.cli install --host windsurf --i-accept-experimental-risk --
 
 ## 消费层 token 预算 (`maxContextTokens`)
 
-`window.__openpe.maxContextTokens` 是 installer 在 `install` 时按
-`--max-context-tokens N` 或 `OPENPE_MAX_CONTEXT_TOKENS` 环境变量
-快照进 bundle 的可选字段（仅当 > 0 时 embed，匹配 Go `omitempty` 语义）。
+Canonical bootstrap（当前 mutation 门禁关闭）可携带 `maxContextTokens`；exact Devin 默认不快照该值，未显式传请求字段时由 `openpe-server` 的 `OPENPE_MAX_CONTEXT_TOKENS` 套用默认。
 
 `auth.ts` 与最终 HTTP transport 都只接受**正 safe integer**：
 
-- `undefined` / 不存在 → 不下行到 server，按 server 默认行为（不收缩）。
-- 正整数 → 写入 `enhancePrompt` 的 `options.max_context_tokens`，server
-  按 ~4 字符/token 近似把 retrieval / history section 收缩到预算之内。
+- `undefined` / 不存在 → 不下行；server 使用自身默认（未配置时才是不收缩）。
+- 正整数 → 写入 `enhancePrompt` 的 `options.max_context_tokens`，覆盖 server 默认。预算规划覆盖 system/task/history/reference 全部消息；required floor 超限时报错。
 - `0` / 浮点数 / 负数 / unsafe integer / `Infinity` / `NaN` / 非数字 → 静默忽略；保守的回退确保
   hand-edit 的 bundle 不会产生意外行为。
 
 `dialog.ts` 在每次 enhance 时透传该字段。完整跨语言契约：
 
 ```
-installer/__main__.py::_resolve_max_context_tokens
-  → installer/__main__.py::_build_payload_prelude
-  → globalThis.__openpe.maxContextTokens  (snapshot at install)
-  → inject/src/auth.ts::OpenpeConfig.maxContextTokens  (parse)
-  → inject/src/dialog.ts                                (forward)
-  → inject/src/client.ts::EnhanceRequest.options.max_context_tokens  (POST body, snake_case)
-  → internal/enhancer/types.go::Options.MaxContextTokens  (Go server)
+canonical install config / exact future capability input
+  → one-shot globalThis.__openpe.maxContextTokens (canonical only)
+  → inject/src/auth.ts::OpenpeConfig.maxContextTokens
+  → inject/src/dialog.ts
+  → renderer requestId → preload IPC → Electron main fixed request schema
+  → openpe-server request default (when absent)
+  → internal/enhancer.Options.MaxContextTokens
 ```
 
 字段名故意做了 camelCase（`window.__openpe`）→ snake_case（POST body）

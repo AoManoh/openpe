@@ -14,7 +14,7 @@
 
 ## 快速开始
 
-需要 Go 1.25+；使用旧版 Go 时必须允许 `GOTOOLCHAIN=auto` 联网下载 1.25 toolchain。
+需要 **Go 1.25.12 或更高版本**。`go.mod` 的最低版本就是 1.25.12；`GOTOOLCHAIN=auto` 可自动下载安全工具链，`GOTOOLCHAIN=local` 使用 1.25.9 等旧版时会在构建前明确拒绝。
 
 ### 1. 构建并安装 binary
 
@@ -114,6 +114,8 @@ openPE 会阻断这条原始消息（**不会**发给 LLM），把增强结果�
 
 > 若 stderr 显示"剪贴板未更新"——见 [注意事项与已知限制](#注意事项与已知限制)。
 
+Hook 安装器对现有 JSON 做锁内 read→merge→guarded atomic replace：多个 openPE 安装并发会串行；若宿主/编辑器不遵守 sidecar lock 而在 merge 期间写入，installer 会检测后重新 merge（最多 3 次）而不是静默覆盖。dotfiles symlink 写真实 target 并保留链接；dangling symlink 也按目标路径互斥。
+
 ## 服务配置
 
 openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动子进程，完成后退出。HTTP server (`openpe-server`) 只在自动化集成场景下需要，见 [HTTP 与裸 CLI 调试入口](#http-与裸-cli-调试入口)。
@@ -141,9 +143,9 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | -------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OPENPE_LANGUAGE`                                      | `zh`                       | hook 终端反馈语言：`zh` / `en`                                                                                                                                                                      |
 | `OPENPE_TIMEOUT`                                       | `60s`                      | 单次 provider 调用超时（Go duration）                                                                                                                                                                   |
-| `OPENPE_HOOK_DEADLINE`                                 | `100s`                     | Devin hook 整体自我截止时间（Go duration，`0` 关闭）。宿主会在自身 timeout（安装默认 120s）到点时直接杀掉 hook 且不读取任何输出——增强结果与拦截决定都会丢失、裸 `pe` 直通模型；deadline 保证在此之前主动收尾：手动 `pe` 以"增强超时、原文未提交"拦截，`--auto`/注入模式退化为放行                                                                    |
-| `OPENPE_LISTEN_ADDR`                                   | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost`                                                                                                                 |
-| `OPENPE_CACHE_DIR`                                     | `~/.cache/openpe`（Linux） | hook 预览与纯文本缓存根目录                                                                                                                                                                             |
+| `OPENPE_HOOK_DEADLINE`                                 | `100s`                     | Devin 聚合 hook 的正数自我截止时间（Go duration，非正/非法值回退默认，安全上不允许关闭）。宿主 timeout 会直接杀 hook 且不读输出；安装器还按 `--hook-timeout` 派生更短的 CLI deadline。手动 `pe` 超时以“原文未提交”拦截，注入/auto 退化为放行 |
+| `OPENPE_LISTEN_ADDR`                                   | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost`。绑定非 loopback 时 `OPENPE_SERVER_TOKEN` 必须是 64 位小写十六进制（256 bit），弱 token 会在 bind/publish 前拒绝；启用 lifecycle/descriptor 时即使只监听 loopback 也执行同一强度校验 |
+| `OPENPE_CACHE_DIR`                                     | `~/.cache/openpe`（Linux） | hook 预览与纯文本**缓存根目录**；始终在其下追加客户端命名空间（如 `<root>/devin/last-prompt.txt`、`<root>/codex/last-prompt.txt`），避免多客户端互相覆盖 `hook last`。旧版把 override 当最终目录；升级后如需保留旧缓存，请手动移动到对应客户端子目录 |                                                                                                                                                                             |
 | `OPENPE_COPY_COMMAND`                                  | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）。原生 Windows 用 `cmd.exe /C` 执行，POSIX/WSL 用 `sh -c` 执行；命令首段为 `clip.exe` 时会自动转为 UTF-16LE，避免 Windows 中文乱码 |
 | `OPENPE_DISABLE_OSC52_CLIPBOARD`                       | `false`                    | 禁用 OSC52 剪贴板兜底                                                                                                                                                                                   |
 | `OPENPE_OSC52_TTY`                                     | `/dev/tty`                 | OSC52 写入目标 TTY 路径                                                                                                                                                                                 |
@@ -152,7 +154,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_ENV_FILE`                                      | hook 安装时注入              | hook 子进程加载的 dotenv 文件路径                                                                                                                                                                       |
 | `OPENPE_PROMPT_STYLE` | `agent` | 选择内置提示词风格，语义是"**增强结果写给谁**"：`agent`（默认）= 面向下游编码 agent 的最小忠实展开（v7i，金标准评测下对 agent 执行效果更优）；`human` = 面向**人阅读**的详尽报告体展开（v2，2026-07：保留 v7h 的目标/步骤/验证脚手架与详尽体量，修掉其被金标准确认的臆造缺陷——未提及的架构词汇、编造样例名、仪式步骤降至 agent 风格同水平；适合把增强结果当"如何系统展开需求"的范文来读/学习的用户）。两种风格护栏相同（用户视角/数值保真/决策保真等），差别只在详略与结构。非法取值会在启动时**响亮报错**并列出合法值，不会静默回退。显式设置 `OPENPE_SYSTEM_PROMPT[_FILE]` 时本参数被覆盖。详见 FAQ Q13 |
 | `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词（v7i）        | 覆盖增强器系统提示词（优先级最高，设置后 `OPENPE_PROMPT_STYLE` 失效）：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。内置默认当前为 **v7i**（2026-07）：在按输入分桶、防臆造非代码测试目标的基础上，含四条护栏并在提示词末尾 FINAL CHECK 复检——①**用户视角**：增强结果必须是"用户对 agent 的指令"，不吸收历史中助手的反问/自称；②**数值保真**：数字与组成只能逐字取自上下文中同一实体，总数不得分解成编造的分项；③**问题保持与决策保真**：用户输入是征询意见的问题时，增强结果必须仍是咨询请求（可枚举候选方向），不得替用户选择，更不得把上下文里的状态陈述（如"尚未 push"）翻转成执行指令；④**范围与篇幅纪律**：明确的单目标任务做"最小忠实展开"，不得膨胀成报告体项目计划（分节脚手架/未提及的架构词汇/通用仪式步骤）。用于自定义改写风格或部署自调版本，无需改代码重新编译 |
-| `OPENPE_MAX_CONTEXT_TOKENS`                            | `0`（不限）                | 全局 token 预算，所有客户端共享；正整数时 enhancer 按 section 级裁剪可选上下文（history / rules / guidelines / context.files / context.retrieval），required section 始终保留                           |
+| `OPENPE_MAX_CONTEXT_TOKENS`                            | `0`（不限）                | 全局输入 token 硬预算，hook 与 HTTP/server 默认路径共享；按约 4 字符/token 计算，system、required task、history、rules/guidelines/files/retrieval 共用**同一份**预算，hybrid/structured 不再让每个 zone 各拿整份。可选上下文先裁剪；若 system+required task 本身已超预算则 400/validation error，绝不假称满足上限。`0` 明确禁用预算 |
 | `OPENPE_MESSAGE_STYLE`                                | `flatten`                  | 消息构建结构：`flatten`（默认，`[system, user]`，历史以 `[role] content` 文本嵌入单条 user）；`hybrid`（`[system, 历史真多轮, 末轮 user 仅含改写指令+原 prompt]`，角色保真/指代更强，系统提示附加「前文仅供参考、勿作答」框架）；`structured`（在 hybrid 之上把 rules/guidelines/files/retrieval 从任务与对话流里分离为独立「只读参考块」置于历史之前，系统提示用三区框架标注参考块/历史/任务）。`hybrid`、`structured` 均为实验性，eval A/B 通过前默认仍为 `flatten` |
 | `OPENPE_WARNINGS_ENABLED`（+ `OPENPE_WARNINGS_ACTIONS` / `OPENPE_WARNINGS_NUM_MAXLEN`） | `true` | **输出侧确定性告警**（提示词护栏之外与模型无关的兜底，2026-07 三起增强质量事故的结构性防线）：增强返回前做纯本地词法检测，命中只**追加提醒、绝不改写/拦截**。①上下文外数字——输出中的数字串未出现在你的输入/历史/规则/检索中则提醒"请核对是否臆造"（列表编号、标识符内数字、超长 id 自动豁免）；②未决策不可逆动作——输出含 push/部署/删除/发布/支付等动作而你的**原始输入**未提及（历史提及不豁免——事故 #3 的编造源正是历史状态行）则提醒"若非你的决策请删除"。告警随 hook 披露显示（review 的 blocked 行 / 注入的 systemMessage）。`_ACTIONS` 逗号分隔追加动作词；`_NUM_MAXLEN` 数字长度上限（默认 5，超过视为 id/哈希） |
 | `OPENPE_LANGUAGE_GUARD_ENABLED`                       | `true`                     | 语言守卫总开关：增强返回前做后处理，检测**用户输入语言**与**增强输出语言**（CJK/拉丁启发式，检测开销 <1ms）；仅当两者都能明确判定且**不一致**时才动作，一致（绝大多数情况）为零成本空操作，故向后兼容、不改变既有增强行为。设 `false` 完全关闭 |
@@ -161,9 +163,9 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_MAX_TOKENS`                                   | `0`（provider 默认）       | 模型响应最大 token 数。Anthropic 必填（`0` 时回退其默认 4096）；OpenAI 忽略（交给网关默认）。与 `OPENPE_MAX_CONTEXT_TOKENS`（输入侧预算）不同，这是**输出**长度上限 |
 | `OPENPE_HOOK_INJECT`（+ `OPENPE_CODEX_INJECT` / `OPENPE_CLAUDE_INJECT` / `OPENPE_DEVIN_INJECT`） | `false` | 统一注入开关：默认 `false` = 拦截 + 剪贴板 review（保留「绝不自动应用、由你粘贴」哲学）；`true` = 把增强版作为 `additionalContext` 注入，代理直接按增强版执行。全局 `OPENPE_HOOK_INJECT` + 每客户端覆盖（每客户端优先 → 全局 → `false`）。已验证 Codex CLI / Claude Code(CLI) / Devin 均消费 `additionalContext`；**Windsurf 不支持**（开关无效空操作）；Claude 的 VSCode 扩展不消费（仅 CLI 生效）。配置经 dotenv 解析（hook 的 `--env-file` 可配） |
 | `OPENPE_HOOK_DEDUP_ENABLED`                            | `true`                     | 跨适配器去重总开关，仅在 Devin 下生效：Devin 会把已加载的 openPE hook（devin/claude 格式）都跑一遍，开启后同一条 `pe` 只增强一次、各 hook 输出一致（详见 [Devin CLI hook](#devin-cli-hook)）；设 `false` 关闭 |
-| `OPENPE_HOOK_DEDUP_WINDOW`                             | `5s`                       | 去重时间窗（Go duration）：判定「同一条 prompt（同一会话内）的重复触发」的新鲜度窗口。窗口内重复触发：上次是拦截则**重放拦截**（披露原样复现 + 缓存增强重新投递，不调模型、不放行原文），上次是注入则跳过；窗口外重新增强 |
+| `OPENPE_HOOK_DEDUP_WINDOW`                             | `5s`                       | 去重时间窗（Go duration）：判定「同一条 prompt（同一会话内）的重复触发」的新鲜度窗口。窗口内重复触发：增强成功则重放 claim 内绑定的增强结果；provider error/deadline 等无 preview 的失败也重放原 block reason；winner 尚未结论/异常退出时，手动 `pe` 仍 fail closed，绝不返回 `continue:true`。注入成功才 skip。claim 以原子文件保存，10 分钟 TTL、最多 2048 文件/16 MiB，避免敏感 prompt 永久归档 |
 
-> **关于 `OPENPE_MAX_CONTEXT_TOKENS`**：这是 openPE 的"消费层"token 总预算旋钮，一处配置覆盖 codex / claude / windsurf 全部 hook。各采集层自带的 `OPENPE_*_MAX_MESSAGES` / `_MAX_CHARS` 是"采集层"按源数据特性的经验调优（不同源数据格式不同），用于决定**读多少**进 `Request.History`。`OPENPE_MAX_CONTEXT_TOKENS` 决定**最终送给 LLM 的总 token 上限**，从 token 成本和 provider context window 上限两个角度统一兜底；默认 0 = 不启用预算。实验性 exact-build Devin 按钮入口当前不把该值快照到 HTTP 请求，不能把 server 进程中的同名变量误当成按钮预算；详见 `extensions/openpe-windsurf-patch/README.md` § "消费层 token 预算"。
+> **关于 `OPENPE_MAX_CONTEXT_TOKENS`**：这是 openPE 的“消费层”token 总预算旋钮。一处 server 配置同时覆盖 hook、裸 CLI 与未显式传 `options.max_context_tokens` 的 HTTP/experimental button 请求；请求显式正整数时覆盖 server 默认。各采集层的 `OPENPE_*_MAX_MESSAGES` / `_MAX_CHARS` 只决定**读多少**，消费层决定**最终送多少**。预算覆盖 system + required task + history + reference 全部消息；required floor 放不下时返回错误而不是突破上限。默认 0 = 不启用预算。
 
 #### 按需启用（高级 / 实验性 / 有前置依赖）
 
@@ -216,9 +218,9 @@ openPE 默认读取当前 Codex / Claude Code / Devin 对话上下文，启用�
 
 | 变量                                | 默认                             | 说明                                                                              |
 | ----------------------------------- | -------------------------------- | --------------------------------------------------------------------------------- |
-| `OPENPE_SERVER_TOKEN`             | 空                               | HTTP bearer token；绑定非 loopback 地址时必填；patch 方案推荐固定 token           |
+| `OPENPE_SERVER_TOKEN`             | 空                               | HTTP bearer token。非 loopback 或 lifecycle 模式要求 64 位小写十六进制；可用 `openssl rand -hex 32` 生成。普通 loopback、lifecycle 关闭时仍兼容既有非空 token |
 | `OPENPE_SERVER_CORS_ORIGINS`      | 空                               | CORS Origin allowlist，逗号分隔；空值禁用 CORS                                    |
-| `OPENPE_SERVER_LIFECYCLE_ENABLED` | `false`                        | 是否写 server descriptor 供 IDE installer 发现 endpoint/token；patch 方案必须启用 |
+| `OPENPE_SERVER_LIFECYCLE_ENABLED` | `false`                        | 是否在**成功 bind 后**写 descriptor。descriptor 以原子写发布；POSIX 为 0600，Windows 为受保护且仅当前用户的 DACL；发布与 ownership cleanup 共享跨进程锁 |
 | `OPENPE_SERVER_DESCRIPTOR_FILE`   | `~/.config/openpe/server.json` | lifecycle descriptor 路径覆盖                                                     |
 
 </details>
@@ -395,7 +397,7 @@ openpe devin hook install --dry-run
 - **多 hook 也只增强一次、输出一致**：Devin 会把已加载的 hook 全部跑一遍（先拦截不短路），最终展示哪个 hook 的消息由 Devin 决定、不可预期。openPE 的对策：最先触发的 hook 增强并拦截，其余 hook 原样复现同一份披露、把缓存的增强结果重新复制到剪贴板——不再调模型、绝不放行原文。所以无论 Devin 展示哪个 hook 的输出，你看到的内容都一样。注入模式下其余 hook 静默跳过，防止同一条消息注入两次（开关见 `OPENPE_HOOK_DEDUP_*`）。
 - **去重按会话隔离**（Linux）：同一段文本粘进两个并行 Devin 会话不会互相去重，各自用自己的会话上下文独立增强。
 - **拦截通道 = exit 2 + stderr**（2026-08-03 修正）：Devin 对 `UserPromptSubmit` 只承诺两种 hook 效果——退出码 2 拦截（3000.3.22 起 reason 取自 stderr）与 stdout `additionalContext` 注入；stdout 的 `{"decision":"block"}` 不生效。openPE 的 Devin 路径（含被 Devin 调起的 Claude 格式 hook）拦截时统一以 exit 2 + stderr 输出披露；`--block-output=json` 仅保留用于测试与旧宿主。
-- **自我截止时间兜底**：宿主 timeout（安装默认 120s）到点会直接杀掉 hook、不读任何输出，等于无声放行原文。openPE 默认在 100s（`OPENPE_HOOK_DEADLINE`）主动收尾：手动 `pe` 以「增强超时、原文未提交」拦截，注入模式退化为放行——慢 provider / 剪贴板卡死都不再导致裸 `pe` 直通模型。
+- **自我截止时间兜底**：宿主 timeout 到点会直接杀 hook、不读输出，等于无声放行原文。`OPENPE_HOOK_DEADLINE` 由 config/dotenv 解析；安装命令还会按 `--hook-timeout` 自动写入更短的 `--deadline`（默认 120s→115s，短 timeout 用 80%），保证宿主不会先杀。原生 Devin 与被 Devin 调起的 Claude/Windsurf 格式 hook 共用同一可取消 watchdog；provider/history 在 deadline context 内，clipboard/cache 在胜负仲裁后才执行。手动 `pe` 超时始终以“原文未提交”拦截。
 - 以上仅在 `DEVIN_PROJECT_DIR` 存在（真的跑在 Devin 里）时生效；Codex / Claude Code / Windsurf 各自原生使用时行为完全不变。
 - **Devin session history 默认读取**（启用满血提示词增强）。在 Devin 下运行时，openPE 只读 Devin 的本机 SQLite 会话库（`~/.local/share/devin/cli/sessions.db`），按工作目录 + 最近活跃定位当前 session，沿 `main_chain` 重建最近 user/assistant 历史填入 `enhancer.Request.History`，让 `pe` 能理解 Devin 对话里的前文引用。会话被**压缩（compaction）**后，Devin 会把前文替换成一条 system 角色的摘要节点——openPE 会把这条**压缩摘要作为历史带入**（映射为 assistant 轮次，披露注明「含前文压缩摘要」），压缩后的第一条 `pe` 不再是零上下文（2026-07-03 修复：此前摘要被 system 角色过滤器丢弃，压缩后必报「会话历史为空」）。**非静默**：未找到 session、超出时效窗口（`OPENPE_DEVIN_HISTORY_RECENCY`，默认 6h）或读取失败，都会显式提示，绝不静默兜底成无历史增强。被 Devin 调起的 Claude 格式 hook 同样读取的是 Devin 会话历史（而非 Claude 原生来源）。如需关闭，设置 `OPENPE_DEVIN_HISTORY_ENABLED=false`。
 
@@ -453,9 +455,7 @@ Patch 只提供提交前按钮、增强和输入框回填，不替代 native hoo
 | unknown | 报告 unsupported | 拒绝，不按目录名猜宿主 |
 
 一次 exact-build 实测不等于未来 Devin 版本通用支持。独立入口同时修改
-`sessions.desktop.main.js`、`workbench.desktop.main.js`、`sessions.html` CSP 和
-`product.json` 三个资源 checksum；四个原文件会先写入绑定 profile、install root
-和 product commit 的 transaction。任一 baseline 或 live checksum 不匹配都会拒绝。
+`out/main.js`、`sessions.desktop.main.js`、`workbench.desktop.main.js`、`sessions.html` CSP、`sandbox/electron-browser/preload.js` 和 `product.json`（其中四个资源 checksum 写回 product）；六个原文件会先写入绑定 profile、install root 和 product commit 的 transaction。Windows 写入/恢复期间对六文件持有 `dwShareMode=0` 独占句柄，并以只读独占句柄锁定 `Devin.exe` build identity，阻止 vendor updater 在“校验→写入→manifest 提交”之间插入改写；任一 baseline、file ID/reparse/hardlink 或 live checksum 不匹配都会拒绝。
 
 源码方式安装必须在 Devin 外部 PowerShell 执行，并先完整退出 Devin、
 `WindsurfGate` 及 updater，否则进程门禁拒绝写入：
@@ -488,7 +488,7 @@ Canonical `openpe-ide-patch install --host devin` 仍保持 fail-closed；上述
 `multi_bundle_patch` 是当前 exact build 的独立实验入口，不支持其它版本、macOS、
 Linux、refresh 或跨 build 恢复。Devin 路径固定 `client=devin`、`mode=agent`、
 `history=none`，不会把 legacy Windsurf trajectory 混入请求；当前也不传 workspace
-`cwd`，因此按钮路径不会触发 Openace 代码检索。Server descriptor、精确 CORS、
+`cwd`，因此按钮路径不会触发 Openace 代码检索。Bearer token 不再写入 renderer bundle、preload isolate 或 `globalThis`：sandbox preload 仅转发固定 schema IPC，Electron main 验证 owner-only descriptor 后持 token/HTTP，并向 renderer 暴露可取消的 `enhance(requestId, body)` 能力。Server descriptor、精确 CORS、
 完整风险和恢复边界见
 [patch 子项目 README](extensions/openpe-windsurf-patch/README.md)。
 
@@ -552,8 +552,9 @@ openpe-server --base-url ... --api-key ... --model ... --timeout 90s   # 命令�
 
 安全边界：
 
-- 未设置 `OPENPE_SERVER_TOKEN` 时，server 只允许绑定 `127.0.0.1`、`::1` 或 `localhost`；`0.0.0.0`、`::`、LAN IP 和其它主机名会拒绝启动。
+- 未设置 `OPENPE_SERVER_TOKEN` 时，server 只允许绑定 `127.0.0.1`、`::1` 或 `localhost`；`0.0.0.0`、`::`、LAN IP 和其它主机名会拒绝启动。非 loopback 的 token 必须满足 256-bit/64-hex 强度。
 - 设置 `OPENPE_SERVER_TOKEN` 后，`/v1/*` 请求必须带 `Authorization: Bearer <token>`；`/healthz` 始终免鉴权。
+- HTTP server 同时设置 header/read/write/idle/handler deadline，慢 body、挂起 provider 和空闲连接均有界；请求体必须是**恰好一个** JSON 对象，未知字段、尾随第二个 JSON 值和超过 2 MiB 都返回 400。
 - provider / Openace / 内部错误对 HTTP 客户端脱敏，响应只包含稳定错误文案和 `request_id`；完整错误写入 server 日志。
 
 可用路由：
@@ -698,7 +699,8 @@ client / hook / HTTP
 - 不依赖宿主一定能替换输入框、追加隐藏上下文、保持剪贴板成功，或识别某客户端专有 slash command。
 - 对 Windsurf / Cursor / VS Code / Composer / Cascade 等 IDE 类环境，按"可粘贴到聊天输入框或通过缓存回退取回"的方式生成结果。
 - 对 `client=codex` 且 `mode=agent`，仍保持适合终端 coding agent 的清晰任务范围、执行步骤和验证期望。
-- `options.max_context_tokens` 只裁剪可选上下文 section；原始用户 prompt、目标客户端、工作区和增强契约不会被最终字符串粗暴截断。
+- `options.max_context_tokens` 规划 system、required task、history 与 reference 的全消息预算；可选 section 先裁剪，required floor 超限时返回 validation error，不会突破用户声明的硬上限。
+- `options.return_metadata` 缺省时保持历史行为（返回 metadata）；显式 `false` 时省略 metadata，显式 `true` 时返回。
 - `metadata.sections` 只记录 section 名称、最终长度和是否裁剪，不记录正文，用于诊断 history、files、retrieval 是否真正进入本次增强。
 
 ### 架构边界
