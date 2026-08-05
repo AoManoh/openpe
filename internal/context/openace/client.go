@@ -272,10 +272,13 @@ func normalizeBaseURL(addr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid Openace daemon address: %w", err)
 	}
-	if strings.TrimSpace(parsed.Host) == "" {
-		return "", fmt.Errorf("invalid Openace daemon address: missing host")
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || strings.TrimSpace(parsed.Hostname()) == "" {
+		return "", fmt.Errorf("invalid Openace daemon address: expected http(s) host")
 	}
-	return strings.TrimRight(addr, "/"), nil
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("invalid Openace daemon address: credentials, query, and fragment are not allowed")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func formatRetrieval(result retrieveResponse, cwd string) string {
@@ -420,8 +423,9 @@ func sleep(ctx context.Context, delay time.Duration) error {
 
 func trimBody(data []byte) string {
 	body := strings.TrimSpace(string(data))
-	if len(body) > 512 {
-		return body[:512] + "..."
+	runes := []rune(body)
+	if len(runes) > 512 {
+		return string(runes[:512]) + "..."
 	}
 	return body
 }

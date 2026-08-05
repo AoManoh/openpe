@@ -287,6 +287,14 @@ func (s *Service) WithLanguageGuardObserver(fn func(LanguageGuardEvent)) *Servic
 	return s
 }
 
+func completionRuneLen(req CompletionRequest) int {
+	total := runeLen(req.System) + runeLen(req.User)
+	for _, message := range req.Messages {
+		total += runeLen(message.Content)
+	}
+	return total
+}
+
 func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 	if s.provider == nil {
 		return Response{}, providerMissingError()
@@ -294,6 +302,9 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	if req.Prompt == "" {
 		return Response{}, invalid("prompt is required")
+	}
+	if req.Options.MaxContextTokens < 0 {
+		return Response{}, invalid("max_context_tokens must not be negative")
 	}
 	if s.contextProvider != nil && len(req.Context.Retrieval) == 0 {
 		retrieved, err := s.contextProvider.Retrieve(ctx, req)
@@ -309,22 +320,45 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 		warnings    []string
 		sections    []SectionInfo
 	)
+	// One budget governs the WHOLE outbound prompt: system prompt, task
+	// message, reference material, and history turns share charLimitFor's
+	// rune budget instead of each zone consuming a full budget of its own
+	// (history turns previously bypassed the budget entirely).
+	totalLimit := charLimitFor(req.Options.MaxContextTokens)
 	switch s.messageStyle {
 	case StyleHybrid:
+		system := s.systemPrompt + hybridFraming
+		msgLimit := remainingChars(totalLimit, runeLen(system))
 		turns := hybridHistoryTurns(req.History, req.Prompt)
 		var taskUser string
-		taskUser, usedContext, warnings, sections = buildTaskPrompt(req)
+		taskUser, usedContext, warnings, sections = buildTaskPrompt(req, msgLimit)
+		if msgLimit >= 0 {
+			var trimmed bool
+			turns, trimmed = trimTurnsToChars(turns, remainingChars(msgLimit, runeLen(taskUser)))
+			if trimmed {
+				warnings = append(warnings, "history truncated to max_context_tokens")
+			}
+		}
 		if len(turns) > 0 {
 			usedContext = prependUnique(usedContext, "history")
 		}
 		completion = CompletionRequest{
-			System:   s.systemPrompt + hybridFraming,
+			System:   system,
 			Messages: append(turns, Message{Role: "user", Content: taskUser}),
 		}
 	case StyleStructured:
+		system := s.systemPrompt + zoneFraming
+		msgLimit := remainingChars(totalLimit, runeLen(system))
 		turns := hybridHistoryTurns(req.History, req.Prompt)
 		var refBlock, taskUser string
-		refBlock, taskUser, usedContext, warnings, sections = buildStructuredPrompt(req)
+		refBlock, taskUser, usedContext, warnings, sections = buildStructuredPrompt(req, msgLimit)
+		if msgLimit >= 0 {
+			var trimmed bool
+			turns, trimmed = trimTurnsToChars(turns, remainingChars(msgLimit, runeLen(taskUser), runeLen(refBlock)))
+			if trimmed {
+				warnings = append(warnings, "history truncated to max_context_tokens")
+			}
+		}
 		// Order on the wire: [optional reference block, prior turns..., task].
 		var msgs []Message
 		if refBlock != "" {
@@ -336,13 +370,16 @@ func (s *Service) Enhance(ctx context.Context, req Request) (Response, error) {
 			usedContext = prependUnique(usedContext, "history")
 		}
 		completion = CompletionRequest{
-			System:   s.systemPrompt + zoneFraming,
+			System:   system,
 			Messages: msgs,
 		}
 	default: // StyleFlatten
 		var user string
-		user, usedContext, warnings, sections = buildUserPrompt(req)
+		user, usedContext, warnings, sections = buildUserPrompt(req, remainingChars(totalLimit, runeLen(s.systemPrompt)))
 		completion = CompletionRequest{System: s.systemPrompt, User: user}
+	}
+	if totalLimit >= 0 && completionRuneLen(completion) > totalLimit {
+		return Response{}, invalid("max_context_tokens is smaller than the required system/task prompt; increase the budget or set 0 to disable it")
 	}
 	out, err := s.provider.Complete(ctx, completion)
 	if err != nil {

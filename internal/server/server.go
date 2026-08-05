@@ -15,8 +15,44 @@ import (
 )
 
 type Handler struct {
-	service  *enhancer.Service
-	errorLog *log.Logger
+	service                 *enhancer.Service
+	errorLog                *log.Logger
+	defaultMaxContextTokens int
+}
+
+type requestOptions struct {
+	MaxContextTokens int   `json:"max_context_tokens,omitempty"`
+	ReturnMetadata   *bool `json:"return_metadata,omitempty"`
+}
+
+type enhanceRequest struct {
+	Prompt     string             `json:"prompt"`
+	Client     string             `json:"client,omitempty"`
+	CWD        string             `json:"cwd,omitempty"`
+	Mode       string             `json:"mode,omitempty"`
+	History    []enhancer.Message `json:"history,omitempty"`
+	Rules      []string           `json:"rules,omitempty"`
+	Guidelines []string           `json:"guidelines,omitempty"`
+	Context    enhancer.Context   `json:"context,omitempty"`
+	Options    requestOptions     `json:"options,omitempty"`
+}
+
+func (r enhanceRequest) canonical(defaultMaxContextTokens int) enhancer.Request {
+	maxContextTokens := r.Options.MaxContextTokens
+	if maxContextTokens == 0 {
+		maxContextTokens = defaultMaxContextTokens
+	}
+	return enhancer.Request{
+		Prompt:     r.Prompt,
+		Client:     r.Client,
+		CWD:        r.CWD,
+		Mode:       r.Mode,
+		History:    r.History,
+		Rules:      r.Rules,
+		Guidelines: r.Guidelines,
+		Context:    r.Context,
+		Options:    enhancer.Options{MaxContextTokens: maxContextTokens},
+	}
 }
 
 // Options configures the HTTP server handler. The zero value preserves the
@@ -40,6 +76,14 @@ type Options struct {
 	// ErrorLog receives full internal / upstream errors together with the
 	// request_id returned to the client. Nil disables handler-level logging.
 	ErrorLog io.Writer
+	// DefaultMaxContextTokens fills enhancer.Request.Options.MaxContextTokens
+	// when the request leaves it unset, so the operator-level budget
+	// (OPENPE_MAX_CONTEXT_TOKENS) governs HTTP callers exactly like it
+	// governs every hook path. Zero keeps the historical no-budget default.
+	DefaultMaxContextTokens int
+	// PromptTimeout limits the whole /v1/prompt-enhance handler. It sits
+	// inside CORS/auth so synthesized timeout responses retain CORS headers.
+	PromptTimeout time.Duration
 }
 
 // New returns a server handler with no authentication and no CORS handling.
@@ -58,10 +102,18 @@ func New(service *enhancer.Service) http.Handler {
 // browser preflight (OPTIONS) requests succeed without an Authorization
 // header; auth then guards the actual data routes.
 func NewWithOptions(service *enhancer.Service, opts Options) http.Handler {
-	h := &Handler{service: service, errorLog: newErrorLogger(opts.ErrorLog)}
+	h := &Handler{
+		service:                 service,
+		errorLog:                newErrorLogger(opts.ErrorLog),
+		defaultMaxContextTokens: opts.DefaultMaxContextTokens,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.health)
-	mux.HandleFunc("/v1/prompt-enhance", h.promptEnhance)
+	promptHandler := http.Handler(http.HandlerFunc(h.promptEnhance))
+	if opts.PromptTimeout > 0 {
+		promptHandler = timeoutJSON(promptHandler, opts.PromptTimeout)
+	}
+	mux.Handle("/v1/prompt-enhance", promptHandler)
 	info := opts.Info
 	info.AuthEnabled = opts.Token != ""
 	info.CORSEnabled = len(opts.CORS.AllowedOrigins) > 0
@@ -94,14 +146,21 @@ func (h *Handler) promptEnhance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-	var req enhancer.Request
+	var wireReq enhanceRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil {
+	if err := decoder.Decode(&wireReq); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	resp, err := h.service.Enhance(r.Context(), req)
+	// The body must be exactly one JSON document. Without this check the
+	// decoder accepted `{"prompt":"a"}{"prompt":"b"}` and silently served the
+	// first object — an ambiguous request smuggled past validation.
+	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid json: trailing data after the request object")
+		return
+	}
+	resp, err := h.service.Enhance(r.Context(), wireReq.canonical(h.defaultMaxContextTokens))
 	if err != nil {
 		var validation enhancer.ValidationError
 		if errors.As(err, &validation) {
@@ -113,7 +172,22 @@ func (h *Handler) promptEnhance(w http.ResponseWriter, r *http.Request) {
 		writeErrorWithRequestID(w, http.StatusBadGateway, "prompt enhancement failed", requestID)
 		return
 	}
+	if wireReq.Options.ReturnMetadata != nil && !*wireReq.Options.ReturnMetadata {
+		writeJSON(w, http.StatusOK, struct {
+			EnhancedPrompt string   `json:"enhanced_prompt"`
+			Warnings       []string `json:"warnings,omitempty"`
+		}{resp.EnhancedPrompt, resp.Warnings})
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func timeoutJSON(next http.Handler, timeout time.Duration) http.Handler {
+	timed := http.TimeoutHandler(next, timeout, `{"error":"request timed out"}`+"\n")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		timed.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -8,6 +8,41 @@ import (
 
 const charsPerTokenApprox = 4
 
+// noCharLimit disables budget enforcement (the historical
+// MaxContextTokens=0 behaviour). Distinct from a limit of 0, which means
+// "no room left: drop every optional section".
+const noCharLimit = -1
+
+// charLimitFor converts the user-facing token budget into a rune budget.
+// The multiplication is overflow-guarded: the budget arrives as an
+// unvalidated int from HTTP requests, and a huge value once flipped the
+// limit negative, silently disabling truncation.
+func charLimitFor(maxContextTokens int) int {
+	if maxContextTokens <= 0 {
+		return noCharLimit
+	}
+	maxInt := int(^uint(0) >> 1)
+	if maxContextTokens > maxInt/charsPerTokenApprox {
+		return maxInt
+	}
+	return maxContextTokens * charsPerTokenApprox
+}
+
+// remainingChars subtracts spent runes from a char limit, clamping at zero.
+// A noCharLimit budget stays unlimited.
+func remainingChars(limit int, spent ...int) int {
+	if limit < 0 {
+		return noCharLimit
+	}
+	for _, s := range spent {
+		if s >= limit {
+			return 0
+		}
+		limit -= s
+	}
+	return limit
+}
+
 type promptSection struct {
 	name        string
 	content     string
@@ -16,20 +51,21 @@ type promptSection struct {
 }
 
 // buildUserPrompt assembles the full flatten-style single user message,
-// embedding conversation history as labeled text.
-func buildUserPrompt(req Request) (string, []string, []string, []SectionInfo) {
-	return buildPrompt(req, true)
+// embedding conversation history as labeled text. charLimit is the rune
+// budget left for this message (noCharLimit = unlimited).
+func buildUserPrompt(req Request, charLimit int) (string, []string, []string, []SectionInfo) {
+	return buildPrompt(req, true, charLimit)
 }
 
 // buildTaskPrompt assembles the hybrid-style FINAL user message: every section
 // except conversation history (which is delivered as real prior chat turns).
-func buildTaskPrompt(req Request) (string, []string, []string, []SectionInfo) {
-	return buildPrompt(req, false)
+func buildTaskPrompt(req Request, charLimit int) (string, []string, []string, []SectionInfo) {
+	return buildPrompt(req, false, charLimit)
 }
 
-func buildPrompt(req Request, includeHistory bool) (string, []string, []string, []SectionInfo) {
+func buildPrompt(req Request, includeHistory bool, charLimit int) (string, []string, []string, []SectionInfo) {
 	sections := promptSections(req, includeHistory)
-	user, infos, warnings := assemblePrompt(sections, req.Options.MaxContextTokens)
+	user, infos, warnings := assemblePrompt(sections, charLimit)
 	used := usedContexts(sections, infos)
 	return user, used, warnings, infos
 }
@@ -74,20 +110,20 @@ func referenceSections(req Request) []promptSection {
 // reference block (empty when there is no reference context), the task message,
 // the used-context labels, warnings, and section infos.
 //
-// Budget note: MaxContextTokens truncation is applied within each zone
-// independently (task sections are all required, so they are never dropped;
-// the reference block truncates optional sections to fit). Precise cross-zone
-// token allocation is deferred to Part 2.1; the production default
-// (MaxContextTokens=0) performs no truncation, so this is a no-op there.
-func buildStructuredPrompt(req Request) (referenceBlock, taskMessage string, used []string, warnings []string, sections []SectionInfo) {
+// Budget: charLimit is the rune budget for BOTH zones together. The task zone
+// (all required) is assembled first; the reference zone only gets what
+// remains, so the two zones can no longer each consume a full budget of
+// their own.
+func buildStructuredPrompt(req Request, charLimit int) (referenceBlock, taskMessage string, used []string, warnings []string, sections []SectionInfo) {
 	taskS := taskSections(req)
-	taskMessage, taskInfos, taskWarn := assemblePrompt(taskS, req.Options.MaxContextTokens)
+	taskMessage, taskInfos, taskWarn := assemblePrompt(taskS, charLimit)
 	warnings = append(warnings, taskWarn...)
 	sections = append(sections, taskInfos...)
 
 	refS := referenceSections(req)
 	if len(refS) > 0 {
-		body, refInfos, refWarn := assemblePrompt(refS, req.Options.MaxContextTokens)
+		refLimit := remainingChars(charLimit, runeLen(taskMessage), runeLen(referenceBlockHeader))
+		body, refInfos, refWarn := assemblePrompt(refS, refLimit)
 		sections = append(sections, refInfos...)
 		warnings = append(warnings, refWarn...)
 		if strings.TrimSpace(body) != "" {
@@ -151,6 +187,28 @@ func hybridHistoryTurns(history []Message, currentPrompt string) []Message {
 	return turns
 }
 
+// trimTurnsToChars drops the OLDEST turns until the total content fits
+// budgetChars, reporting whether anything was dropped. It closes the budget
+// gap where hybrid/structured history turns bypassed MaxContextTokens
+// entirely: the collector-layer caps bound what is read, this bounds what is
+// SENT. A non-positive budget with any turns present drops them all.
+func trimTurnsToChars(turns []Message, budgetChars int) ([]Message, bool) {
+	if budgetChars < 0 {
+		budgetChars = 0
+	}
+	total := 0
+	for _, m := range turns {
+		total += runeLen(m.Content)
+	}
+	trimmed := false
+	for len(turns) > 0 && total > budgetChars {
+		total -= runeLen(turns[0].Content)
+		turns = turns[1:]
+		trimmed = true
+	}
+	return turns, trimmed
+}
+
 func prependUnique(values []string, value string) []string {
 	for _, v := range values {
 		if v == value {
@@ -172,16 +230,19 @@ func appendSection(sections []promptSection, name string, content string, usedCo
 	})
 }
 
-func assemblePrompt(sections []promptSection, maxContextTokens int) (string, []SectionInfo, []string) {
+// assemblePrompt joins sections while enforcing charLimit (a rune budget;
+// noCharLimit disables enforcement). Required sections are always kept —
+// when they alone exceed the budget a warning is emitted — and optional
+// sections shrink oldest-declared-first to fit the remainder.
+func assemblePrompt(sections []promptSection, charLimit int) (string, []SectionInfo, []string) {
 	var b strings.Builder
 	var infos []SectionInfo
 	var warnings []string
 
-	limit := 0
+	limit := charLimit >= 0
 	remaining := 0
-	if maxContextTokens > 0 {
-		limit = maxContextTokens * charsPerTokenApprox
-		remaining = limit - requiredLength(sections)
+	if limit {
+		remaining = charLimit - requiredLength(sections)
 		if remaining < 0 {
 			warnings = append(warnings, "max_context_tokens is smaller than required prompt sections; preserved original prompt and enhancement contract")
 		}
@@ -192,7 +253,7 @@ func assemblePrompt(sections []promptSection, maxContextTokens int) (string, []S
 		content := section.content
 		truncated := false
 
-		if limit > 0 && !section.required {
+		if limit && !section.required {
 			switch {
 			case remaining <= 0:
 				content = ""

@@ -1,24 +1,15 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/AoManoh/openpe/internal/config"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/integration"
-	"github.com/AoManoh/openpe/internal/providers"
-	"github.com/AoManoh/openpe/internal/server"
 	"github.com/AoManoh/openpe/internal/wiring"
 )
 
@@ -40,190 +31,52 @@ func run(args []string) error {
 }
 
 func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
-	cfg := config.Load()
-	fs := flag.NewFlagSet("openpe-server", flag.ContinueOnError)
-	fs.SetOutput(stdout)
-	listenAddr := configStringFlag(fs, "listen", "listen address (defaults to OPENPE_LISTEN_ADDR or 127.0.0.1:18980)")
-	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
-	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
-	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
-	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
+	opts, shouldRun, err := parseServerOptions(args, stdout)
+	if err != nil || !shouldRun {
 		return err
 	}
-	listen := listenAddr.ValueOrDefault(cfg.ListenAddr)
-	if listen == "" {
-		listen = config.DefaultListenAddr
-	}
-
-	// Lifecycle: opt-in descriptor + ephemeral token for IDE installers.
-	// When disabled (default), behaviour is identical to the historical
-	// no-handshake openpe-server used by hook / CLI consumers.
-	token := cfg.Server.Token
-	tokenSource := "OPENPE_SERVER_TOKEN"
-	var descriptorPath string
-	if cfg.Server.LifecycleEnabled {
-		if token == "" {
-			generated, err := integration.GenerateToken()
-			if err != nil {
-				return fmt.Errorf("generate ephemeral server token: %w", err)
-			}
-			token = generated
-			tokenSource = "ephemeral (lifecycle auto-generated)"
-		}
-	}
-	if err := validateUnauthenticatedListen(listen, token); err != nil {
+	lifecycle, err := prepareLifecycle(opts)
+	if err != nil {
 		return err
 	}
-
-	provider, err := providers.New(providers.Spec{
-		Provider:  cfg.Provider,
-		MaxTokens: cfg.MaxTokens,
-		BaseURL:   baseURL.ValueOrDefault(cfg.BaseURL),
-		APIKey:    apiKey.ValueOrDefault(cfg.APIKey),
-		Model:     model.ValueOrDefault(cfg.Model),
-		Timeout:   *timeout,
-	})
+	service, err := configureServerEnhancer(opts)
 	if err != nil {
-		return fmt.Errorf("configure provider: %w", err)
-	}
-	service, err := newEnhancerService(provider, cfg)
-	if err != nil {
-		return fmt.Errorf("configure enhancer: %w", err)
-	}
-
-	// Bind FIRST, publish after: the descriptor is the only discovery channel
-	// IDE installers have, so it must never advertise an address that failed
-	// to bind (or a ":0" placeholder instead of the kernel-assigned port).
-	// CR-002: a second instance used to overwrite the live descriptor, fail
-	// ListenAndServe, and delete the survivor's descriptor on exit.
-	listener, err := net.Listen("tcp", listen)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", listen, err)
-	}
-	defer listener.Close()
-	boundAddr := listener.Addr().String()
-
-	if cfg.Server.LifecycleEnabled {
-		descriptorPath = cfg.Server.DescriptorFile
-		if descriptorPath == "" {
-			descriptorPath, err = integration.DefaultDescriptorPath()
-			if err != nil {
-				return fmt.Errorf("resolve descriptor path: %w", err)
-			}
-		}
-		descriptor := integration.NewLocalServerDescriptor(deriveBaseURL(boundAddr), token, os.Getpid(), Version)
-		if err := integration.WriteDescriptor(descriptorPath, descriptor); err != nil {
-			return fmt.Errorf("write descriptor %s: %w", descriptorPath, err)
-		}
-		fmt.Fprintf(stderr, "openpe-server: descriptor written to %s (mode 0600)\n", descriptorPath)
-		defer func() {
-			// Ownership-aware cleanup: only remove the file if it still names
-			// this instance; a sibling that replaced it keeps its lifecycle.
-			if removeErr := integration.RemoveDescriptorIfOwned(descriptorPath, os.Getpid(), token); removeErr != nil {
-				fmt.Fprintf(stderr, "openpe-server: cleanup descriptor %s: %v\n", descriptorPath, removeErr)
-			}
-		}()
-	}
-
-	httpServer := &http.Server{
-		Addr: boundAddr,
-		Handler: server.NewWithOptions(service, server.Options{
-			Token:    token,
-			CORS:     server.CORSOptions{AllowedOrigins: cfg.Server.CORSOrigins},
-			ErrorLog: stderr,
-			Info: server.ServerInfo{
-				Version:    Version,
-				StartedAt:  time.Now().UTC(),
-				ListenAddr: boundAddr,
-			},
-		}),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	authStatus := "disabled (set OPENPE_SERVER_TOKEN to enable bearer auth)"
-	if token != "" {
-		authStatus = fmt.Sprintf("enabled via %s", tokenSource)
-	}
-	corsStatus := "disabled"
-	if len(cfg.Server.CORSOrigins) > 0 {
-		corsStatus = fmt.Sprintf("enabled for %s", strings.Join(cfg.Server.CORSOrigins, ", "))
-	}
-	lifecycleStatus := "disabled"
-	if cfg.Server.LifecycleEnabled {
-		lifecycleStatus = fmt.Sprintf("descriptor=%s", descriptorPath)
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		fmt.Fprintf(stderr,
-			"openpe-server: listening on %s (version=%s; auth=%s; cors=%s; lifecycle=%s)\n",
-			boundAddr, Version, authStatus, corsStatus, lifecycleStatus)
-		errCh <- httpServer.Serve(listener)
-	}()
-
-	signalCh := make(chan os.Signal, 1)
-	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
-	select {
-	case sig := <-signalCh:
-		fmt.Fprintf(stderr, "openpe-server: shutting down after %s\n", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return httpServer.Shutdown(ctx)
-	case err := <-errCh:
-		if err == http.ErrServerClosed {
-			return nil
-		}
 		return err
 	}
-}
-
-type configStringValue struct {
-	value string
-	set   bool
-}
-
-func configStringFlag(fs *flag.FlagSet, name string, usage string) *configStringValue {
-	value := &configStringValue{}
-	fs.Var(value, name, usage)
-	return value
-}
-
-func (v *configStringValue) String() string {
-	if v == nil {
-		return ""
+	binding, err := bindAndPublish(opts, lifecycle, stderr)
+	if err != nil {
+		return err
 	}
-	return v.value
-}
-
-func (v *configStringValue) Set(value string) error {
-	v.value = value
-	v.set = true
-	return nil
-}
-
-func (v *configStringValue) ValueOrDefault(defaultValue string) string {
-	if v != nil && v.set {
-		return strings.TrimSpace(v.value)
-	}
-	return strings.TrimSpace(defaultValue)
+	defer binding.Listener.Close()
+	defer binding.cleanup()
+	httpServer := buildHTTPServer(opts, lifecycle, service, binding.Address, stderr)
+	status := describeServer(opts, lifecycle, binding.DescriptorPath)
+	return serveUntilSignal(httpServer, binding.Listener, status, stderr)
 }
 
 func validateUnauthenticatedListen(listenAddr string, token string) error {
-	if strings.TrimSpace(token) != "" {
-		return nil
-	}
 	host, _, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
 	if err != nil {
-		return fmt.Errorf("validate unauthenticated listen address %q: %w", listenAddr, err)
+		return fmt.Errorf("validate listen address %q: %w", listenAddr, err)
 	}
 	if isAllowedUnauthenticatedHost(host) {
 		return nil
 	}
-	return fmt.Errorf("refusing unauthenticated listen address %q: set OPENPE_SERVER_TOKEN or bind to 127.0.0.1, ::1, or localhost", listenAddr)
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("refusing unauthenticated listen address %q: set OPENPE_SERVER_TOKEN or bind to 127.0.0.1, ::1, or localhost", listenAddr)
+	}
+	// A network-reachable server needs authentication material that cannot be
+	// guessed. "Any non-empty string counts" once allowed OPENPE_SERVER_TOKEN=x
+	// to pass this gate; enforce the same 256-bit hex shape GenerateToken
+	// produces (integration.ValidateTokenShape) before exposing the enhancer
+	// (and the provider budget behind it) beyond loopback.
+	if err := integration.ValidateTokenShape(token); err != nil {
+		return fmt.Errorf(
+			"refusing non-loopback listen address %q with a weak OPENPE_SERVER_TOKEN (%v); generate one with: openssl rand -hex 32",
+			listenAddr, err,
+		)
+	}
+	return nil
 }
 
 func isAllowedUnauthenticatedHost(host string) bool {
