@@ -1,8 +1,6 @@
 module github.com/AoManoh/openpe
 
-go 1.25.0
-
-toolchain go1.25.12
+go 1.25.12
 
 require (
 	github.com/abadojack/whatlanggo v1.0.1
