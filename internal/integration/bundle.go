@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -74,7 +75,12 @@ func NewFilePatcher() FilePatcher {
 	return FilePatcher{}
 }
 
-// HasMarker reports whether bundlePath contains both marker delimiters.
+// HasMarker reports whether bundlePath contains exactly one well-formed
+// marker region. The semantics mirror the Python installer's
+// bundle.has_marker byte for byte: zero pairs is false, exactly one ordered
+// pair is true, and duplicated or out-of-order delimiters are an ERROR — the
+// two implementations claim to be mirrors, and the old Contains-only check
+// answered true for bundles the Python side rejects as malformed.
 func (FilePatcher) HasMarker(bundlePath string, marker Marker) (bool, error) {
 	if err := marker.Validate(); err != nil {
 		return false, err
@@ -83,12 +89,16 @@ func (FilePatcher) HasMarker(bundlePath string, marker Marker) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return bytes.Contains(data, []byte(marker.Begin)) && bytes.Contains(data, []byte(marker.End)), nil
+	_, present, err := parseMarker(data, marker)
+	return present, err
 }
 
 // Inject writes payload into bundlePath wrapped by marker. When an existing
 // marker region is found, its body is replaced in place; otherwise the new
-// block is appended. The write is atomic via temp file + rename.
+// block is appended. The write is atomic via temp file + rename. A payload
+// that itself contains the marker delimiters is rejected: injecting it
+// would produce duplicated markers that every later HasMarker/inject pass
+// refuses to touch.
 func (FilePatcher) Inject(bundlePath, payload string, marker Marker) error {
 	if strings.TrimSpace(payload) == "" {
 		return errors.New("inject: payload is empty")
@@ -96,13 +106,20 @@ func (FilePatcher) Inject(bundlePath, payload string, marker Marker) error {
 	if err := marker.Validate(); err != nil {
 		return err
 	}
+	if strings.Contains(payload, marker.Begin) || strings.Contains(payload, marker.End) {
+		return errors.New("inject: payload must not contain the marker delimiters")
+	}
 	data, err := os.ReadFile(bundlePath)
+	if err != nil {
+		return err
+	}
+	existing, _, err := parseMarker(data, marker)
 	if err != nil {
 		return err
 	}
 	block := buildInjectBlock(payload, marker)
 	var output []byte
-	if existing := locateExistingMarker(data, marker); existing != nil {
+	if existing != nil {
 		output = append(output, data[:existing.start]...)
 		output = append(output, block...)
 		output = append(output, data[existing.end:]...)
@@ -137,8 +154,12 @@ func (FilePatcher) Backup(bundlePath, backupDir string) (string, error) {
 		return "", err
 	}
 	base := filepath.Base(bundlePath)
-	timestamp := time.Now().UTC().Format("20060102T150405Z")
-	target := filepath.Join(backupDir, fmt.Sprintf("%s.%s.original", base, timestamp))
+	timestamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	var nonce [4]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	target := filepath.Join(backupDir, fmt.Sprintf("%s.%s-%s.original", base, timestamp, hex.EncodeToString(nonce[:])))
 	if err := atomicWriteFile(target, data, 0o600); err != nil {
 		return "", err
 	}
@@ -160,23 +181,27 @@ type markerSpan struct {
 	end   int
 }
 
-func locateExistingMarker(data []byte, marker Marker) *markerSpan {
-	beginIdx := bytes.Index(data, []byte(marker.Begin))
-	if beginIdx < 0 {
-		return nil
+func parseMarker(data []byte, marker Marker) (*markerSpan, bool, error) {
+	begin := []byte(marker.Begin)
+	endMarker := []byte(marker.End)
+	beginCount := bytes.Count(data, begin)
+	endCount := bytes.Count(data, endMarker)
+	if beginCount == 0 && endCount == 0 {
+		return nil, false, nil
 	}
-	tail := data[beginIdx:]
-	relEnd := bytes.Index(tail, []byte(marker.End))
-	if relEnd < 0 {
-		return nil
+	if beginCount != 1 || endCount != 1 {
+		return nil, false, fmt.Errorf("marker: expected one begin/end pair, got %d/%d", beginCount, endCount)
 	}
-	end := beginIdx + relEnd + len(marker.End)
-	// extend the span to include a trailing newline so repeated Inject
-	// calls do not accumulate blank lines.
+	beginIdx := bytes.Index(data, begin)
+	endIdx := bytes.Index(data, endMarker)
+	if beginIdx > endIdx {
+		return nil, false, errors.New("marker: end appears before begin")
+	}
+	end := endIdx + len(endMarker)
 	if end < len(data) && data[end] == '\n' {
 		end++
 	}
-	return &markerSpan{start: beginIdx, end: end}
+	return &markerSpan{start: beginIdx, end: end}, true, nil
 }
 
 func buildInjectBlock(payload string, marker Marker) []byte {
