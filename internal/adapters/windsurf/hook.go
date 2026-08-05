@@ -44,6 +44,7 @@ type HookOptions struct {
 	// guidelines / context.files / context.retrieval that future caller
 	// paths attach to the request.
 	MaxContextTokens int
+	CacheDir         string
 }
 
 type HookOutput struct {
@@ -98,7 +99,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if err != nil {
 		return HookOutput{}, err
 	}
-	cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
+	cachePath, _ := savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
 	return HookOutput{
 		TerminalPreview: preview.Markdown(resp.EnhancedPrompt, opts.Language),
 		PreviewPrompt:   strings.TrimSpace(resp.EnhancedPrompt),
@@ -107,7 +108,11 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 }
 
 func SavePreview(enhanced string, language string) (string, error) {
-	cache, err := delivery.Save("windsurf", enhanced, language)
+	return savePreview(enhanced, language, "")
+}
+
+func savePreview(enhanced string, language string, cacheDir string) (string, error) {
+	cache, err := delivery.SaveWithOptions("windsurf", enhanced, language, delivery.Options{CacheDir: cacheDir})
 	if err != nil {
 		return "", err
 	}

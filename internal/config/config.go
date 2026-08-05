@@ -47,6 +47,7 @@ const (
 	// CLI) aggregates UserPromptSubmit hooks from several ecosystems and fires
 	// them all for one prompt. See internal/adapters/hookdedup.
 	DefaultHookDedupWindow = 5 * time.Second
+	DefaultHookDeadline    = 100 * time.Second
 
 	// DefaultMaxContextTokens is the global token budget applied to every
 	// outbound enhancer.Request via Options.MaxContextTokens. Zero means
@@ -126,15 +127,16 @@ type Config struct {
 	// Sourced from OPENPE_WARNINGS_ENABLED (default true),
 	// OPENPE_WARNINGS_ACTIONS (comma-separated extra action words) and
 	// OPENPE_WARNINGS_NUM_MAXLEN (digit-run length cap, default 5).
-	Warnings  WarningsConfig
-	Openace   OpenaceConfig
-	Codex     CodexConfig
-	Claude    ClaudeConfig
-	Devin     DevinConfig
-	Inject    InjectConfig
-	Delivery  DeliveryConfig
-	Server    ServerConfig
-	HookDedup HookDedupConfig
+	Warnings     WarningsConfig
+	Openace      OpenaceConfig
+	Codex        CodexConfig
+	Claude       ClaudeConfig
+	Devin        DevinConfig
+	Inject       InjectConfig
+	Delivery     DeliveryConfig
+	Server       ServerConfig
+	HookDedup    HookDedupConfig
+	HookDeadline time.Duration
 }
 
 // WarningsConfig is the config-layer mirror of
@@ -365,6 +367,7 @@ func Load() Config {
 			Enabled: boolFromValue(valueFromEnv("OPENPE_HOOK_DEDUP_ENABLED", fileEnv), true),
 			Window:  durationFromValue(valueFromEnv("OPENPE_HOOK_DEDUP_WINDOW", fileEnv), DefaultHookDedupWindow),
 		},
+		HookDeadline: durationFromValue(valueFromEnv("OPENPE_HOOK_DEADLINE", fileEnv), DefaultHookDeadline),
 	}
 }
 

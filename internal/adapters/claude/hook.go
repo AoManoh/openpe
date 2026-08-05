@@ -41,6 +41,7 @@ type HookOptions struct {
 	// means "no budget" so this field is purely additive — callers that
 	// do not set it preserve the historical unbounded behaviour.
 	MaxContextTokens int
+	CacheDir         string
 }
 
 type HookOutput struct {

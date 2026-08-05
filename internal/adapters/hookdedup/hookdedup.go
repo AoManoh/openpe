@@ -38,8 +38,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/AoManoh/openpe/internal/fsatomic"
 )
 
 // DefaultWindow is the claim freshness window. It must comfortably exceed the
@@ -66,32 +69,45 @@ const (
 	OutcomeInject Outcome = "inject"
 )
 
-// Prior is what a losing caller learns about the winning flight: how it
-// concluded, (for blocks) the winner's disclosure notes so a replayed block
-// can show the user the same information the winner produced, and the
-// winner's enhanced prompt itself. Hosts like the Devin CLI run EVERY hook
-// and display the LAST block reason, so a loser's output is often the one
-// the user actually sees.
+// Conclusion is what a winning flight records for its losers: how it ended,
+// the disclosure notes, the enhanced prompt (successful review blocks), and
+// the final block reason (any block — including error and deadline blocks,
+// which have no prompt to re-deliver but whose interception must still be
+// replayable: a manual retry right after "enhancement failed" once slipped
+// the raw `pe` text through to the model because the failure was recorded as
+// OutcomeUnknown and the loser skipped).
+type Conclusion struct {
+	Outcome Outcome
+	Notes   string
+	Prompt  string
+	Reason  string
+}
+
+// Prior is what a losing caller learns about the winning flight. Hosts like
+// the Devin CLI run EVERY hook and display the LAST block reason, so a
+// loser's output is often the one the user actually sees.
 //
-// Prompt lives IN the claim (not in the per-client "last prompt" cache) so a
-// replay is bound to this exact claim key: with parallel sessions the global
-// last-prompt file may already belong to ANOTHER session's flight by the time
-// a loser replays (CR-003), which once leaked one workspace's enhancement
-// into another. A loser must render from Prior.Prompt or degrade explicitly.
+// Prompt and Reason live IN the claim (not in the per-client "last prompt"
+// cache) so a replay is bound to this exact claim key: with parallel sessions
+// the global last-prompt file may already belong to ANOTHER session's flight
+// by the time a loser replays, which once leaked one workspace's enhancement
+// into another. A loser must render from the Prior or degrade explicitly.
 type Prior struct {
 	Outcome Outcome
 	Notes   string
 	Prompt  string
+	Reason  string
 }
 
-// claimBody is the persisted claim conclusion. JSON gives the three fields an
+// claimBody is the persisted claim conclusion. JSON gives the fields an
 // unambiguous encoding (notes may contain newlines; prompts may contain
 // anything); an unparsable or legacy body degrades to OutcomeUnknown, which
-// losers already treat as "skip", the safe default.
+// callers treat as "no conclusion".
 type claimBody struct {
 	Outcome string `json:"outcome"`
 	Notes   string `json:"notes,omitempty"`
 	Prompt  string `json:"prompt,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // Claim attempts to acquire the single-flight claim for prompt within window.
@@ -110,11 +126,11 @@ type claimBody struct {
 //
 // Any filesystem error degrades to "won=true, no claim": a transient FS problem
 // must never silently drop the user's enhancement, only its de-duplication.
-func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior Prior, finish func(Outcome, string, string)) {
+func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior Prior, finish func(Conclusion)) {
 	if window <= 0 {
 		window = DefaultWindow
 	}
-	noop := func(Outcome, string, string) {}
+	noop := func(Conclusion) {}
 	dir := dedupDir(baseCacheDir)
 	if dir == "" {
 		return true, Prior{}, noop
@@ -122,12 +138,13 @@ func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior P
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return true, Prior{}, noop
 	}
+	collectGarbage(dir, window)
 	path := filepath.Join(dir, key(prompt))
 
 	// Fast path: atomically create the claim. Success means we are the winner.
 	if f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
 		_ = f.Close()
-		return true, Prior{}, func(o Outcome, notes string, enhanced string) { record(path, o, notes, enhanced) }
+		return true, Prior{}, func(c Conclusion) { record(path, c) }
 	} else if !os.IsExist(err) {
 		// Unexpected FS error: never drop the enhancement.
 		return true, Prior{}, noop
@@ -150,21 +167,105 @@ func Claim(baseCacheDir, prompt string, window time.Duration) (won bool, prior P
 	// matters after a crashed winner, and the worst case is a single extra
 	// enhancement.
 	reset(path)
-	return true, Prior{}, func(o Outcome, notes string, enhanced string) { record(path, o, notes, enhanced) }
+	return true, Prior{}, func(c Conclusion) { record(path, c) }
 }
 
-// record stores the flight's conclusion (outcome, disclosure notes, and for
-// blocks the enhanced prompt itself) as JSON in the claim body and refreshes
-// its modification time (sibling hooks that start after the winner exits must
-// still observe a fresh claim). Best effort: on failure it degrades to a
-// plain touch so de-duplication itself keeps working.
-func record(path string, outcome Outcome, notes string, enhanced string) {
-	payload, err := json.Marshal(claimBody{Outcome: string(outcome), Notes: notes, Prompt: enhanced})
+// claimTTL bounds how long a concluded claim file may linger. Claims are only
+// meaningful within the freshness window (seconds); the generous TTL merely
+// avoids racing a live flight. Without it the directory grew one file per
+// unique prompt forever — an unbounded archive of enhanced prompts.
+const claimTTL = 10 * time.Minute
+
+const (
+	maxClaimFiles = 2048
+	maxClaimBytes = 16 << 20
+)
+
+type claimFile struct {
+	path    string
+	modTime time.Time
+	size    int64
+}
+
+// collectGarbage lazily removes expired claims and enforces hard count/byte
+// caps. Best effort by design: a failed sweep never blocks the enhancement.
+// Keeping only a scan prefix can starve lexically-later files forever, so the
+// sweep evaluates the whole bounded directory; once an old unbounded install
+// is encountered, this call shrinks it back under the cap.
+func collectGarbage(dir string, freshnessWindow time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	retention := claimTTL
+	if freshnessWindow > retention {
+		retention = freshnessWindow
+	}
+	cutoff := now.Add(-retention)
+	protectedAfter := now.Add(-freshnessWindow)
+	live := make([]claimFile, 0, len(entries))
+	var totalBytes int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if info.ModTime().Before(cutoff) {
+			if current, statErr := os.Stat(path); statErr == nil && current.ModTime().Equal(info.ModTime()) {
+				_ = os.Remove(path)
+			}
+			continue
+		}
+		live = append(live, claimFile{path: path, modTime: info.ModTime(), size: info.Size()})
+		totalBytes += info.Size()
+	}
+	if len(live) <= maxClaimFiles && totalBytes <= maxClaimBytes {
+		return
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].modTime.Before(live[j].modTime) })
+	remaining := len(live)
+	for _, file := range live {
+		if remaining <= maxClaimFiles && totalBytes <= maxClaimBytes {
+			break
+		}
+		// freshness window 内可能仍有 winner 在飞；容量压力不能破坏
+		// single-flight。短时超上限优于重复增强/重复注入。
+		if !file.modTime.Before(protectedAfter) {
+			continue
+		}
+		current, err := os.Stat(file.path)
+		if err != nil || !current.ModTime().Equal(file.modTime) {
+			continue
+		}
+		if err := os.Remove(file.path); err == nil {
+			remaining--
+			totalBytes -= file.size
+		}
+	}
+}
+
+// record stores the flight's conclusion as JSON in the claim body and
+// refreshes its modification time (sibling hooks that start after the winner
+// exits must still observe a fresh claim). The write is atomic (temp+rename)
+// so a concurrent reader never observes a torn body. Best effort: on failure
+// it degrades to a plain touch so de-duplication itself keeps working.
+func record(path string, c Conclusion) {
+	payload, err := json.Marshal(claimBody{
+		Outcome: string(c.Outcome),
+		Notes:   c.Notes,
+		Prompt:  c.Prompt,
+		Reason:  c.Reason,
+	})
 	if err != nil {
 		touch(path)
 		return
 	}
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
+	if err := fsatomic.WriteFile(path, payload, 0o600); err != nil {
 		touch(path)
 	}
 }
@@ -179,8 +280,8 @@ func reset(path string) {
 
 // readPrior parses the claim body written by record. Unrecognised or
 // unreadable content (including bodies written by older binaries) degrades to
-// OutcomeUnknown with no notes (skip — the safe default); notes and prompt
-// are only meaningful for a recognised outcome.
+// OutcomeUnknown with no fields (no conclusion — callers decide whether that
+// means skip or fail-closed).
 func readPrior(path string) Prior {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -192,9 +293,9 @@ func readPrior(path string) Prior {
 	}
 	switch Outcome(strings.TrimSpace(body.Outcome)) {
 	case OutcomeBlock:
-		return Prior{Outcome: OutcomeBlock, Notes: body.Notes, Prompt: body.Prompt}
+		return Prior{Outcome: OutcomeBlock, Notes: body.Notes, Prompt: body.Prompt, Reason: body.Reason}
 	case OutcomeInject:
-		return Prior{Outcome: OutcomeInject, Notes: body.Notes, Prompt: body.Prompt}
+		return Prior{Outcome: OutcomeInject, Notes: body.Notes, Prompt: body.Prompt, Reason: body.Reason}
 	default:
 		return Prior{}
 	}

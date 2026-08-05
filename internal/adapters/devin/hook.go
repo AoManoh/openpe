@@ -88,6 +88,7 @@ type HookOptions struct {
 	// into enhancer.Request.Options. Zero means "no budget" so this field is
 	// purely additive.
 	MaxContextTokens int
+	CacheDir         string
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -162,7 +163,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		// ("blocked + copied, paste it" / "clipboard failed, see hook last"), so
 		// the cross-client experience is consistent. openPE never auto-applies a
 		// generated prompt: the user pastes/edits/resubmits it.
-		cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
+		cachePath, _ := savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
 		out := BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt)
 		out.Warnings = resp.Warnings
 		return out, nil
@@ -172,7 +173,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	// (exit 0). The injection is silent — Devin consumes additionalContext but
 	// does not surface our systemMessage — so cache the enhanced prompt too;
 	// `openpe devin hook last --prompt` lets the user audit what was injected.
-	_, _ = SavePreview(resp.EnhancedPrompt, opts.Language)
+	_, _ = savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
 	out := InjectionOutput(resp.EnhancedPrompt, opts.Language)
 	out.Warnings = resp.Warnings
 	return out, nil
@@ -250,7 +251,11 @@ func MarkdownPreview(enhanced string, language string) string {
 }
 
 func SavePreview(enhanced string, language string) (string, error) {
-	cache, err := delivery.Save(cacheNamespace, enhanced, language)
+	return savePreview(enhanced, language, "")
+}
+
+func savePreview(enhanced string, language string, cacheDir string) (string, error) {
+	cache, err := delivery.SaveWithOptions(cacheNamespace, enhanced, language, delivery.Options{CacheDir: cacheDir})
 	if err != nil {
 		return "", err
 	}

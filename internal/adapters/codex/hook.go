@@ -65,6 +65,7 @@ type HookOptions struct {
 	// means "no budget" so this field is purely additive — callers that
 	// do not set it preserve the historical unbounded behaviour.
 	MaxContextTokens int
+	CacheDir         string
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -134,13 +135,13 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		return HookError(manual, err.Error(), opts.Language), nil
 	}
 	if manual && manualMode == ModePreview && !opts.Inject {
-		cachePath, _ := SavePreview(resp.EnhancedPrompt, opts.Language)
+		cachePath, _ := savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
 		return BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt), nil
 	}
 	// Inject mode (--auto, or OPENPE_HOOK_INJECT/OPENPE_CODEX_INJECT): cache the
 	// enhanced prompt for audit (`openpe codex hook last --prompt`), then inject
 	// it as additional context.
-	_, _ = SavePreview(resp.EnhancedPrompt, opts.Language)
+	_, _ = savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
 	return HookOutput{
 		SystemMessage: injectedMessage(opts.Language),
 		HookSpecificOutput: &HookSpecificOutput{
@@ -199,7 +200,11 @@ func MarkdownPreview(enhanced string, language string) string {
 }
 
 func SavePreview(enhanced string, language string) (string, error) {
-	cache, err := delivery.Save("codex", enhanced, language)
+	return savePreview(enhanced, language, "")
+}
+
+func savePreview(enhanced string, language string, cacheDir string) (string, error) {
+	cache, err := delivery.SaveWithOptions("codex", enhanced, language, delivery.Options{CacheDir: cacheDir})
 	if err != nil {
 		return "", err
 	}

@@ -246,12 +246,18 @@ func readFile(pathFn func(string) (string, error), client string) (string, error
 	return string(data), nil
 }
 
+// cacheDir resolves the per-client cache directory. OPENPE_CACHE_DIR (or the
+// Options override) is a cache ROOT, not the final directory: the client
+// namespace is always appended, otherwise every client shares one
+// last.md/last-prompt.txt and `openpe codex hook last` can read Devin's most
+// recent enhancement (and vice versa) — a cross-client mixup the default
+// (user-cache-dir) layout never had.
 func cacheDir(client string, override string) (string, error) {
 	if value := strings.TrimSpace(override); value != "" {
-		return value, nil
+		return filepath.Join(value, safeClientName(client)), nil
 	}
 	if value := strings.TrimSpace(os.Getenv("OPENPE_CACHE_DIR")); value != "" {
-		return value, nil
+		return filepath.Join(value, safeClientName(client)), nil
 	}
 	dir, err := os.UserCacheDir()
 	if err != nil {
