@@ -1,13 +1,13 @@
-// esbuild bundler config: src/index.ts → dist/inject.js (single-file IIFE).
+// esbuild-wasm 打包配置：src/index.ts → dist/inject.js（单文件 IIFE）。
+// WASM 版本避免在 Windows 与 WSL 共享工作树时误用另一平台的 native
+// optional binary；这个 payload 很小，性能差异可接受。
 //
-// The output is appended verbatim by the Python installer between the
-// /* === OPENPE-INJECT-BEGIN === */ markers. It MUST:
-//   * be a single self-contained IIFE (no imports left over),
-//   * not pollute window / globalThis with names that could clash with
-//     Windsurf's bundle,
-//   * have no top-level side effects beyond invoking the IIFE.
+// 输出由 Python installer 原样写入 OPENPE-INJECT marker，必须保持：
+//   * 单一自包含 IIFE（不残留 import）；
+//   * 不向 window/globalThis 暴露可能与宿主冲突的名称；
+//   * 除启动 IIFE 外没有顶层副作用。
 
-import { build } from "esbuild";
+import { build } from "esbuild-wasm";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
