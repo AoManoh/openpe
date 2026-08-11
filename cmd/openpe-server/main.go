@@ -9,7 +9,6 @@ import (
 
 	"github.com/AoManoh/openpe/internal/config"
 	"github.com/AoManoh/openpe/internal/enhancer"
-	"github.com/AoManoh/openpe/internal/integration"
 	"github.com/AoManoh/openpe/internal/wiring"
 )
 
@@ -54,32 +53,28 @@ func runWithIO(args []string, stdout io.Writer, stderr io.Writer) error {
 	return serveUntilSignal(httpServer, binding.Listener, status, stderr)
 }
 
-func validateUnauthenticatedListen(listenAddr string, token string) error {
+// validateLoopbackListen enforces openPE's local-first product boundary:
+// openpe-server only serves same-host callers (hooks, IDE webviews, local
+// automation), so any non-loopback bind is refused at startup. The listen
+// flag inherited a generic "any address" capability from the HTTP MVP and a
+// later token gate kept it alive, but exposure beyond loopback was never a
+// confirmed business need (2026-08-10 review, SCOPE-001). Genuinely remote
+// automation should terminate TLS in an external reverse proxy or tunnel.
+func validateLoopbackListen(listenAddr string) error {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
 	if err != nil {
 		return fmt.Errorf("validate listen address %q: %w", listenAddr, err)
 	}
-	if isAllowedUnauthenticatedHost(host) {
-		return nil
-	}
-	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("refusing unauthenticated listen address %q: set OPENPE_SERVER_TOKEN or bind to 127.0.0.1, ::1, or localhost", listenAddr)
-	}
-	// A network-reachable server needs authentication material that cannot be
-	// guessed. "Any non-empty string counts" once allowed OPENPE_SERVER_TOKEN=x
-	// to pass this gate; enforce the same 256-bit hex shape GenerateToken
-	// produces (integration.ValidateTokenShape) before exposing the enhancer
-	// (and the provider budget behind it) beyond loopback.
-	if err := integration.ValidateTokenShape(token); err != nil {
+	if !isLoopbackHost(host) {
 		return fmt.Errorf(
-			"refusing non-loopback listen address %q with a weak OPENPE_SERVER_TOKEN (%v); generate one with: openssl rand -hex 32",
-			listenAddr, err,
+			"refusing non-loopback listen address %q: openpe-server is local-first and only binds 127.0.0.1, ::1, or localhost; put a TLS reverse proxy or tunnel in front if remote access is genuinely required",
+			listenAddr,
 		)
 	}
 	return nil
 }
 
-func isAllowedUnauthenticatedHost(host string) bool {
+func isLoopbackHost(host string) bool {
 	host = strings.TrimSpace(host)
 	if strings.EqualFold(host, "localhost") {
 		return true

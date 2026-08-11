@@ -100,7 +100,7 @@ func prepareLifecycle(opts serverOptions) (serverLifecycle, error) {
 			return serverLifecycle{}, fmt.Errorf("lifecycle OPENPE_SERVER_TOKEN is weak: %w", err)
 		}
 	}
-	if err := validateUnauthenticatedListen(opts.Listen, lifecycle.Token); err != nil {
+	if err := validateLoopbackListen(opts.Listen); err != nil {
 		return serverLifecycle{}, err
 	}
 	return lifecycle, nil
