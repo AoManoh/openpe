@@ -389,6 +389,22 @@ func historyDisclosure(messages []enhancer.Message, status histstatus.Status, su
 	return localizedHistoryNote(status, len(messages), summaries, language)
 }
 
+// disclosureNotes joins the history disclosure with the enhancer's advisory
+// warnings (out-of-context numbers / undecided irreversible actions / language
+// mismatch) into the single non-silent prefix every hook shows the user.
+// Warnings exist precisely to be read BEFORE the user acts on the enhanced
+// prompt (b3645b1: three real fabrication incidents), so every formal hook
+// path — codex, claude, windsurf and devin alike — must surface them, not
+// just the JSON/HTTP callers.
+func disclosureNotes(messages []enhancer.Message, status histstatus.Status, summaries int, histErr error, warnings []string, language string) string {
+	notes := make([]string, 0, 1+len(warnings))
+	if note := historyDisclosure(messages, status, summaries, histErr, language); note != "" {
+		notes = append(notes, note)
+	}
+	notes = append(notes, warnings...)
+	return strings.Join(notes, " ")
+}
+
 func localizedHistoryNote(status histstatus.Status, count int, summaries int, language string) string {
 	en := isEnglishLanguage(language)
 	switch status {

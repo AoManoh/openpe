@@ -51,6 +51,10 @@ type HookOutput struct {
 	TerminalPreview string
 	PreviewPrompt   string
 	CachePath       string
+	// Warnings carries enhancer.Response.Warnings (out-of-context numbers /
+	// undecided actions / language guard) so the runner folds them into the
+	// user-facing disclosure before the user acts on the enhancement.
+	Warnings []string
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -104,6 +108,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		TerminalPreview: preview.Markdown(resp.EnhancedPrompt, opts.Language),
 		PreviewPrompt:   strings.TrimSpace(resp.EnhancedPrompt),
 		CachePath:       cachePath,
+		Warnings:        resp.Warnings,
 	}, nil
 }
 

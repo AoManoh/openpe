@@ -304,9 +304,10 @@ func emitCodexHookExecution(execution codexHookExecution, opts codexHookOptions,
 		output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("codex"))
 	}
 	// Non-silent disclosure: always state whether prior context was included
-	// (and if not, why / or that reading failed), so a history-less result is
-	// never mistaken for a context-aware one.
-	if note := historyDisclosure(execution.History, execution.HistoryStatus, 0, execution.HistoryErr, cfg.Language); note != "" {
+	// (and if not, why / or that reading failed) plus any enhancer content
+	// warnings, so a history-less or advisory-flagged result is never mistaken
+	// for a clean context-aware one.
+	if note := disclosureNotes(execution.History, execution.HistoryStatus, 0, execution.HistoryErr, output.Warnings, cfg.Language); note != "" {
 		if output.Decision == "block" {
 			output.Reason = strings.TrimSpace(note + " " + output.Reason)
 		} else {

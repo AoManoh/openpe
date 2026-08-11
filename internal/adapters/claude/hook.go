@@ -53,6 +53,10 @@ type HookOutput struct {
 	Injected           bool
 	SystemMessage      string
 	HookSpecificOutput *HookSpecificOutput
+	// Warnings carries enhancer.Response.Warnings (out-of-context numbers /
+	// undecided actions / language guard) so the runner folds them into the
+	// user-facing disclosure before the user acts on the enhancement.
+	Warnings []string
 }
 
 type HookSpecificOutput struct {
@@ -116,11 +120,13 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 				AdditionalContext: AdditionalContext(resp.EnhancedPrompt),
 			},
 			PreviewPrompt: strings.TrimSpace(resp.EnhancedPrompt),
+			Warnings:      resp.Warnings,
 		}, nil
 	}
 	return HookOutput{
 		TerminalPreview: preview.Markdown(resp.EnhancedPrompt, opts.Language),
 		PreviewPrompt:   strings.TrimSpace(resp.EnhancedPrompt),
+		Warnings:        resp.Warnings,
 	}, nil
 }
 

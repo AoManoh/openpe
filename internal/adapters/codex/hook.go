@@ -37,6 +37,11 @@ type HookOutput struct {
 	HookSpecificOutput *HookSpecificOutput `json:"hookSpecificOutput,omitempty"`
 	TerminalPreview    string              `json:"-"`
 	PreviewPrompt      string              `json:"-"`
+	// Warnings carries enhancer.Response.Warnings (out-of-context numbers /
+	// undecided actions / language guard) so the runner folds them into the
+	// user-facing disclosure before the user acts on the enhancement. Not part
+	// of the wire JSON.
+	Warnings []string `json:"-"`
 }
 
 type HookSpecificOutput struct {
@@ -136,7 +141,9 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	}
 	if manual && manualMode == ModePreview && !opts.Inject {
 		cachePath, _ := savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
-		return BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt), nil
+		out := BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt)
+		out.Warnings = resp.Warnings
+		return out, nil
 	}
 	// Inject mode (--auto, or OPENPE_HOOK_INJECT/OPENPE_CODEX_INJECT): cache the
 	// enhanced prompt for audit (`openpe codex hook last --prompt`), then inject
@@ -148,6 +155,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 			HookEventName:     UserPromptSubmit,
 			AdditionalContext: AdditionalContext(resp.EnhancedPrompt),
 		},
+		Warnings: resp.Warnings,
 	}, nil
 }
 

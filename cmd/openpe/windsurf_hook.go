@@ -145,6 +145,12 @@ func emitWindsurfHookOutput(output windsurfadapter.HookOutput, cfg config.Config
 	if result.CopyError != nil && cfg.Delivery.WindsurfPromptFallback {
 		status = delivery.AppendPromptFallback(status, output.PreviewPrompt, cfg.Language)
 	}
+	// Enhancer content warnings must be visible before the user pastes the
+	// enhancement (Windsurf has no history collector, so this is the whole
+	// disclosure).
+	if joined := strings.TrimSpace(strings.Join(output.Warnings, " ")); joined != "" {
+		status = joined + "\n" + status
+	}
 	fmt.Fprintln(stderr, status)
 	return 2
 }

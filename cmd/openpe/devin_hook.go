@@ -182,7 +182,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 	}
 	result := runDevinFlightWithDeadline(flight, *hookDeadline, manualTrigger, cfg.Language)
 	if *copyPreview {
-		result.Output = deliverDevinBlock(cfg, result.Output)
+		result.Output = deliverDevinBlock(cfg, result.Output, result.Notes)
 	}
 	claimConclusion = devinClaimConclusion(result)
 	output := result.Output
@@ -342,7 +342,7 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 		return result
 	}
 	result := runDevinFlightWithDeadline(flight, deadline, manualTrigger, cfg.Language)
-	result.Output = deliverDevinBlock(cfg, result.Output)
+	result.Output = deliverDevinBlock(cfg, result.Output, result.Notes)
 	claimConclusion = devinClaimConclusion(result)
 	return emitDevinOutput(result.Output, "stderr", false, stdout, stderr)
 }
@@ -357,15 +357,10 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 // displays the LAST block reason, so a loser's replayed block must be able to
 // show the same disclosure the winner produced.
 func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Result, histErr error, language string) (devinadapter.HookOutput, string) {
-	notes := make([]string, 0, 1+len(output.Warnings))
-	if note := historyDisclosure(hist.Messages, hist.Status, hist.SummaryCount, histErr, language); note != "" {
-		notes = append(notes, note)
-	}
-	notes = append(notes, output.Warnings...)
-	if len(notes) == 0 {
+	joined := disclosureNotes(hist.Messages, hist.Status, hist.SummaryCount, histErr, output.Warnings, language)
+	if joined == "" {
 		return output, ""
 	}
-	joined := strings.Join(notes, " ")
 	if output.Decision == "block" {
 		output.Reason = strings.TrimSpace(joined + " " + output.Reason)
 	} else {
@@ -393,13 +388,17 @@ func devinDedupKey(sessionID string, cwd string, prompt string) string {
 // block reason from the shared delivery.HookStatus, so every review-mode Devin
 // path (the native devin hook and the imported claude/windsurf hooks) shows the
 // same "blocked + copied, paste it" / "clipboard failed, see hook last" feedback
-// as the Codex/Claude/Windsurf clients. It is a no-op for inject/skip outputs.
-func deliverDevinBlock(cfg config.Config, output devinadapter.HookOutput) devinadapter.HookOutput {
+// as the Codex/Claude/Windsurf clients. notes is the flight's disclosure
+// (history note + enhancer warnings): the delivery status REPLACES the reason,
+// so it must be re-prefixed here — the 2026-08-05 deadline rework ran delivery
+// after the disclosure fold and silently dropped every warning from the block
+// feedback (2026-08-10 review, BUG-001). It is a no-op for inject/skip outputs.
+func deliverDevinBlock(cfg config.Config, output devinadapter.HookOutput, notes string) devinadapter.HookOutput {
 	if output.Decision != "block" || strings.TrimSpace(output.PreviewPrompt) == "" {
 		return output
 	}
 	result := delivery.Deliver(context.Background(), output.PreviewPrompt, configuredDeliveryOptions(cfg, "devin"))
-	output.Reason = delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("devin"))
+	output.Reason = strings.TrimSpace(strings.TrimSpace(notes) + " " + delivery.HookStatus(result, cfg.Language, hookLastPromptCommand("devin")))
 	return output
 }
 
@@ -452,9 +451,10 @@ func replayDevinBlockedPrompt(cfg config.Config, prior hookdedup.Prior, copyPrev
 	}
 	out := devinadapter.BlockPreview(devinadapter.PreviewReason("", cfg.Language), devinadapter.MarkdownPreview(prompt, cfg.Language), prompt)
 	if copyPreview {
-		out = deliverDevinBlock(cfg, out)
+		out = deliverDevinBlock(cfg, out, prior.Notes)
+	} else {
+		out.Reason = strings.TrimSpace(prior.Notes + " " + out.Reason)
 	}
-	out.Reason = strings.TrimSpace(prior.Notes + " " + out.Reason)
 	return emitDevinBlock(out, blockOutput, terminalPreview, stdout, stderr)
 }
 

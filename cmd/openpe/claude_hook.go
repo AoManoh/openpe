@@ -159,7 +159,7 @@ func emitClaudeHookOutput(output claudeadapter.HookOutput, history []enhancer.Me
 	// the non-silent history disclosure; cache the prompt for `claude hook last`.
 	if output.Injected {
 		_, _ = delivery.SaveWithOptions("claude", output.PreviewPrompt, cfg.Language, configuredDeliveryOptions(cfg, "claude"))
-		if note := historyDisclosure(history, histStatus, 0, histErr, cfg.Language); note != "" {
+		if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, cfg.Language); note != "" {
 			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
 		}
 		_ = claudeadapter.EncodeInjection(stdout, output)
@@ -174,8 +174,9 @@ func emitClaudeHookOutput(output claudeadapter.HookOutput, history []enhancer.Me
 		status = delivery.AppendPromptFallback(status, output.PreviewPrompt, cfg.Language)
 	}
 	// Non-silent disclosure: always state whether prior context was included
-	// (and if not, why / or that reading failed).
-	if note := historyDisclosure(history, histStatus, 0, histErr, cfg.Language); note != "" {
+	// (and if not, why / or that reading failed) plus any enhancer content
+	// warnings — they must be read before the user pastes the enhancement.
+	if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, cfg.Language); note != "" {
 		status = note + "\n" + status
 	}
 	fmt.Fprintln(stderr, status)
