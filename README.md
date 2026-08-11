@@ -144,7 +144,7 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_LANGUAGE`                                      | `zh`                       | hook 终端反馈语言：`zh` / `en`                                                                                                                                                                      |
 | `OPENPE_TIMEOUT`                                       | `60s`                      | 单次 provider 调用超时（Go duration）                                                                                                                                                                   |
 | `OPENPE_HOOK_DEADLINE`                                 | `100s`                     | Devin 聚合 hook 的正数自我截止时间（Go duration，非正/非法值回退默认，安全上不允许关闭）。宿主 timeout 会直接杀 hook 且不读输出；安装器还按 `--hook-timeout` 派生更短的 CLI deadline。手动 `pe` 超时以“原文未提交”拦截，注入/auto 退化为放行 |
-| `OPENPE_LISTEN_ADDR`                                   | `127.0.0.1:18980`          | `openpe-server` 监听地址；无 token 时只能绑定 `127.0.0.1` / `::1` / `localhost`。绑定非 loopback 时 `OPENPE_SERVER_TOKEN` 必须是 64 位小写十六进制（256 bit），弱 token 会在 bind/publish 前拒绝；启用 lifecycle/descriptor 时即使只监听 loopback 也执行同一强度校验 |
+| `OPENPE_LISTEN_ADDR`                                   | `127.0.0.1:18980`          | `openpe-server` 监听地址，**仅允许 loopback**（`127.0.0.1` / `::1` / `localhost`）；`0.0.0.0`、`::`、LAN IP 等非 loopback 地址一律启动即拒绝——openPE 是本地优先工具，远程访问从来不是已确认的业务需求（2026-08-10 复核收窄），确有远程自动化需求请在外层用 TLS 反向代理/隧道。启用 lifecycle/descriptor 时 `OPENPE_SERVER_TOKEN` 必须是 64 位小写十六进制（256 bit） |
 | `OPENPE_CACHE_DIR`                                     | `~/.cache/openpe`（Linux） | hook 预览与纯文本**缓存根目录**；始终在其下追加客户端命名空间（如 `<root>/devin/last-prompt.txt`、`<root>/codex/last-prompt.txt`），避免多客户端互相覆盖 `hook last`。旧版把 override 当最终目录；升级后如需保留旧缓存，请手动移动到对应客户端子目录 |                                                                                                                                                                             |
 | `OPENPE_COPY_COMMAND`                                  | 自动探测                     | 覆盖剪贴板命令；接收 stdin（如 `xclip -selection clipboard`）。原生 Windows 用 `cmd.exe /C` 执行，POSIX/WSL 用 `sh -c` 执行；命令首段为 `clip.exe` 时会自动转为 UTF-16LE，避免 Windows 中文乱码 |
 | `OPENPE_DISABLE_OSC52_CLIPBOARD`                       | `false`                    | 禁用 OSC52 剪贴板兜底                                                                                                                                                                                   |
@@ -156,8 +156,8 @@ openPE 不需要常驻服务进程：hook 在每次 `pe` 调用时按需启动�
 | `OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT` | 内置默认提示词（v7i）        | 覆盖增强器系统提示词（优先级最高，设置后 `OPENPE_PROMPT_STYLE` 失效）：`_FILE` 读取文件内容（优先），`OPENPE_SYSTEM_PROMPT` 为内联值；留空使用内置默认。内置默认当前为 **v7i**（2026-07）：在按输入分桶、防臆造非代码测试目标的基础上，含四条护栏并在提示词末尾 FINAL CHECK 复检——①**用户视角**：增强结果必须是"用户对 agent 的指令"，不吸收历史中助手的反问/自称；②**数值保真**：数字与组成只能逐字取自上下文中同一实体，总数不得分解成编造的分项；③**问题保持与决策保真**：用户输入是征询意见的问题时，增强结果必须仍是咨询请求（可枚举候选方向），不得替用户选择，更不得把上下文里的状态陈述（如"尚未 push"）翻转成执行指令；④**范围与篇幅纪律**：明确的单目标任务做"最小忠实展开"，不得膨胀成报告体项目计划（分节脚手架/未提及的架构词汇/通用仪式步骤）。用于自定义改写风格或部署自调版本，无需改代码重新编译 |
 | `OPENPE_MAX_CONTEXT_TOKENS`                            | `0`（不限）                | 全局输入 token 硬预算，hook 与 HTTP/server 默认路径共享；按约 4 字符/token 计算，system、required task、history、rules/guidelines/files/retrieval 共用**同一份**预算，hybrid/structured 不再让每个 zone 各拿整份。可选上下文先裁剪；若 system+required task 本身已超预算则 400/validation error，绝不假称满足上限。`0` 明确禁用预算 |
 | `OPENPE_MESSAGE_STYLE`                                | `flatten`                  | 消息构建结构：`flatten`（默认，`[system, user]`，历史以 `[role] content` 文本嵌入单条 user）；`hybrid`（`[system, 历史真多轮, 末轮 user 仅含改写指令+原 prompt]`，角色保真/指代更强，系统提示附加「前文仅供参考、勿作答」框架）；`structured`（在 hybrid 之上把 rules/guidelines/files/retrieval 从任务与对话流里分离为独立「只读参考块」置于历史之前，系统提示用三区框架标注参考块/历史/任务）。`hybrid`、`structured` 均为实验性，eval A/B 通过前默认仍为 `flatten` |
-| `OPENPE_WARNINGS_ENABLED`（+ `OPENPE_WARNINGS_ACTIONS` / `OPENPE_WARNINGS_NUM_MAXLEN`） | `true` | **输出侧确定性告警**（提示词护栏之外与模型无关的兜底，2026-07 三起增强质量事故的结构性防线）：增强返回前做纯本地词法检测，命中只**追加提醒、绝不改写/拦截**。①上下文外数字——输出中的数字串未出现在你的输入/历史/规则/检索中则提醒"请核对是否臆造"（列表编号、标识符内数字、超长 id 自动豁免）；②未决策不可逆动作——输出含 push/部署/删除/发布/支付等动作而你的**原始输入**未提及（历史提及不豁免——事故 #3 的编造源正是历史状态行）则提醒"若非你的决策请删除"。告警随 hook 披露显示（review 的 blocked 行 / 注入的 systemMessage）。`_ACTIONS` 逗号分隔追加动作词；`_NUM_MAXLEN` 数字长度上限（默认 5，超过视为 id/哈希） |
-| `OPENPE_LANGUAGE_GUARD_ENABLED`                       | `true`                     | 语言守卫总开关：增强返回前做后处理，检测**用户输入语言**与**增强输出语言**（CJK/拉丁启发式，检测开销 <1ms）；仅当两者都能明确判定且**不一致**时才动作，一致（绝大多数情况）为零成本空操作，故向后兼容、不改变既有增强行为。设 `false` 完全关闭 |
+| `OPENPE_WARNINGS_ENABLED`（+ `OPENPE_WARNINGS_ACTIONS` / `OPENPE_WARNINGS_NUM_MAXLEN`） | `true` | **输出侧确定性告警**（提示词护栏之外与模型无关的兜底，2026-07 三起增强质量事故的结构性防线）：增强返回前做纯本地词法检测，命中只**追加提醒、绝不改写/拦截**。①上下文外数字——输出中的数字串未出现在你的输入/历史/规则/检索中则提醒"请核对是否臆造"（列表编号、标识符内数字、超长 id 自动豁免）；②未决策不可逆动作——输出含 push/部署/删除/发布/支付等动作而你的**原始输入**未提及（历史提及不豁免——事故 #3 的编造源正是历史状态行）则提醒"若非你的决策请删除"。告警随**全部四个正式 hook**（Codex / Claude / Windsurf / Devin）的披露显示（review 的 blocked 行 / 注入的 systemMessage），也随 HTTP `warnings` 字段返回；2026-08-10 修复前 Codex/Claude/Windsurf 不透传、Devin 的剪贴板状态会覆盖告警。`_ACTIONS` 逗号分隔追加动作词；`_NUM_MAXLEN` 数字长度上限（默认 5，超过视为 id/哈希） |
+| `OPENPE_LANGUAGE_GUARD_ENABLED`                       | `true`                     | 语言守卫总开关：增强返回前做后处理，检测**用户输入语言**与**增强输出语言**（CJK/拉丁启发式，检测开销 <1ms）；仅当两侧都存在**明显主导文字系统**（主导文字权重须 ≥ 其它文字合计的 2 倍，CJK 每字按 2 个拉丁字母计权）且**不一致**时才动作。混合文本（如英文句子夹少量中文词、中文句子夹长英文标识符）判为 unknown 并 fail-open 不动作——2026-08-10 修复前，英文主体中出现 2 个汉字就会被误判为中文并触发多余的付费重请求。一致或 unknown 均为零成本空操作。设 `false` 完全关闭 |
 | `OPENPE_LANGUAGE_GUARD_REANCHOR`                      | `true`                     | 检测到语言不一致时的策略：`true` = 追加强语言指令后**重请求一次**（strategy 1，命中不一致时多一次模型调用），修正失败则保留原输出并附 `Warnings` 提示；`false` = 只检测并告警、不重试（strategy 2，零额外延迟）。触发场景（如英文输入被模型改写成中文）本身低频，故对整体延迟影响很小 |
 | `OPENPE_PROVIDER`                                     | `openai`                   | 模型 provider 协议：`openai`（默认，OpenAI 兼容 `/v1/chat/completions`）或 `anthropic`（Anthropic Messages API `/v1/messages`，用 `x-api-key` + `anthropic-version` 头）。用于只提供 Anthropic 格式的端点；未设/未知 → `openai`，现有配置不受影响 |
 | `OPENPE_MAX_TOKENS`                                   | `0`（provider 默认）       | 模型响应最大 token 数。Anthropic 必填（`0` 时回退其默认 4096）；OpenAI 忽略（交给网关默认）。与 `OPENPE_MAX_CONTEXT_TOKENS`（输入侧预算）不同，这是**输出**长度上限 |
@@ -218,7 +218,7 @@ openPE 默认读取当前 Codex / Claude Code / Devin 对话上下文，启用�
 
 | 变量                                | 默认                             | 说明                                                                              |
 | ----------------------------------- | -------------------------------- | --------------------------------------------------------------------------------- |
-| `OPENPE_SERVER_TOKEN`             | 空                               | HTTP bearer token。非 loopback 或 lifecycle 模式要求 64 位小写十六进制；可用 `openssl rand -hex 32` 生成。普通 loopback、lifecycle 关闭时仍兼容既有非空 token |
+| `OPENPE_SERVER_TOKEN`             | 空                               | HTTP bearer token（server 本身只监听 loopback）。lifecycle 模式要求 64 位小写十六进制；可用 `openssl rand -hex 32` 生成。lifecycle 关闭时仍兼容既有非空 token |
 | `OPENPE_SERVER_CORS_ORIGINS`      | 空                               | CORS Origin allowlist，逗号分隔；空值禁用 CORS                                    |
 | `OPENPE_SERVER_LIFECYCLE_ENABLED` | `false`                        | 是否在**成功 bind 后**写 descriptor。descriptor 以原子写发布；POSIX 为 0600，Windows 为受保护且仅当前用户的 DACL；发布与 ownership cleanup 共享跨进程锁 |
 | `OPENPE_SERVER_DESCRIPTOR_FILE`   | `~/.config/openpe/server.json` | lifecycle descriptor 路径覆盖                                                     |
@@ -546,13 +546,13 @@ openpe <client> hook last --path --prompt  # 纯文本 prompt 路径
 
 ```bash
 openpe-server                                  # 监听 OPENPE_LISTEN_ADDR，默认 127.0.0.1:18980
-OPENPE_SERVER_TOKEN=... openpe-server --listen 0.0.0.0:9000  # 非 loopback 监听必须启用 bearer auth
+openpe-server --listen 127.0.0.1:9000          # 换端口；仅接受 loopback 地址
 openpe-server --base-url ... --api-key ... --model ... --timeout 90s   # 命令行覆盖配置
 ```
 
 安全边界：
 
-- 未设置 `OPENPE_SERVER_TOKEN` 时，server 只允许绑定 `127.0.0.1`、`::1` 或 `localhost`；`0.0.0.0`、`::`、LAN IP 和其它主机名会拒绝启动。非 loopback 的 token 必须满足 256-bit/64-hex 强度。
+- server **只允许绑定 loopback**（`127.0.0.1`、`::1`、`localhost`）；`0.0.0.0`、`::`、LAN IP 和其它主机名一律拒绝启动，token 强度不改变这一点。openPE 是本地优先工具，网络暴露从未被确认为业务需求（2026-08-10 复核收窄）；确有远程自动化需求时，请另行在外层部署 TLS 反向代理或隧道。
 - 设置 `OPENPE_SERVER_TOKEN` 后，`/v1/*` 请求必须带 `Authorization: Bearer <token>`；`/healthz` 始终免鉴权。
 - HTTP server 同时设置 header/read/write/idle/handler deadline，慢 body、挂起 provider 和空闲连接均有界；请求体必须是**恰好一个** JSON 对象，未知字段、尾随第二个 JSON 值和超过 2 MiB 都返回 400。
 - provider / Openace / 内部错误对 HTTP 客户端脱敏，响应只包含稳定错误文案和 `request_id`；完整错误写入 server 日志。
