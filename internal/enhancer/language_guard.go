@@ -45,11 +45,19 @@ func (c scriptClass) String() string {
 	}
 }
 
-// classifyScript picks the dominant writing system by rune counts. Order matters:
-// Hangul → Korean; Kana → Japanese (Japanese mixes Kana + Han, so Kana wins over
-// Han); Han (no Kana/Hangul) → Chinese; otherwise Latin if there is enough Latin.
-// The small thresholds keep a stray CJK character in an English sentence (e.g. a
-// quoted identifier) from flipping the class, and reject too-short input.
+// classifyScript picks the dominant writing system by rune counts. A class is
+// returned only when its script family clearly DOMINATES the text — the family
+// must reach a small minimum AND carry at least twice the weight of all other
+// families combined. CJK runes weigh 2× a Latin letter (one Han character
+// carries roughly the information of half an English word), so "帮我把这个 Go
+// 测试改成 table-driven" is not misread as Latin just because identifiers spell
+// more letters. Without the dominance margin, two stray Han characters inside an
+// English sentence (e.g. "Rename 用户 field and update parser tests") flipped
+// the class to Chinese and triggered a paid wrong-language re-anchor — the exact
+// opposite of the guard's documented mixed-text fail-open contract. Mixed text
+// with no clear winner returns scriptUnknown, which the caller treats as a no-op.
+// Within a dominant CJK family, order matters: Hangul → Korean; Kana → Japanese
+// (Japanese mixes Kana + Han, so Kana wins over Han); Han alone → Chinese.
 func classifyScript(s string) scriptClass {
 	var han, kana, hangul, latin, other int
 	for _, r := range s {
@@ -66,19 +74,25 @@ func classifyScript(s string) scriptClass {
 			other++
 		}
 	}
+	cjkWeighted := 2 * (hangul + kana + han)
+	dominates := func(family, rest int) bool { return family >= 2*rest }
 	switch {
-	case hangul >= 2:
-		return scriptKorean
-	case kana >= 2:
-		return scriptJapanese
-	case han >= 2:
-		return scriptChinese
-	case latin >= 6:
+	case dominates(cjkWeighted, latin+other):
+		switch {
+		case hangul >= 2:
+			return scriptKorean
+		case kana >= 2:
+			return scriptJapanese
+		case han >= 2:
+			return scriptChinese
+		}
+		return scriptUnknown // dominant family but too little signal
+	case latin >= 6 && dominates(latin, cjkWeighted+other):
 		return scriptLatin
-	case other >= 4:
+	case other >= 4 && dominates(other, cjkWeighted+latin):
 		return scriptOther
 	default:
-		return scriptUnknown
+		return scriptUnknown // mixed / no dominant script → guard no-op
 	}
 }
 
