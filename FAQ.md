@@ -4,6 +4,48 @@
 
 ---
 
+## 〇、安装与环境
+
+### Q0. `go install` 成功了，但 `openpe：未找到命令`？
+
+**现象示例**（真实案例，2026-08 新机器首装）：
+
+```
+❯ go install ./cmd/openpe
+go: downloading modernc.org/sqlite v1.52.0
+...（正常结束，无报错）
+
+❯ openpe -h
+openpe：未找到命令
+
+❯ which go
+/usr/local/go/bin/go        # 该目录里只有 go、gofmt，没有 openpe
+```
+
+**这不是构建失败**——`go install` 正常结束就说明 binary 已产出。它写入的是 `$GOBIN`（未设置时为 `$GOPATH/bin`，通常 `~/go/bin`），**不是** Go 工具链所在的 `/usr/local/go/bin`；找不到命令只是因为产物目录不在 `PATH`。`source ~/.bashrc` 救不回来——你的 rc 文件里本来就没有这条 PATH。
+
+排查与修复：
+
+```bash
+# 1. 确认 binary 确实在产物目录（应能看到 openpe）
+ls "$(go env GOPATH)/bin"
+# 若这里没有，再查 go env GOBIN——GOBIN 被设置过时产物在那个目录
+
+# 2. 把产物目录永久加入 PATH（zsh 用户改 ~/.zshrc）
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.bashrc
+source ~/.bashrc
+
+# 3. 验证
+openpe -h
+```
+
+两个相关的「正常现象」不要误判为安装问题：
+
+- `cd ~/.config/openpe` 报「没有那个文件或目录」：该目录是[快速开始第 2 步](README.md#2-配置-openai-compatible-endpoint)由你手动 `mkdir -p` 创建的配置目录，安装不会创建它。
+- `/usr/local/go/bin` 下没有 openpe：那里永远只有 Go 工具链自身（`go`、`gofmt`），`go install` 从不往里写。
+
+---
+
 ## 一、会话历史与时效窗口
 
 **现象示例**（真实案例：同一会话里连续两次相同的 `pe`，结果不同）：

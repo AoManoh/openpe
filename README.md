@@ -28,11 +28,21 @@ go install ./cmd/openpe-server     # 可选：长驻 HTTP 服务，仅自动化 
 
 > **两个 binary 的定位**：`openpe` 是你唯一需要的主程序——它既是裸 CLI（`openpe enhance ...`），也是安装到 Codex / Claude Code / Devin / Windsurf 后被各自 hook 调用的处理器（`openpe <client> hook run`）。`openpe-server` 是一个**可选的常驻 HTTP 服务**，把同一套增强能力暴露为 `POST /v1/prompt-enhance`，只在你要接入自动化脚本、其它进程，或已验证的实验性 IDE patch 按钮时才需要；**日常 hook 流程不需要它**，可以跳过第二条命令。
 
-确认 `$GOPATH/bin`（通常 `~/go/bin`）在 `PATH` 中：
+`go install` 把 binary 写到 `$GOBIN`（未设置时为 `$GOPATH/bin`，通常 `~/go/bin`）——**不是** Go 工具链所在的 `/usr/local/go/bin`。验证：
 
 ```bash
 openpe -h
 ```
+
+若提示 `openpe：未找到命令`（command not found），是该目录不在 `PATH`（新机器首装常见），加入后重试（zsh 用户改 `~/.zshrc`）：
+
+```bash
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.bashrc
+source ~/.bashrc
+openpe -h
+```
+
+排查细节见 [FAQ Q0](FAQ.md#q0-go-install-成功了但-openpe未找到命令)。
 
 ### 2. 配置 OpenAI-compatible endpoint
 
