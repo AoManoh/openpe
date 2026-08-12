@@ -1,6 +1,6 @@
 # openPE 常见问题（FAQ）
 
-面向使用者的行为解释与排查。产品级约束见 [README](README.md) 的「注意事项与已知限制」。
+面向使用者的行为解释与排查。首次安装见 [README](README.md)，参数效果和使用案例见 [CONFIG.md](CONFIG.md)，客户端接入细节见 [CLIENTS.md](CLIENTS.md)。
 
 ---
 
@@ -41,8 +41,60 @@ openpe -h
 
 两个相关的「正常现象」不要误判为安装问题：
 
-- `cd ~/.config/openpe` 报「没有那个文件或目录」：该目录是[快速开始第 2 步](README.md#2-配置-openai-compatible-endpoint)由你手动 `mkdir -p` 创建的配置目录，安装不会创建它。
+- `cd ~/.config/openpe` 报「没有那个文件或目录」：该目录是[快速开始第 2 步](README.md#2-配置模型-api)由你手动 `mkdir -p` 创建的配置目录，安装不会创建它。
 - `/usr/local/go/bin` 下没有 openpe：那里永远只有 Go 工具链自身（`go`、`gofmt`），`go install` 从不往里写。
+
+### Q0.1. 配置 Anthropic 地址后，为什么返回 `openai-compatible provider HTTP 404`？
+
+**现象**：API key 和模型名看起来都正确，但反馈类似：
+
+```text
+openPE 增强失败：openai-compatible provider returned HTTP 404:
+{"detail":"Not Found"}
+```
+
+如果 `OPENPE_BASE_URL` 指向 Anthropic Messages 兼容端点，通常是因为没有显式选择 Anthropic 协议。
+
+openPE 默认使用 OpenAI-compatible 协议：
+
+```text
+POST <base-url>/v1/chat/completions
+Authorization: Bearer <key>
+```
+
+Anthropic Messages 端点需要：
+
+```text
+POST <base-url>/v1/messages
+x-api-key: <key>
+anthropic-version: 2023-06-01
+```
+
+修复方法是在 dotenv 中增加 `OPENPE_PROVIDER=anthropic`：
+
+```dotenv
+OPENPE_PROVIDER=anthropic
+OPENPE_BASE_URL=https://your-anthropic-compatible-endpoint
+OPENPE_API_KEY=replace-with-your-api-key
+OPENPE_MODEL=your-model
+```
+
+`OPENPE_MAX_TOKENS` 可选。Anthropic 协议要求 `max_tokens`；不设置或设为 `0` 时，openPE 使用 4096。
+
+保存后，hook 的下一次调用会重新读取 dotenv。也可以先用裸 CLI 验证：
+
+```bash
+OPENPE_ENV_FILE="$HOME/.config/openpe/.env" \
+openpe enhance --prompt "帮我整理这个需求"
+```
+
+判断是否修好：
+
+- 错误文案中的 provider 应从 `openai-compatible` 切换为 `anthropic`；
+- 请求路径应为 `/v1/messages`；
+- 正常返回增强提示词说明协议、地址、密钥和模型名均可用。
+
+如果你的网关明确提供 `/v1/chat/completions`，则继续使用默认 `OPENPE_PROVIDER=openai`，不要因为模型名称里包含 Claude 就自动切到 Anthropic。协议由 API 端点决定，不由模型名称决定。
 
 ---
 
@@ -61,7 +113,7 @@ openpe -h
 ```
 
 - 第一次：会话空闲已超时效窗口（该案例约 8 小时）→ **不带历史**，增强结果是通用版本（无法解析"Phase 3"指代的前文）。
-- 第二次：第一次的提交让 Devin 刷新了会话活跃时间戳 → 落回窗口内 → **带入最近 12 条历史**，增强结果满血（能带出前文的 commit、分支、计划文件等）。
+- 第二次：第一次的提交让 Devin 刷新了会话活跃时间戳 → 落回窗口内 → **带入最近 12 条历史**，增强结果包含会话历史（能带出前文的 commit、分支、计划文件等）。
 - 两次都是**成功交付**（剪贴板里是增强结果），差别只在带没带历史。逐条解释见下面 Q1–Q3；想避免第一次落空见 Q4。
 
 ### Q1. 为什么提示「最近会话已超出时效窗口，本次未带前文上下文」？
@@ -108,7 +160,7 @@ openpe -h
 
 - **Linux 下升级到含精确识别的版本即可**（2026-07 起）：识别成功时延续 prompt 总能命中本会话历史，无需调窗口。以下手段仅在回退路径下才需要：
 - 同日常复用：把窗口调大，写进 hook dotenv（如 `~/.config/openpe/.env`）：`OPENPE_DEVIN_HISTORY_RECENCY=12h`。
-- 或：先在会话里有一次新活跃，再敲 `pe`（现象示例里第二次拿到满血版就是这么来的）。
+- 或：先在会话里有一次新活跃，再敲 `pe`（现象示例里第二次带入历史就是这么来的）。
 - **取舍**：窗口调得越大，越可能把「其实已经废弃的同目录旧会话」的陈旧上下文也带进来。默认 **6h** 是「延续性 vs 防陈旧泄漏」的折中（2026-07 由 2h 上调：2h 下"隔夜/隔半天恢复"的第一条延续 prompt 总是落空，正是现象示例那种情况）。
 
 > 延伸：延续/指代型 prompt（「继续 Phase 3」「把它也改了」）在**没有历史**时只能被增强成通用版本——这与本项目对「指代解析依赖历史」的评测结论一致（见 `docs/development/2026-07-01-part3-refbind-ab-findings.md`，本地）。
@@ -193,7 +245,7 @@ OSC52 需要**终端支持**才能真正写入系统剪贴板。若你的终端/
 OPENPE_PROMPT_STYLE=human
 ```
 
-- 不填 = `agent`。填错会**启动时响亮报错**并列出合法值，绝不静默回退成某个风格。
+- 不填时使用 `agent`。填写不支持的值会在启动时返回明确错误并列出可选值，不会自动改用其它风格。
 - hook 路径每次 `pe` 都重新读配置，改完**下一条 `pe` 即生效**；长驻的 `openpe-server` 需重启一次。
 - 优先级：`OPENPE_SYSTEM_PROMPT_FILE` / `OPENPE_SYSTEM_PROMPT`（完全自定义提示词）> `OPENPE_PROMPT_STYLE` > 内置默认。设置了前者，本参数不生效。
 
