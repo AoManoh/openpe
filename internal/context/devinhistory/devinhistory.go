@@ -53,8 +53,13 @@ const (
 	// defaultRecency mirrors config.DefaultDevinHistoryRecency (kept in sync;
 	// see its comment for the 2h -> 6h rationale). Used only when a caller
 	// passes Options.Recency <= 0.
-	defaultRecency = 6 * time.Hour
-	queryTimeout   = 5 * time.Second
+	defaultRecency      = 6 * time.Hour
+	queryTimeout        = 5 * time.Second
+	historyReadAttempts = 2
+	historyRetryDelay   = 150 * time.Millisecond
+	// MaxChainNodeHops 限制一次采集最多穿越的物理主链节点数；过滤掉的 system/tool
+	// 节点也计入，避免异常噪声链重新形成无界读取。
+	MaxChainNodeHops = 4096
 )
 
 type Options struct {
@@ -75,11 +80,13 @@ type Result struct {
 	SessionID string
 	Status    histstatus.Status
 	Messages  []enhancer.Message
-	// SummaryCount is how many of Messages are Devin compaction summaries
-	// (system-role nodes marked summarized_from, re-mapped to assistant so
-	// every prompt style keeps them). It counts what was actually delivered
-	// after limiting — never a summary that MaxMessages/MaxChars evicted — so
-	// the caller's disclosure can truthfully say a summary was included.
+	// ScanLimited 表示主链在 MaxChainNodeHops 内没有遍历完；此时 Messages
+	// 仍包含已找到的最近历史，但调用方必须披露更早内容未读取。
+	ScanLimited bool
+	// SummaryCount 统计 Messages 中的 Devin compaction 摘要（带
+	// summarized_from 标记的 system 节点会映射成 assistant）。它只表示摘要
+	// 通过了采集器的 MaxMessages/MaxChars 限制；后续全局 MaxContextTokens
+	// 仍可能在 provider 调用前裁掉较早历史。
 	SummaryCount int
 }
 
@@ -117,12 +124,11 @@ func New(opts Options) *Collector {
 	}
 }
 
-// Retrieve locates the Devin session for cwd and returns its recent
-// user/assistant history. The returned error is non-nil only on a genuine read
-// failure (DB present but unreadable / unparseable); "no session", "stale" and
-// "empty" are reported via Result.Status so the caller can surface them
-// explicitly instead of silently enhancing without context. prompt is used only
-// to drop a trailing history turn identical to the current prompt.
+// Retrieve 定位当前 Devin session 并返回最近的 user/assistant 历史。
+// 只有数据库存在但无法读取或解析时才返回 error；未找到、陈旧、为空等正常状态
+// 通过 Result.Status 返回，调用方据此明确披露。恢复 Devin 后，首个 hook 可能在
+// 数 GB 的 SQLite 文件仍处于冷缓存或短暂锁定时触发；对 lock/deadline 这类瞬时
+// 错误重新打开只读连接并有界重试一次，避免第一次增强无故丢失历史。
 func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
@@ -130,12 +136,27 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 	}
 	if _, err := os.Stat(c.dbPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// No Devin store on this machine: explicit "no history", not a failure.
 			return Result{Status: histstatus.NoSession}, nil
 		}
 		return Result{}, fmt.Errorf("stat devin sessions db: %w", err)
 	}
 
+	var lastErr error
+	for attempt := 0; attempt < historyReadAttempts; attempt++ {
+		result, err := c.retrieveOnce(prompt, cwd)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !isTransientHistoryReadError(err) || attempt+1 >= historyReadAttempts {
+			break
+		}
+		time.Sleep(historyRetryDelay)
+	}
+	return Result{}, lastErr
+}
+
+func (c *Collector) retrieveOnce(prompt string, cwd string) (Result, error) {
 	db, err := openReadOnly(c.dbPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("open devin sessions db: %w", err)
@@ -166,14 +187,12 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 		return Result{SessionID: sess.id, Status: status}, nil
 	}
 
-	chain, err := loadChainMessages(ctx, db, sess.id, sess.mainChainID)
+	chain, scanLimited, err := loadChainMessages(ctx, db, sess.id, sess.mainChainID, prompt, c.maxMessages, c.maxChars)
 	if err != nil {
 		return Result{SessionID: sess.id}, err
 	}
-	chain = dropTrailingPrompt(chain, prompt)
-	chain = limitMessages(chain, c.maxMessages, c.maxChars)
 	if len(chain) == 0 {
-		return Result{SessionID: sess.id, Status: histstatus.Empty}, nil
+		return Result{SessionID: sess.id, Status: histstatus.Empty, ScanLimited: scanLimited}, nil
 	}
 	messages := make([]enhancer.Message, len(chain))
 	summaries := 0
@@ -183,13 +202,23 @@ func (c *Collector) Retrieve(prompt string, cwd string) (Result, error) {
 			summaries++
 		}
 	}
-	return Result{SessionID: sess.id, Status: histstatus.Found, Messages: messages, SummaryCount: summaries}, nil
+	return Result{SessionID: sess.id, Status: histstatus.Found, Messages: messages, ScanLimited: scanLimited, SummaryCount: summaries}, nil
 }
 
-// chainMessage is the collector-internal message shape: an enhancer.Message
-// plus whether the node is a compaction summary. The flag rides through
-// dropTrailingPrompt/limitMessages so Result.SummaryCount reflects what is
-// actually kept, not what the chain contained.
+func isTransientHistoryReadError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database table is locked") ||
+		strings.Contains(message, "sqlite_busy") ||
+		strings.Contains(message, "sqlite_locked")
+}
+
+// chainMessage 是采集器内部消息：除 enhancer.Message 字段外，额外记录该节点
+// 是否为 compaction 摘要。loadChainMessages 从叶节点回溯时同步处理 prompt echo
+// 与体量限制，确保 SummaryCount 只统计最终真正交付的摘要。
 type chainMessage struct {
 	Role    string
 	Content string
@@ -265,73 +294,97 @@ func locateSession(ctx context.Context, db *sql.DB, cwd string, recency time.Dur
 	return candidates[0].row, histstatus.Found, nil
 }
 
-func loadChainMessages(ctx context.Context, db *sql.DB, sessionID string, mainChainID sql.NullInt64) ([]chainMessage, error) {
+func loadChainMessages(ctx context.Context, db *sql.DB, sessionID string, mainChainID sql.NullInt64, prompt string, maxMessages int, maxChars int) ([]chainMessage, bool, error) {
 	if !mainChainID.Valid {
-		return nil, nil
+		return nil, false, nil
 	}
-	const q = `SELECT node_id, parent_node_id, chat_message, metadata FROM message_nodes WHERE session_id = ?`
-	rows, err := db.QueryContext(ctx, q, sessionID)
-	if err != nil {
-		// Older Devin CLI schemas may predate the metadata column; retry
-		// without it. Summaries then cannot be identified, which degrades to
-		// the pre-summary behaviour instead of failing the whole history read.
-		const legacy = `SELECT node_id, parent_node_id, chat_message, NULL FROM message_nodes WHERE session_id = ?`
-		rows, err = db.QueryContext(ctx, legacy, sessionID)
-		if err != nil {
-			return nil, fmt.Errorf("query devin message_nodes: %w", err)
-		}
+	if maxMessages <= 0 {
+		maxMessages = defaultMaxMessages
 	}
-	defer rows.Close()
-
-	type node struct {
-		parent  sql.NullInt64
-		chat    string
-		summary bool
-	}
-	nodes := make(map[int64]node)
-	for rows.Next() {
-		var id int64
-		var parent sql.NullInt64
-		var chat string
-		var meta sql.NullString
-		if err := rows.Scan(&id, &parent, &chat, &meta); err != nil {
-			return nil, fmt.Errorf("scan devin message_node: %w", err)
-		}
-		nodes[id] = node{parent: parent, chat: chat, summary: summaryMarked(meta)}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate devin message_nodes: %w", err)
+	if maxChars <= 0 {
+		maxChars = defaultMaxChars
 	}
 
-	// Walk up the main chain (leaf -> root) via parent_node_id, then reverse to
-	// chronological order. node_id is monotonic along a chain, so the cycle
-	// guard is belt-and-suspenders against a malformed forest.
-	var chainIDs []int64
+	// 旧实现先把 session 的全部 node 读入 map，再沿主链回溯。长会话在数 GB
+	// 数据库中可能积累数万个 node：冷缓存首读会超过固定 5 秒，而第二次因页缓存
+	// 已就绪而成功。当前 schema 对 (session_id,node_id) 有唯一索引，因此从叶节点
+	// 沿 parent 做索引点查，达到消息数/字符预算后立即停止。过滤节点也需要穿越，
+	// 但最多读取 MaxChainNodeHops 个物理节点；正常成本随最近上下文增长，不再无界地
+	// 扫描 session 的全部历史。
+	const currentQuery = `SELECT parent_node_id, chat_message, metadata
+		FROM message_nodes WHERE session_id = ? AND node_id = ?`
+	const legacyQuery = `SELECT parent_node_id, chat_message, NULL
+		FROM message_nodes WHERE session_id = ? AND node_id = ?`
+
+	prompt = strings.TrimSpace(prompt)
+	remaining := maxChars
+	reversed := make([]chainMessage, 0, maxMessages)
 	seen := make(map[int64]bool)
-	for cur := mainChainID; cur.Valid; {
+	cur := mainChainID
+	withMetadata := true
+	firstChatMessage := true
+	hops := 0
+
+	for cur.Valid && len(reversed) < maxMessages && remaining > 0 && hops < MaxChainNodeHops {
+		hops++
 		id := cur.Int64
 		if seen[id] {
 			break
 		}
 		seen[id] = true
-		n, ok := nodes[id]
-		if !ok {
+
+		var parent sql.NullInt64
+		var chat string
+		var meta sql.NullString
+		query := currentQuery
+		if !withMetadata {
+			query = legacyQuery
+		}
+		err := db.QueryRowContext(ctx, query, sessionID, id).Scan(&parent, &chat, &meta)
+		if withMetadata && isMissingMetadataColumn(err) {
+			withMetadata = false
+			err = db.QueryRowContext(ctx, legacyQuery, sessionID, id).Scan(&parent, &chat, &meta)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
 			break
 		}
-		chainIDs = append(chainIDs, id)
-		cur = n.parent
-	}
+		if err != nil {
+			return nil, false, fmt.Errorf("query devin message_node %d: %w", id, err)
+		}
+		cur = parent
 
-	messages := make([]chainMessage, 0, len(chainIDs))
-	for i := len(chainIDs) - 1; i >= 0; i-- {
-		n := nodes[chainIDs[i]]
-		msg, ok := parseChatMessage(n.chat, n.summary)
+		msg, ok := parseChatMessage(chat, summaryMarked(meta))
 		if !ok {
 			continue
 		}
-		messages = append(messages, msg)
+		if firstChatMessage {
+			firstChatMessage = false
+			if msg.Role == "user" && prompt != "" && strings.TrimSpace(msg.Content) == prompt {
+				continue
+			}
+		}
+		content := strings.TrimSpace(msg.Content)
+		if runeLen(content) > remaining {
+			content = truncateRunes(content, remaining)
+		}
+		reversed = append(reversed, chainMessage{Role: msg.Role, Content: content, Summary: msg.Summary})
+		remaining -= runeLen(content)
 	}
-	return messages, nil
+
+	scanLimited := hops >= MaxChainNodeHops && cur.Valid && len(reversed) < maxMessages && remaining > 0
+	messages := make([]chainMessage, len(reversed))
+	for i := range reversed {
+		messages[len(reversed)-1-i] = reversed[i]
+	}
+	return messages, scanLimited, nil
+}
+
+func isMissingMetadataColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such column") && strings.Contains(message, "metadata")
 }
 
 // summaryMarked reports whether a message_nodes.metadata column value marks a
@@ -419,49 +472,6 @@ func extractContent(raw json.RawMessage) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
-}
-
-// dropTrailingPrompt removes a final user turn identical to the current prompt.
-// Devin does not persist the in-flight prompt before the hook fires, so this is
-// defensive against any timing where the current prompt already appears as the
-// last turn (avoids asking the model to "rewrite" against itself).
-func dropTrailingPrompt(messages []chainMessage, prompt string) []chainMessage {
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" || len(messages) == 0 {
-		return messages
-	}
-	last := messages[len(messages)-1]
-	if strings.TrimSpace(last.Role) == "user" && strings.TrimSpace(last.Content) == prompt {
-		return messages[:len(messages)-1]
-	}
-	return messages
-}
-
-func limitMessages(messages []chainMessage, maxMessages int, maxChars int) []chainMessage {
-	if maxMessages <= 0 {
-		maxMessages = defaultMaxMessages
-	}
-	if maxChars <= 0 {
-		maxChars = defaultMaxChars
-	}
-	var reversed []chainMessage
-	remaining := maxChars
-	for i := len(messages) - 1; i >= 0 && len(reversed) < maxMessages && remaining > 0; i-- {
-		content := strings.TrimSpace(messages[i].Content)
-		if content == "" {
-			continue
-		}
-		if runeLen(content) > remaining {
-			content = truncateRunes(content, remaining)
-		}
-		reversed = append(reversed, chainMessage{Role: messages[i].Role, Content: content, Summary: messages[i].Summary})
-		remaining -= runeLen(content)
-	}
-	out := make([]chainMessage, len(reversed))
-	for i := range reversed {
-		out[len(reversed)-1-i] = reversed[i]
-	}
-	return out
 }
 
 func openReadOnly(path string) (*sql.DB, error) {

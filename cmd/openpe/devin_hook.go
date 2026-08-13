@@ -358,6 +358,9 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 // show the same disclosure the winner produced.
 func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Result, histErr error, language string) (devinadapter.HookOutput, string) {
 	joined := disclosureNotes(hist.Messages, hist.Status, hist.SummaryCount, histErr, output.Warnings, language)
+	if hist.ScanLimited {
+		joined = strings.TrimSpace(joined + " " + localizedDevinHistoryScanLimit(language))
+	}
 	if joined == "" {
 		return output, ""
 	}
@@ -367,6 +370,13 @@ func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Resu
 		output.SystemMessage = strings.TrimSpace(joined + " " + output.SystemMessage)
 	}
 	return output, joined
+}
+
+func localizedDevinHistoryScanLimit(language string) string {
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE: the Devin history chain exceeded the %d-node safety limit; this enhancement includes only history found within the newest scanned nodes.", devinhistory.MaxChainNodeHops)
+	}
+	return fmt.Sprintf("openPE：Devin 历史主链超过 %d 个节点的安全上限；本次只带入已扫描到的最近历史，更早内容未读取。", devinhistory.MaxChainNodeHops)
 }
 
 // devinDedupKey scopes the de-dup claim to the current Devin session when its
