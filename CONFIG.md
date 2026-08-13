@@ -621,6 +621,8 @@ OPENPE_CLAUDE_TRANSCRIPT_MAX_CHARS=12000
 
 Linux 上优先沿 Devin 进程识别当前 session；识别成功时不受 `RECENCY` 限制。非 Linux 或识别失败时，才按工作目录和最近活跃时间回退。
 
+恢复很长的会话时，openPE 沿主链索引读取最近节点，满足消息数/字符预算后停止；过滤节点也计入 4096 个物理节点安全上限。触发上限时仍使用已找到的最近历史，并明确提示更早内容未读取。数据库刚启动时若遇到临时锁或查询超时，会有界重试一次。如果仍显示“读取历史上下文失败”，应保留括号中的数据库错误；调整 `RECENCY` 或模型请求的 `OPENPE_TIMEOUT` 不会修复数据库读取问题。详见 [FAQ Q6.1](FAQ.md#q61-恢复-devin-会话后为什么第一次提示读取历史上下文失败)。
+
 ```dotenv
 OPENPE_DEVIN_HISTORY_ENABLED=true
 OPENPE_DEVIN_HISTORY_RECENCY=6h
