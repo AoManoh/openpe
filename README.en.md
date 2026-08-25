@@ -147,6 +147,12 @@ openpe <client> hook last --prompt
 
 `<client>` can be `codex`, `claude`, `devin`, or `windsurf`.
 
+After triggering, the client shows openPE's feedback. Codex example:
+
+![Codex CLI trigger demo](assets/codex-pe-trigger.png)
+
+Trigger demos for the other clients are in [CLIENTS.md](CLIENTS.md).
+
 ## Delivery modes
 
 ### Review mode (default)

@@ -145,6 +145,12 @@ openpe <client> hook last --prompt
 
 `<client>` 可用 `codex`、`claude`、`devin` 或 `windsurf`。
 
+触发后客户端会显示 openPE 的反馈，以 Codex 为例：
+
+![Codex CLI 触发演示](assets/codex-pe-trigger.png)
+
+其余客户端的触发演示见 [CLIENTS.md](CLIENTS.md)。
+
 ## 交付模式
 
 ### Review 模式（默认）

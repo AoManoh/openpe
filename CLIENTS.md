@@ -90,6 +90,10 @@ openpe codex hook install --dry-run
 
 安装或修改后，在 Codex TUI 中执行 `/hooks`，检查并信任 openPE hook。未信任的 hook 不会执行。
 
+触发演示（在 Codex TUI 中输入 `pe <prompt>` 后的反馈）：
+
+![Codex CLI 触发演示](assets/codex-pe-trigger.png)
+
 ### 会话历史
 
 Codex 历史默认开启。openPE 用当前 `pe` 原文从 `~/.codex/history.jsonl` 查找 session，再读取对应 rollout 的最近 user/assistant 消息。
@@ -152,6 +156,10 @@ openpe claude hook install --dry-run
 | `--hook-timeout` | `120` | Claude hook 超时秒数 |
 
 安装后重新启动 Claude Code。
+
+触发演示（在 Claude Code 中输入 `pe <prompt>` 后的反馈）：
+
+![Claude Code 触发演示](assets/claude-pe-trigger.png)
 
 ### 会话历史
 
@@ -220,6 +228,10 @@ openpe devin hook install --dry-run
 | `--hook-timeout` | `120` | Devin hook 超时秒数 |
 
 安装后运行 `/hooks`，确认 openPE 已加载。修改配置后重新打开会话。
+
+触发演示（在 Devin CLI 中输入 `pe <prompt>` 后的反馈）：
+
+![Devin CLI 触发演示](assets/devin-pe-trigger.png)
 
 ### 多 hook 去重
 
@@ -298,6 +310,10 @@ openpe windsurf hook install --dry-run
 | `--hook-timeout` | `120` | 用于派生 openPE 自我截止时间 |
 
 安装后重新启动 Windsurf 或重新打开 workspace。
+
+触发演示（在 Windsurf Cascade 中输入 `pe <prompt>` 后的反馈）：
+
+![Windsurf Cascade hook 触发演示](assets/windsurf-pe-trigger.png)
 
 ### 限制
 
@@ -481,6 +497,10 @@ openpe devin hook install
 
 - [IDE patch README](extensions/openpe-windsurf-patch/README.md)
 - [Inject payload README](extensions/openpe-windsurf-patch/inject/README.md)
+
+按钮示意（legacy Windsurf Cascade 截图，注入成功后出现在 prompt 输入框右下角）：
+
+![IDE patch 按钮位置（legacy Windsurf 截图）](assets/windsurf-button.png)
 
 不要把旧 build 的 transaction 恢复到新版本 IDE。安装、恢复和升级前都要完整退出 Devin、WindsurfGate 和 updater。
 
