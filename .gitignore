@@ -2,7 +2,11 @@
 .env
 .env.*
 !.env.example
+.apikey
+.apikey.*
+..apikey.swp
 .augmentignore
+.openaceignore
 .codex/
 .windsurf/
 AGENTS.md
@@ -51,6 +55,7 @@ pnpm-debug.log*
 # Local validation assets
 *_test.go
 **/tests/
+/eval/
 *.test.*
 *.spec.*
 __snapshots__/
