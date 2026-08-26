@@ -38,7 +38,7 @@ go install github.com/AoManoh/openpe/cmd/openpe@latest
 go install github.com/AoManoh/openpe/cmd/openpe-server@latest
 ```
 
-开发者也可以克隆仓库后本地构建（`git clone` 后在仓库内 `go install ./cmd/openpe`），此时版本号显示为构建对应的伪版本。
+开发者也可以克隆仓库后在仓库内执行 `go install ./cmd/openpe` 本地构建。这种构建的 `openpe --version` 显示 Go 工具链根据提交自动生成的开发版本号（形如 `v0.0.0-20260826xxxxxx-提交号`），而不是发布版本号，便于区分正式版和开发版。
 
 确认安装与版本：
 
@@ -47,13 +47,13 @@ openpe -h
 openpe --version
 ```
 
-升级到最新发布版本，直接运行：
+升级到最新发布版本：
 
 ```bash
 openpe update
 ```
 
-它会查询 Go module proxy 并重新安装两个二进制（`openpe update --check` 只查不装）。有新版本时，`pe` 增强的反馈里也会出现一次限频提醒；设 `OPENPE_UPDATE_NOTICE=false` 可关闭提醒与后台检查。
+该命令向 Go 模块下载服务（遵循你已配置的 `GOPROXY` 镜像）查询最新版本，重新安装 `openpe` 和 `openpe-server`，完成后输出升级到的版本号；`openpe update --check` 只查询提示、不安装。存在新版本时，`pe` 的反馈信息末尾还会附一条升级提示——版本检查在后台进行、最多每 24 小时一次，不会拖慢增强本身；设置 `OPENPE_UPDATE_NOTICE=false` 可关闭该提示和后台检查。各版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 如果提示 `openpe：未找到命令`，把 Go 的产物目录加入 `PATH`（zsh 用户改 `~/.zshrc`）：
 
@@ -139,14 +139,14 @@ pe:帮我把这个测试改成 table-driven
 pe：帮我把这个测试改成 table-driven
 ```
 
-如果你把常用约束沉淀成了规范文档（`~/.config/openpe/specs/<名字>.md`），可以在触发词后点名加载，规范原文会逐字附在增强结果后段：
+每次都要重复叮嘱的固定要求（自查清单、写作规范、提交规范等），可以写成普通文本文件保存为 `~/.config/openpe/specs/<名字>.md`——openPE 把这类文件称为「用户规范」，文件名就是引用名。在触发词后加 `+<名字>` 引用（可连写多个），openPE 会把文件内容原封不动附加在增强结果末尾，随剪贴板一起交付：
 
 ```text
 pe+三问 帮我完成如下任务xxx
 pe+三问+write-style 给 server 写部署说明
 ```
 
-点名的规范不存在时本次增强会被阻断并提示原因。详见 [CLIENTS.md](CLIENTS.md#用户规范点名pe) 与 [CONFIG.md](CONFIG.md#用户规范pe-点名加载)。
+引用的规范不存在、内容为空或超过大小上限时，openPE 会阻断本次增强并说明原因，不会悄悄忽略你点名的约束。创建示例见 [FAQ Q10.1](FAQ.md#q101-pe三问-提示规范未找到规范文档怎么建)，完整规则见 [CLIENTS.md](CLIENTS.md#用户规范点名pe) 与 [CONFIG.md](CONFIG.md#用户规范pe-点名加载)。
 
 默认流程：
 
@@ -327,6 +327,7 @@ openpe enhance --json --prompt "优化这个需求描述"
 | 文档 | 内容 |
 |---|---|
 | [README.en.md](README.en.md) | English README |
+| [CHANGELOG.md](CHANGELOG.md) | 各版本的用户可见变化与升级方法 |
 | [CLIENTS.md](CLIENTS.md) | 客户端接入、HTTP、IDE patch 和开发者参考 |
 | [CONFIG.md](CONFIG.md) | 配置参数的实际效果、适用场景、副作用和验证方法 |
 | [FAQ.md](FAQ.md) | 常见问题与故障排查 |
