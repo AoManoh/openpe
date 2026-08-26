@@ -55,6 +55,20 @@ openpe <client> hook last --path --prompt
 
 自定义 `OPENPE_CACHE_DIR` 表示缓存根目录。openPE 会在其下创建客户端子目录，避免不同客户端覆盖彼此的结果。
 
+### 用户规范点名（pe+）
+
+四个客户端的 hook 都支持在触发词后显式点名用户规范：
+
+```text
+pe+三问 帮我完成如下任务xxx
+pe+三问+write-style 给 server 写部署说明
+pe+commit-style:按逻辑分开提交
+```
+
+openPE 读取 `~/.config/openpe/specs/<名字>.md`（目录可用 `OPENPE_SPECS_DIR` 改），把文件内容逐字追加到增强结果后段，随剪贴板/注入一起交付；反馈中会注明"已应用规范"。规范不进入增强模型请求，不消耗增强 token。
+
+点名的规范不存在、内容为空或超过上限时，本次增强被阻断并说明原因（未找到时会列出目录中现有的规范名），原始消息不会发送；改正后重发即可。语法、目录与上限的完整说明见 [CONFIG.md](CONFIG.md#用户规范pe-点名加载)。
+
 ## Codex CLI
 
 已验证 Codex CLI `0.132.0`。

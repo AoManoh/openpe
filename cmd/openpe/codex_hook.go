@@ -285,6 +285,8 @@ func executeCodexHook(request codexHookRequest, opts codexHookOptions, cfg confi
 		Inject:           cfg.Inject.Codex,
 		MaxContextTokens: cfg.MaxContextTokens,
 		CacheDir:         cfg.Delivery.CacheDir,
+		SpecsDir:         cfg.Specs.Dir,
+		SpecMaxChars:     cfg.Specs.MaxChars,
 	})
 	if err != nil {
 		return codexHookExecution{}, err
@@ -307,7 +309,7 @@ func emitCodexHookExecution(execution codexHookExecution, opts codexHookOptions,
 	// (and if not, why / or that reading failed) plus any enhancer content
 	// warnings, so a history-less or advisory-flagged result is never mistaken
 	// for a clean context-aware one.
-	if note := disclosureNotes(execution.History, execution.HistoryStatus, 0, execution.HistoryErr, output.Warnings, cfg.Language); note != "" {
+	if note := disclosureNotes(execution.History, execution.HistoryStatus, 0, execution.HistoryErr, output.Warnings, output.AppliedSpecs, cfg.Language); note != "" {
 		if output.Decision == "block" {
 			output.Reason = strings.TrimSpace(note + " " + output.Reason)
 		} else {

@@ -16,6 +16,7 @@ import (
 	"github.com/AoManoh/openpe/internal/context/histstatus"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers"
+	"github.com/AoManoh/openpe/internal/specs"
 	"github.com/AoManoh/openpe/internal/wiring"
 )
 
@@ -87,6 +88,8 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	client := fs.String("client", "generic", "target client name")
 	mode := fs.String("mode", "agent", "prompt mode")
 	cwd := fs.String("cwd", "", "workspace path")
+	var specNames repeatedFlag
+	fs.Var(&specNames, "spec", "user spec name to load and append verbatim (repeatable; resolved in OPENPE_SPECS_DIR, default ~/.config/openpe/specs)")
 	baseURL := configStringFlag(fs, "base-url", "OpenAI-compatible base URL (defaults to OPENPE_BASE_URL)")
 	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
 	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
@@ -105,6 +108,13 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 	}
 	if rawPrompt == "" {
 		fmt.Fprintln(stderr, "prompt is required")
+		return 1
+	}
+	// 用户点名的规范在调用模型之前解析：失败立即退出（零 token 消耗），
+	// 不存在"增强了但没带规范"的静默输出。
+	loadedSpecs, specErr := specs.LoadWithDefaults(cfg.Specs.Dir, specNames, cfg.Specs.MaxChars)
+	if specErr != nil {
+		fmt.Fprintln(stderr, specs.ErrorMessage(specErr, cfg.Language))
 		return 1
 	}
 	if *cwd == "" {
@@ -145,6 +155,9 @@ func runEnhance(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writ
 		fmt.Fprintf(stderr, "enhance prompt: %v\n", err)
 		return 1
 	}
+	// a1 机械追加：交付文本（纯文本与 JSON 的 enhanced_prompt 字段一致）
+	// 均为"增强正文 + 规范原文块"。
+	resp.EnhancedPrompt = specs.Append(resp.EnhancedPrompt, loadedSpecs, cfg.Language)
 	if *jsonOutput {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -389,20 +402,36 @@ func historyDisclosure(messages []enhancer.Message, status histstatus.Status, su
 	return localizedHistoryNote(status, len(messages), summaries, language)
 }
 
-// disclosureNotes joins the history disclosure with the enhancer's advisory
-// warnings (out-of-context numbers / undecided irreversible actions / language
-// mismatch) into the single non-silent prefix every hook shows the user.
-// Warnings exist precisely to be read BEFORE the user acts on the enhanced
-// prompt (b3645b1: three real fabrication incidents), so every formal hook
-// path — codex, claude, windsurf and devin alike — must surface them, not
-// just the JSON/HTTP callers.
-func disclosureNotes(messages []enhancer.Message, status histstatus.Status, summaries int, histErr error, warnings []string, language string) string {
-	notes := make([]string, 0, 1+len(warnings))
+// disclosureNotes joins the history disclosure, the applied user specs, and
+// the enhancer's advisory warnings (out-of-context numbers / undecided
+// irreversible actions / language mismatch) into the single non-silent prefix
+// every hook shows the user. Warnings exist precisely to be read BEFORE the
+// user acts on the enhanced prompt (b3645b1: three real fabrication
+// incidents), so every formal hook path — codex, claude, windsurf and devin
+// alike — must surface them, not just the JSON/HTTP callers.
+func disclosureNotes(messages []enhancer.Message, status histstatus.Status, summaries int, histErr error, warnings []string, appliedSpecs []string, language string) string {
+	notes := make([]string, 0, 2+len(warnings))
 	if note := historyDisclosure(messages, status, summaries, histErr, language); note != "" {
+		notes = append(notes, note)
+	}
+	if note := specsDisclosure(appliedSpecs, language); note != "" {
 		notes = append(notes, note)
 	}
 	notes = append(notes, warnings...)
 	return strings.Join(notes, " ")
+}
+
+// specsDisclosure names the user specs appended to this enhancement
+// (`pe+<name>`), so the user can tell at a glance that their named specs were
+// actually applied. Empty when no spec was named — silence is correct there.
+func specsDisclosure(names []string, language string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE: applied user spec(s): %s.", strings.Join(names, ", "))
+	}
+	return fmt.Sprintf("openPE：已应用规范：%s。", strings.Join(names, "、"))
 }
 
 func localizedHistoryNote(status histstatus.Status, count int, summaries int, language string) string {

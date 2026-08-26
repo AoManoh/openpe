@@ -21,6 +21,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/manual"
 	"github.com/AoManoh/openpe/internal/adapters/preview"
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/specs"
 )
 
 // UserPromptSubmit is the Devin CLI hook event fired when the user submits a
@@ -59,6 +60,10 @@ type HookOutput struct {
 	// warnings) so the runner can fold them into the user-facing disclosure
 	// (block Reason / inject SystemMessage). Not part of the wire JSON.
 	Warnings []string `json:"-"`
+	// AppliedSpecs lists the user spec names appended to the enhanced prompt
+	// (`pe+<name>`), so the runner can disclose "applied specs: …" alongside
+	// the delivery status. Not part of the wire JSON.
+	AppliedSpecs []string `json:"-"`
 }
 
 type HookSpecificOutput struct {
@@ -89,6 +94,13 @@ type HookOptions struct {
 	// purely additive.
 	MaxContextTokens int
 	CacheDir         string
+	// SpecsDir / SpecMaxChars configure explicit user prompt-spec loading
+	// (`pe+<name> <task>`, config.Config.Specs). Empty dir means the per-user
+	// default ~/.config/openpe/specs; MaxChars <= 0 means the specs package
+	// default. Spec resolution failures BLOCK the enhancement (business
+	// contract D7: never silently drop a user-named spec).
+	SpecsDir     string
+	SpecMaxChars int
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -106,7 +118,7 @@ func ShouldHandleHook(input HookInput, auto bool) (bool, bool) {
 	if strings.TrimSpace(input.Prompt) == "" {
 		return false, false
 	}
-	_, _, manualTrigger := ParseManualEnhance(input.Prompt)
+	_, _, _, manualTrigger := ParseManualEnhance(input.Prompt)
 	return manualTrigger, auto || manualTrigger
 }
 
@@ -125,7 +137,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if rawPrompt == "" {
 		return HookOutput{}, nil
 	}
-	manualPrompt, manualMode, manualTrigger := ParseManualEnhance(rawPrompt)
+	manualPrompt, specNames, manualMode, manualTrigger := ParseManualEnhance(rawPrompt)
 	if !opts.Auto && !manualTrigger {
 		return HookOutput{}, nil
 	}
@@ -134,6 +146,12 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	}
 	if rawPrompt == "" {
 		return Block(emptyPromptMessage(opts.Language)), nil
+	}
+	// 用户点名的规范在调用模型之前解析：失败立即阻断（零 token 消耗），
+	// 结构上不存在"增强了但没带规范"的静默输出。
+	loadedSpecs, specErr := specs.LoadWithDefaults(opts.SpecsDir, specNames, opts.SpecMaxChars)
+	if specErr != nil {
+		return Block(failureMessage(specs.ErrorMessage(specErr, opts.Language), opts.Language)), nil
 	}
 	cwd := strings.TrimSpace(input.CWD)
 	if opts.CWD != "" {
@@ -156,6 +174,9 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if err != nil {
 		return HookError(manualTrigger, err.Error(), opts.Language), nil
 	}
+	// a1 机械追加：规范原文块拼接在模型输出之后，缓存/预览/注入统一使用
+	// 追加后的文本，hookdedup 回放读缓存时天然一致，不会重复追加。
+	enhanced := specs.Append(resp.EnhancedPrompt, loadedSpecs, opts.Language)
 	if manualTrigger && manualMode == ModePreview && !opts.Inject {
 		// Default, controllable path: hold the original (decision=block) and hand
 		// the enhanced prompt to the clipboard, exactly like the Codex / Claude /
@@ -163,9 +184,10 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 		// ("blocked + copied, paste it" / "clipboard failed, see hook last"), so
 		// the cross-client experience is consistent. openPE never auto-applies a
 		// generated prompt: the user pastes/edits/resubmits it.
-		cachePath, _ := savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
-		out := BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt)
+		cachePath, _ := savePreview(enhanced, opts.Language, opts.CacheDir)
+		out := BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(enhanced, opts.Language), enhanced)
 		out.Warnings = resp.Warnings
+		out.AppliedSpecs = specs.Names(loadedSpecs)
 		return out, nil
 	}
 	// Inject mode (auto, or opt-in OPENPE_DEVIN_INJECT): the user has explicitly
@@ -173,9 +195,10 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	// (exit 0). The injection is silent — Devin consumes additionalContext but
 	// does not surface our systemMessage — so cache the enhanced prompt too;
 	// `openpe devin hook last --prompt` lets the user audit what was injected.
-	_, _ = savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
-	out := InjectionOutput(resp.EnhancedPrompt, opts.Language)
+	_, _ = savePreview(enhanced, opts.Language, opts.CacheDir)
+	out := InjectionOutput(enhanced, opts.Language)
 	out.Warnings = resp.Warnings
+	out.AppliedSpecs = specs.Names(loadedSpecs)
 	return out, nil
 }
 
@@ -202,7 +225,7 @@ func SkipOutput() HookOutput {
 	return HookOutput{Continue: true}
 }
 
-func ParseManualEnhance(prompt string) (string, Mode, bool) {
+func ParseManualEnhance(prompt string) (string, []string, Mode, bool) {
 	return manual.Parse(prompt)
 }
 

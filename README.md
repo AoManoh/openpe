@@ -130,6 +130,15 @@ pe:帮我把这个测试改成 table-driven
 pe：帮我把这个测试改成 table-driven
 ```
 
+如果你把常用约束沉淀成了规范文档（`~/.config/openpe/specs/<名字>.md`），可以在触发词后点名加载，规范原文会逐字附在增强结果后段：
+
+```text
+pe+三问 帮我完成如下任务xxx
+pe+三问+write-style 给 server 写部署说明
+```
+
+点名的规范不存在时本次增强会被阻断并提示原因。详见 [CLIENTS.md](CLIENTS.md#用户规范点名pe) 与 [CONFIG.md](CONFIG.md#用户规范pe-点名加载)。
+
 默认流程：
 
 1. openPE 拦截原始 `pe` 消息；

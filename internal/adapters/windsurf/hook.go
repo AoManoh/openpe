@@ -12,6 +12,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/manual"
 	"github.com/AoManoh/openpe/internal/adapters/preview"
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/specs"
 )
 
 const PreUserPrompt = "pre_user_prompt"
@@ -45,6 +46,13 @@ type HookOptions struct {
 	// paths attach to the request.
 	MaxContextTokens int
 	CacheDir         string
+	// SpecsDir / SpecMaxChars configure explicit user prompt-spec loading
+	// (`pe+<name> <task>`, config.Config.Specs). Empty dir means the per-user
+	// default ~/.config/openpe/specs; MaxChars <= 0 means the specs package
+	// default. Spec resolution failures BLOCK the enhancement (business
+	// contract D7: never silently drop a user-named spec).
+	SpecsDir     string
+	SpecMaxChars int
 }
 
 type HookOutput struct {
@@ -55,6 +63,10 @@ type HookOutput struct {
 	// undecided actions / language guard) so the runner folds them into the
 	// user-facing disclosure before the user acts on the enhancement.
 	Warnings []string
+	// AppliedSpecs lists the user spec names appended to the enhanced prompt
+	// (`pe+<name>`), so the runner can disclose "applied specs: …" alongside
+	// the delivery status.
+	AppliedSpecs []string
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -69,7 +81,7 @@ func ShouldHandleHook(input HookInput) bool {
 	if input.AgentActionName != "" && input.AgentActionName != PreUserPrompt {
 		return false
 	}
-	_, _, ok := manual.Parse(input.ToolInfo.UserPrompt)
+	_, _, _, ok := manual.Parse(input.ToolInfo.UserPrompt)
 	return ok
 }
 
@@ -77,12 +89,18 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if input.AgentActionName != "" && input.AgentActionName != PreUserPrompt {
 		return HookOutput{}, nil
 	}
-	rawPrompt, _, manualTrigger := manual.Parse(input.ToolInfo.UserPrompt)
+	rawPrompt, specNames, _, manualTrigger := manual.Parse(input.ToolInfo.UserPrompt)
 	if !manualTrigger {
 		return HookOutput{}, nil
 	}
 	if strings.TrimSpace(rawPrompt) == "" {
 		return HookOutput{}, errors.New(emptyPromptMessage(opts.Language))
+	}
+	// 用户点名的规范在调用模型之前解析：失败立即阻断（零 token 消耗），
+	// 结构上不存在"增强了但没带规范"的静默输出。
+	loadedSpecs, specErr := specs.LoadWithDefaults(opts.SpecsDir, specNames, opts.SpecMaxChars)
+	if specErr != nil {
+		return HookOutput{}, errors.New(specs.ErrorMessage(specErr, opts.Language))
 	}
 	cwd := strings.TrimSpace(input.CWD)
 	if strings.TrimSpace(opts.CWD) != "" {
@@ -103,12 +121,15 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if err != nil {
 		return HookOutput{}, err
 	}
-	cachePath, _ := savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
+	// a1 机械追加：规范原文块拼接在模型输出之后，缓存/预览统一使用追加后的文本。
+	enhanced := specs.Append(resp.EnhancedPrompt, loadedSpecs, opts.Language)
+	cachePath, _ := savePreview(enhanced, opts.Language, opts.CacheDir)
 	return HookOutput{
-		TerminalPreview: preview.Markdown(resp.EnhancedPrompt, opts.Language),
-		PreviewPrompt:   strings.TrimSpace(resp.EnhancedPrompt),
+		TerminalPreview: preview.Markdown(enhanced, opts.Language),
+		PreviewPrompt:   strings.TrimSpace(enhanced),
 		CachePath:       cachePath,
 		Warnings:        resp.Warnings,
+		AppliedSpecs:    specs.Names(loadedSpecs),
 	}, nil
 }
 

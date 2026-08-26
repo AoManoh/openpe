@@ -172,6 +172,8 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 			Inject:           *auto || cfg.Inject.Devin,
 			MaxContextTokens: cfg.MaxContextTokens,
 			CacheDir:         cfg.Delivery.CacheDir,
+			SpecsDir:         cfg.Specs.Dir,
+			SpecMaxChars:     cfg.Specs.MaxChars,
 		})
 		if err != nil {
 			return devinFlightResult{Output: devinadapter.HookError(manualTrigger, err.Error(), cfg.Language)}
@@ -308,7 +310,7 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 	if devinProject := strings.TrimSpace(os.Getenv("DEVIN_PROJECT_DIR")); devinProject != "" {
 		cwd = devinProject
 	}
-	_, _, manualTrigger := devinadapter.ParseManualEnhance(rawPrompt)
+	_, _, _, manualTrigger := devinadapter.ParseManualEnhance(rawPrompt)
 	var claimConclusion hookdedup.Conclusion
 	if cfg.HookDedup.Enabled {
 		won, prior, finish := hookdedup.Claim(cfg.Delivery.CacheDir, devinDedupKey(sessionID, cwd, rawPrompt), cfg.HookDedup.Window)
@@ -333,6 +335,8 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 			Inject:           cfg.Inject.Devin,
 			MaxContextTokens: cfg.MaxContextTokens,
 			CacheDir:         cfg.Delivery.CacheDir,
+			SpecsDir:         cfg.Specs.Dir,
+			SpecMaxChars:     cfg.Specs.MaxChars,
 		})
 		if err != nil {
 			return devinFlightResult{Output: devinadapter.HookError(manualTrigger, err.Error(), cfg.Language)}
@@ -357,7 +361,7 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 // displays the LAST block reason, so a loser's replayed block must be able to
 // show the same disclosure the winner produced.
 func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Result, histErr error, language string) (devinadapter.HookOutput, string) {
-	joined := disclosureNotes(hist.Messages, hist.Status, hist.SummaryCount, histErr, output.Warnings, language)
+	joined := disclosureNotes(hist.Messages, hist.Status, hist.SummaryCount, histErr, output.Warnings, output.AppliedSpecs, language)
 	if hist.ScanLimited {
 		joined = strings.TrimSpace(joined + " " + localizedDevinHistoryScanLimit(language))
 	}

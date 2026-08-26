@@ -96,6 +96,8 @@ func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr i
 		Inject:           cfg.Inject.Claude,
 		MaxContextTokens: cfg.MaxContextTokens,
 		CacheDir:         cfg.Delivery.CacheDir,
+		SpecsDir:         cfg.Specs.Dir,
+		SpecMaxChars:     cfg.Specs.MaxChars,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
@@ -159,7 +161,7 @@ func emitClaudeHookOutput(output claudeadapter.HookOutput, history []enhancer.Me
 	// the non-silent history disclosure; cache the prompt for `claude hook last`.
 	if output.Injected {
 		_, _ = delivery.SaveWithOptions("claude", output.PreviewPrompt, cfg.Language, configuredDeliveryOptions(cfg, "claude"))
-		if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, cfg.Language); note != "" {
+		if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, output.AppliedSpecs, cfg.Language); note != "" {
 			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
 		}
 		_ = claudeadapter.EncodeInjection(stdout, output)
@@ -176,7 +178,7 @@ func emitClaudeHookOutput(output claudeadapter.HookOutput, history []enhancer.Me
 	// Non-silent disclosure: always state whether prior context was included
 	// (and if not, why / or that reading failed) plus any enhancer content
 	// warnings — they must be read before the user pastes the enhancement.
-	if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, cfg.Language); note != "" {
+	if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, output.AppliedSpecs, cfg.Language); note != "" {
 		status = note + "\n" + status
 	}
 	fmt.Fprintln(stderr, status)

@@ -127,7 +127,12 @@ type Config struct {
 	// Sourced from OPENPE_WARNINGS_ENABLED (default true),
 	// OPENPE_WARNINGS_ACTIONS (comma-separated extra action words) and
 	// OPENPE_WARNINGS_NUM_MAXLEN (digit-run length cap, default 5).
-	Warnings     WarningsConfig
+	Warnings WarningsConfig
+	// Specs configures explicit user prompt-spec loading (`pe+<name> <task>`).
+	// Dir empty means the per-user default ~/.config/openpe/specs (resolved by
+	// internal/specs.DefaultDir, kept out of this package like the other
+	// mirror configs); MaxChars <= 0 means the specs package default.
+	Specs        SpecsConfig
 	Openace      OpenaceConfig
 	Codex        CodexConfig
 	Claude       ClaudeConfig
@@ -137,6 +142,15 @@ type Config struct {
 	Server       ServerConfig
 	HookDedup    HookDedupConfig
 	HookDeadline time.Duration
+}
+
+// SpecsConfig is the config-layer mirror of the internal/specs loader knobs
+// (kept apart so config does not import the specs package, consistent with
+// LanguageGuardConfig / WarningsConfig). Sourced from OPENPE_SPECS_DIR and
+// OPENPE_SPEC_MAX_CHARS.
+type SpecsConfig struct {
+	Dir      string
+	MaxChars int
 }
 
 // WarningsConfig is the config-layer mirror of
@@ -292,6 +306,10 @@ func Load() Config {
 			Enabled:      boolFromValue(valueFromEnv("OPENPE_WARNINGS_ENABLED", fileEnv), true),
 			ExtraActions: splitCSV(valueFromEnv("OPENPE_WARNINGS_ACTIONS", fileEnv)),
 			NumMaxLen:    intFromValue(valueFromEnv("OPENPE_WARNINGS_NUM_MAXLEN", fileEnv), 5),
+		},
+		Specs: SpecsConfig{
+			Dir:      valueFromEnv("OPENPE_SPECS_DIR", fileEnv),
+			MaxChars: intFromValue(valueFromEnv("OPENPE_SPEC_MAX_CHARS", fileEnv), 0),
 		},
 		Openace: OpenaceConfig{
 			Enabled:           boolFromValue(valueFromEnv("OPENPE_OPENACE_ENABLED", fileEnv), false),

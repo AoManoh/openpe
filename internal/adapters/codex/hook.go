@@ -13,6 +13,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/manual"
 	"github.com/AoManoh/openpe/internal/adapters/preview"
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/specs"
 )
 
 const UserPromptSubmit = "UserPromptSubmit"
@@ -42,6 +43,10 @@ type HookOutput struct {
 	// user-facing disclosure before the user acts on the enhancement. Not part
 	// of the wire JSON.
 	Warnings []string `json:"-"`
+	// AppliedSpecs lists the user spec names appended to the enhanced prompt
+	// (`pe+<name>`), so the runner can disclose "applied specs: …" alongside
+	// the delivery status. Not part of the wire JSON.
+	AppliedSpecs []string `json:"-"`
 }
 
 type HookSpecificOutput struct {
@@ -71,6 +76,13 @@ type HookOptions struct {
 	// do not set it preserve the historical unbounded behaviour.
 	MaxContextTokens int
 	CacheDir         string
+	// SpecsDir / SpecMaxChars configure explicit user prompt-spec loading
+	// (`pe+<name> <task>`, config.Config.Specs). Empty dir means the per-user
+	// default ~/.config/openpe/specs; MaxChars <= 0 means the specs package
+	// default. Spec resolution failures BLOCK the enhancement (business
+	// contract D7: never silently drop a user-named spec).
+	SpecsDir     string
+	SpecMaxChars int
 }
 
 func DecodeHookInput(r io.Reader) (HookInput, error) {
@@ -89,7 +101,7 @@ func ShouldHandleHook(input HookInput, auto bool) (bool, bool) {
 	if rawPrompt == "" {
 		return false, false
 	}
-	_, _, manual := ParseManualEnhance(rawPrompt)
+	_, _, _, manual := ParseManualEnhance(rawPrompt)
 	return manual, auto || manual
 }
 
@@ -108,7 +120,7 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if rawPrompt == "" {
 		return HookOutput{}, nil
 	}
-	manualPrompt, manualMode, manual := ParseManualEnhance(rawPrompt)
+	manualPrompt, specNames, manualMode, manual := ParseManualEnhance(rawPrompt)
 	if !opts.Auto && !manual {
 		return HookOutput{}, nil
 	}
@@ -117,6 +129,12 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	}
 	if rawPrompt == "" {
 		return Block(emptyPromptMessage(opts.Language)), nil
+	}
+	// 用户点名的规范在调用模型之前解析：失败立即阻断（零 token 消耗），
+	// 结构上不存在"增强了但没带规范"的静默输出。
+	loadedSpecs, specErr := specs.LoadWithDefaults(opts.SpecsDir, specNames, opts.SpecMaxChars)
+	if specErr != nil {
+		return Block(failureMessage(specs.ErrorMessage(specErr, opts.Language), opts.Language)), nil
 	}
 	cwd := strings.TrimSpace(input.CWD)
 	if opts.CWD != "" {
@@ -139,27 +157,32 @@ func HandleHook(ctx context.Context, service *enhancer.Service, input HookInput,
 	if err != nil {
 		return HookError(manual, err.Error(), opts.Language), nil
 	}
+	// a1 机械追加：规范原文块拼接在模型输出之后，缓存/预览/注入全部使用
+	// 追加后的文本，dedup 回放读缓存时天然一致。
+	enhanced := specs.Append(resp.EnhancedPrompt, loadedSpecs, opts.Language)
 	if manual && manualMode == ModePreview && !opts.Inject {
-		cachePath, _ := savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
-		out := BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(resp.EnhancedPrompt, opts.Language), resp.EnhancedPrompt)
+		cachePath, _ := savePreview(enhanced, opts.Language, opts.CacheDir)
+		out := BlockPreview(PreviewReason(cachePath, opts.Language), MarkdownPreview(enhanced, opts.Language), enhanced)
 		out.Warnings = resp.Warnings
+		out.AppliedSpecs = specs.Names(loadedSpecs)
 		return out, nil
 	}
 	// Inject mode (--auto, or OPENPE_HOOK_INJECT/OPENPE_CODEX_INJECT): cache the
 	// enhanced prompt for audit (`openpe codex hook last --prompt`), then inject
 	// it as additional context.
-	_, _ = savePreview(resp.EnhancedPrompt, opts.Language, opts.CacheDir)
+	_, _ = savePreview(enhanced, opts.Language, opts.CacheDir)
 	return HookOutput{
 		SystemMessage: injectedMessage(opts.Language),
 		HookSpecificOutput: &HookSpecificOutput{
 			HookEventName:     UserPromptSubmit,
-			AdditionalContext: AdditionalContext(resp.EnhancedPrompt),
+			AdditionalContext: AdditionalContext(enhanced),
 		},
-		Warnings: resp.Warnings,
+		Warnings:     resp.Warnings,
+		AppliedSpecs: specs.Names(loadedSpecs),
 	}, nil
 }
 
-func ParseManualEnhance(prompt string) (string, Mode, bool) {
+func ParseManualEnhance(prompt string) (string, []string, Mode, bool) {
 	return manual.Parse(prompt)
 }
 

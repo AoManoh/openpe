@@ -132,6 +132,15 @@ pe:convert this test to table-driven style
 pe：convert this test to table-driven style
 ```
 
+If you keep recurring constraints as spec documents (`~/.config/openpe/specs/<name>.md`), name them after the trigger to have the file content appended verbatim to the enhanced result:
+
+```text
+pe+three-checks finish the task below xxx
+pe+three-checks+write-style write a deployment guide for the server
+```
+
+Naming a spec that does not exist blocks the enhancement with an explicit error. See [CLIENTS.md](CLIENTS.md#用户规范点名pe) and [CONFIG.md](CONFIG.md#用户规范pe-点名加载) (Chinese).
+
 The default workflow is:
 
 1. openPE blocks the original `pe` message;

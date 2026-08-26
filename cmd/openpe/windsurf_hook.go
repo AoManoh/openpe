@@ -85,6 +85,8 @@ func runWindsurfHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr
 		Timeout:          timeoutOrDefault(opts.Provider.Timeout),
 		MaxContextTokens: cfg.MaxContextTokens,
 		CacheDir:         cfg.Delivery.CacheDir,
+		SpecsDir:         cfg.Specs.Dir,
+		SpecMaxChars:     cfg.Specs.MaxChars,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s\n", localizedEnhanceFailure(err.Error(), cfg.Language))
@@ -145,10 +147,15 @@ func emitWindsurfHookOutput(output windsurfadapter.HookOutput, cfg config.Config
 	if result.CopyError != nil && cfg.Delivery.WindsurfPromptFallback {
 		status = delivery.AppendPromptFallback(status, output.PreviewPrompt, cfg.Language)
 	}
-	// Enhancer content warnings must be visible before the user pastes the
-	// enhancement (Windsurf has no history collector, so this is the whole
-	// disclosure).
-	if joined := strings.TrimSpace(strings.Join(output.Warnings, " ")); joined != "" {
+	// Applied-spec note + enhancer content warnings must be visible before the
+	// user pastes the enhancement (Windsurf has no history collector, so this
+	// is the whole disclosure).
+	notes := make([]string, 0, 1+len(output.Warnings))
+	if note := specsDisclosure(output.AppliedSpecs, cfg.Language); note != "" {
+		notes = append(notes, note)
+	}
+	notes = append(notes, output.Warnings...)
+	if joined := strings.TrimSpace(strings.Join(notes, " ")); joined != "" {
 		status = joined + "\n" + status
 	}
 	fmt.Fprintln(stderr, status)
