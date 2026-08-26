@@ -11,6 +11,7 @@ import (
 	"github.com/AoManoh/openpe/internal/adapters/delivery"
 	windsurfadapter "github.com/AoManoh/openpe/internal/adapters/windsurf"
 	"github.com/AoManoh/openpe/internal/config"
+	"github.com/AoManoh/openpe/internal/version"
 )
 
 func runWindsurf(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
@@ -58,6 +59,9 @@ type windsurfHookRequest struct {
 
 func runWindsurfHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
 	cfg := config.Load()
+	// 后台新版检查：限频、可禁用、detached 子进程，与本次增强并行，
+	// 不占用增强关键路径（业务契约 U2.3）。
+	maybeStartUpdateRefresh(cfg)
 	opts, ok, code := parseWindsurfHookOptions(args, stderr, cfg)
 	if !ok {
 		return code
@@ -150,11 +154,14 @@ func emitWindsurfHookOutput(output windsurfadapter.HookOutput, cfg config.Config
 	// Applied-spec note + enhancer content warnings must be visible before the
 	// user pastes the enhancement (Windsurf has no history collector, so this
 	// is the whole disclosure).
-	notes := make([]string, 0, 1+len(output.Warnings))
+	notes := make([]string, 0, 2+len(output.Warnings))
 	if note := specsDisclosure(output.AppliedSpecs, cfg.Language); note != "" {
 		notes = append(notes, note)
 	}
 	notes = append(notes, output.Warnings...)
+	if note := updateDisclosure(cfg, version.Value(), cfg.Language); note != "" {
+		notes = append(notes, note)
+	}
 	if joined := strings.TrimSpace(strings.Join(notes, " ")); joined != "" {
 		status = joined + "\n" + status
 	}

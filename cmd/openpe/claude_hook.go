@@ -14,6 +14,7 @@ import (
 	claudetranscript "github.com/AoManoh/openpe/internal/context/claudetranscript"
 	"github.com/AoManoh/openpe/internal/context/histstatus"
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/version"
 )
 
 func runClaude(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
@@ -66,6 +67,9 @@ type claudeHookRequest struct {
 
 func runClaudeHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
 	cfg := config.Load()
+	// 后台新版检查：限频、可禁用、detached 子进程，与本次增强并行，
+	// 不占用增强关键路径（业务契约 U2.3）。
+	maybeStartUpdateRefresh(cfg)
 	opts, ok, code := parseClaudeHookOptions(args, stderr, cfg)
 	if !ok {
 		return code
@@ -161,7 +165,7 @@ func emitClaudeHookOutput(output claudeadapter.HookOutput, history []enhancer.Me
 	// the non-silent history disclosure; cache the prompt for `claude hook last`.
 	if output.Injected {
 		_, _ = delivery.SaveWithOptions("claude", output.PreviewPrompt, cfg.Language, configuredDeliveryOptions(cfg, "claude"))
-		if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, output.AppliedSpecs, cfg.Language); note != "" {
+		if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, output.AppliedSpecs, updateDisclosure(cfg, version.Value(), cfg.Language), cfg.Language); note != "" {
 			output.SystemMessage = strings.TrimSpace(note + " " + output.SystemMessage)
 		}
 		_ = claudeadapter.EncodeInjection(stdout, output)
@@ -178,7 +182,7 @@ func emitClaudeHookOutput(output claudeadapter.HookOutput, history []enhancer.Me
 	// Non-silent disclosure: always state whether prior context was included
 	// (and if not, why / or that reading failed) plus any enhancer content
 	// warnings — they must be read before the user pastes the enhancement.
-	if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, output.AppliedSpecs, cfg.Language); note != "" {
+	if note := disclosureNotes(history, histStatus, 0, histErr, output.Warnings, output.AppliedSpecs, updateDisclosure(cfg, version.Value(), cfg.Language), cfg.Language); note != "" {
 		status = note + "\n" + status
 	}
 	fmt.Fprintln(stderr, status)

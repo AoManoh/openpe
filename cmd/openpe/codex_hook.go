@@ -14,6 +14,7 @@ import (
 	codexhistory "github.com/AoManoh/openpe/internal/context/codexhistory"
 	"github.com/AoManoh/openpe/internal/context/histstatus"
 	"github.com/AoManoh/openpe/internal/enhancer"
+	"github.com/AoManoh/openpe/internal/version"
 )
 
 type codexRunOptions struct {
@@ -192,6 +193,9 @@ type codexHookExecution struct {
 
 func runCodexHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
 	cfg := config.Load()
+	// 后台新版检查：限频、可禁用、detached 子进程，与本次增强并行，
+	// 不占用增强关键路径（业务契约 U2.3）。
+	maybeStartUpdateRefresh(cfg)
 	opts, ok, code := parseCodexHookOptions(args, stderr, cfg)
 	if !ok {
 		return code
@@ -309,7 +313,7 @@ func emitCodexHookExecution(execution codexHookExecution, opts codexHookOptions,
 	// (and if not, why / or that reading failed) plus any enhancer content
 	// warnings, so a history-less or advisory-flagged result is never mistaken
 	// for a clean context-aware one.
-	if note := disclosureNotes(execution.History, execution.HistoryStatus, 0, execution.HistoryErr, output.Warnings, output.AppliedSpecs, cfg.Language); note != "" {
+	if note := disclosureNotes(execution.History, execution.HistoryStatus, 0, execution.HistoryErr, output.Warnings, output.AppliedSpecs, updateDisclosure(cfg, version.Value(), cfg.Language), cfg.Language); note != "" {
 		if output.Decision == "block" {
 			output.Reason = strings.TrimSpace(note + " " + output.Reason)
 		} else {

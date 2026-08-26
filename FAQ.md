@@ -98,6 +98,16 @@ openpe enhance --prompt "帮我整理这个需求"
 
 ---
 
+### Q0.2. 怎么查版本、怎么升级？`openpe update` 报错怎么办？
+
+查版本：`openpe --version`（server 用 `openpe-server --version`）。`go install …@vX.Y.Z` 装的显示发布 tag；克隆仓库本地构建显示伪版本（脏工作区带 `+dirty`）；显示 `devel` 说明构建没有版本信息（如 `go run`）。
+
+升级：`openpe update`——查询 Go module proxy 后直接重装两个二进制；`openpe update --check` 只查不装。它遵循你的 `GOPROXY`（国内镜像用户走自己的镜像），远端版本不高于当前时不会安装（永不降级）。
+
+报错处理：查询失败（网络不可达、proxy 无法访问）或安装失败时，命令会打印具体错误和等价的手动命令（`go install github.com/AoManoh/openpe/cmd/openpe@latest` 等），按提示手动执行即可。升级后 `openpe --version` 验证；openpe-server 若在运行需重启。有新版本时 `pe` 反馈里也会出现一次限频提醒，`OPENPE_UPDATE_NOTICE=false` 可关闭（见 [CONFIG.md](CONFIG.md#版本与更新)）。
+
+---
+
 ## 一、会话历史与时效窗口
 
 **现象示例**（真实案例：同一会话里连续两次相同的 `pe`，结果不同）：

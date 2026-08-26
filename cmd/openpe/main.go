@@ -17,15 +17,10 @@ import (
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers"
 	"github.com/AoManoh/openpe/internal/specs"
+	"github.com/AoManoh/openpe/internal/update"
+	"github.com/AoManoh/openpe/internal/version"
 	"github.com/AoManoh/openpe/internal/wiring"
 )
-
-// Version is the build identifier exposed via `openpe --version`. The
-// default "dev" matches `go install ./cmd/openpe` users who do not pass
-// ldflags; release builds should override it with the git tag / commit:
-//
-//	go build -ldflags "-X main.Version=v0.2.0" ./cmd/openpe
-var Version = "dev"
 
 type providerFactory func(providers.Spec) (enhancer.Provider, error)
 type commandRunner func(ctx context.Context, name string, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error
@@ -45,6 +40,9 @@ type providerFlagValues struct {
 }
 
 func main() {
+	// 后台版本检查只在真实二进制入口启用：测试直接调用各 runner 时保持
+	// 关闭，防止 go test 二进制被当作 openpe 反复自我拉起。
+	updateRefreshEnabled = true
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, func(s providers.Spec) (enhancer.Provider, error) {
 		return providers.New(s)
 	}, os.Getwd, runCommand))
@@ -66,11 +64,13 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, new
 		return runWindsurf(args[1:], stdin, stdout, stderr, newProvider, getwd)
 	case "devin":
 		return runDevin(args[1:], stdin, stdout, stderr, newProvider, getwd)
+	case "update":
+		return runUpdate(args[1:], stdout, stderr, runCmd)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
 	case "-v", "--version", "version":
-		fmt.Fprintf(stdout, "openpe %s\n", Version)
+		fmt.Fprintf(stdout, "openpe %s\n", version.Value())
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
@@ -294,6 +294,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  openpe devin hook last [--path] [--prompt]")
 	fmt.Fprintln(w, "  openpe windsurf hook run")
 	fmt.Fprintln(w, "  openpe windsurf hook last [--path] [--prompt]")
+	fmt.Fprintln(w, "  openpe update [--check]")
+	fmt.Fprintln(w, "  openpe --version")
 }
 
 func printCodexHookUsage(w io.Writer) {
@@ -409,8 +411,8 @@ func historyDisclosure(messages []enhancer.Message, status histstatus.Status, su
 // user acts on the enhanced prompt (b3645b1: three real fabrication
 // incidents), so every formal hook path — codex, claude, windsurf and devin
 // alike — must surface them, not just the JSON/HTTP callers.
-func disclosureNotes(messages []enhancer.Message, status histstatus.Status, summaries int, histErr error, warnings []string, appliedSpecs []string, language string) string {
-	notes := make([]string, 0, 2+len(warnings))
+func disclosureNotes(messages []enhancer.Message, status histstatus.Status, summaries int, histErr error, warnings []string, appliedSpecs []string, updateNotice string, language string) string {
+	notes := make([]string, 0, 3+len(warnings))
 	if note := historyDisclosure(messages, status, summaries, histErr, language); note != "" {
 		notes = append(notes, note)
 	}
@@ -418,6 +420,10 @@ func disclosureNotes(messages []enhancer.Message, status histstatus.Status, summ
 		notes = append(notes, note)
 	}
 	notes = append(notes, warnings...)
+	// 新版提醒放最后：它是最低优先级的辅助信息，不得遮蔽内容警告。
+	if updateNotice != "" {
+		notes = append(notes, updateNotice)
+	}
 	return strings.Join(notes, " ")
 }
 
@@ -432,6 +438,64 @@ func specsDisclosure(names []string, language string) string {
 		return fmt.Sprintf("openPE: applied user spec(s): %s.", strings.Join(names, ", "))
 	}
 	return fmt.Sprintf("openPE：已应用规范：%s。", strings.Join(names, "、"))
+}
+
+// updateRefreshEnabled gates the detached background version check. Only the
+// real binary entrypoint (main) enables it; tests that call the hook runners
+// directly keep it off so the go-test binary is never re-launched as openpe.
+var updateRefreshEnabled = false
+
+// startDetachedCommand launches a fire-and-forget child process; swapped in
+// tests. The child is not waited on — it outlives the short-lived hook.
+var startDetachedCommand = func(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	return cmd.Start()
+}
+
+// maybeStartUpdateRefresh spawns `openpe update --refresh-cache` as a detached
+// child when the notice cache is missing or stale (business contract U2.3).
+// It never runs on the enhancement critical path itself — the child talks to
+// the module proxy while the hook goes on with its own work — and it is a
+// no-op when the notice is disabled, in CI, or the cache is still fresh.
+func maybeStartUpdateRefresh(cfg config.Config) {
+	if !updateRefreshEnabled || !cfg.Update.Notice || os.Getenv("CI") != "" {
+		return
+	}
+	path, err := update.StatePath(cfg.Delivery.CacheDir)
+	if err != nil {
+		return
+	}
+	if state, ok := update.LoadState(path); ok && state.Fresh(time.Now(), cfg.Update.CheckInterval) {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	_ = startDetachedCommand(exe, "update", "--refresh-cache")
+}
+
+// updateDisclosure renders the one-line new-release notice for the hook
+// disclosure prefix (business contract U2.1). It only ever reads the local
+// cache — never the network — and stays silent when the cache is missing,
+// stale, not newer, or the current version cannot be compared (devel).
+func updateDisclosure(cfg config.Config, current string, language string) string {
+	if !cfg.Update.Notice {
+		return ""
+	}
+	path, err := update.StatePath(cfg.Delivery.CacheDir)
+	if err != nil {
+		return ""
+	}
+	state, ok := update.LoadState(path)
+	latest, notify := update.NoticeVersion(state, ok, current, time.Now(), cfg.Update.CheckInterval)
+	if !notify {
+		return ""
+	}
+	if isEnglishLanguage(language) {
+		return fmt.Sprintf("openPE: new release %s available (current %s); run `openpe update` to upgrade.", latest, current)
+	}
+	return fmt.Sprintf("openPE：发现新版本 %s（当前 %s），运行 openpe update 升级。", latest, current)
 }
 
 func localizedHistoryNote(status histstatus.Status, count int, summaries int, language string) string {

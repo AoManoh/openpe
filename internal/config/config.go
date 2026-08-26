@@ -60,6 +60,13 @@ const (
 	// collector populated history / context.files / context.retrieval.
 	DefaultMaxContextTokens = 0
 
+	// DefaultUpdateCheckInterval is the freshness window for the background
+	// new-version check that feeds the hook disclosure notice. The check
+	// itself never runs on the enhancement critical path (it refreshes a
+	// local cache out-of-band); this interval only bounds how often the
+	// detached refresh may hit the module proxy.
+	DefaultUpdateCheckInterval = 24 * time.Hour
+
 	// Language guard keeps the enhanced prompt in the user's input language.
 	// Enabled by default and a no-op when the languages already match (the
 	// common case), so it is backward compatible. Reanchor adds one re-request
@@ -132,7 +139,12 @@ type Config struct {
 	// Dir empty means the per-user default ~/.config/openpe/specs (resolved by
 	// internal/specs.DefaultDir, kept out of this package like the other
 	// mirror configs); MaxChars <= 0 means the specs package default.
-	Specs        SpecsConfig
+	Specs SpecsConfig
+	// Update configures the new-version notice and its background check
+	// (docs/requirements/2026-08-25-version-and-update.md U2). Notice
+	// defaults to true; the actual `openpe update` command is always
+	// available regardless of this switch.
+	Update       UpdateConfig
 	Openace      OpenaceConfig
 	Codex        CodexConfig
 	Claude       ClaudeConfig
@@ -151,6 +163,14 @@ type Config struct {
 type SpecsConfig struct {
 	Dir      string
 	MaxChars int
+}
+
+// UpdateConfig mirrors the internal/update knobs (kept apart so config does
+// not import the update package, consistent with the other mirror configs).
+// Sourced from OPENPE_UPDATE_NOTICE and OPENPE_UPDATE_CHECK_INTERVAL.
+type UpdateConfig struct {
+	Notice        bool
+	CheckInterval time.Duration
 }
 
 // WarningsConfig is the config-layer mirror of
@@ -310,6 +330,10 @@ func Load() Config {
 		Specs: SpecsConfig{
 			Dir:      valueFromEnv("OPENPE_SPECS_DIR", fileEnv),
 			MaxChars: intFromValue(valueFromEnv("OPENPE_SPEC_MAX_CHARS", fileEnv), 0),
+		},
+		Update: UpdateConfig{
+			Notice:        boolFromValue(valueFromEnv("OPENPE_UPDATE_NOTICE", fileEnv), true),
+			CheckInterval: durationFromValue(valueFromEnv("OPENPE_UPDATE_CHECK_INTERVAL", fileEnv), DefaultUpdateCheckInterval),
 		},
 		Openace: OpenaceConfig{
 			Enabled:           boolFromValue(valueFromEnv("OPENPE_OPENACE_ENABLED", fileEnv), false),

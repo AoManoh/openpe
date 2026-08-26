@@ -29,22 +29,31 @@ openPE 会在消息发送前拦截原始内容，读取可用的会话历史，�
 ### 1. 安装
 
 ```bash
-git clone https://github.com/AoManoh/openpe.git
-cd openpe
-go install ./cmd/openpe
+go install github.com/AoManoh/openpe/cmd/openpe@latest
 ```
 
 日常 hook 只需要 `openpe`。`openpe-server` 仅用于 HTTP 自动化或实验性 IDE 按钮：
 
 ```bash
-go install ./cmd/openpe-server
+go install github.com/AoManoh/openpe/cmd/openpe-server@latest
 ```
 
-确认安装：
+开发者也可以克隆仓库后本地构建（`git clone` 后在仓库内 `go install ./cmd/openpe`），此时版本号显示为构建对应的伪版本。
+
+确认安装与版本：
 
 ```bash
 openpe -h
+openpe --version
 ```
+
+升级到最新发布版本，直接运行：
+
+```bash
+openpe update
+```
+
+它会查询 Go module proxy 并重新安装两个二进制（`openpe update --check` 只查不装）。有新版本时，`pe` 增强的反馈里也会出现一次限频提醒；设 `OPENPE_UPDATE_NOTICE=false` 可关闭提醒与后台检查。
 
 如果提示 `openpe：未找到命令`，把 Go 的产物目录加入 `PATH`（zsh 用户改 `~/.zshrc`）：
 

@@ -12,12 +12,6 @@ import (
 	"github.com/AoManoh/openpe/internal/wiring"
 )
 
-// Version is the build identifier exposed via GET /v1/info and the
-// lifecycle descriptor. Override at build time with
-//
-//	go build -ldflags "-X main.Version=v0.2.0" ./cmd/openpe-server
-var Version = "dev"
-
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "openpe-server: %v\n", err)

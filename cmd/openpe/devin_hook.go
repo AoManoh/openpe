@@ -19,6 +19,7 @@ import (
 	"github.com/AoManoh/openpe/internal/context/histstatus"
 	"github.com/AoManoh/openpe/internal/enhancer"
 	"github.com/AoManoh/openpe/internal/providers"
+	"github.com/AoManoh/openpe/internal/version"
 )
 
 func runDevin(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
@@ -58,6 +59,9 @@ func runDevinHookLast(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, newProvider providerFactory, getwd func() (string, error)) int {
 	cfg := config.Load()
+	// 后台新版检查：限频、可禁用、detached 子进程，与本次增强并行，
+	// 不占用增强关键路径（业务契约 U2.3）。
+	maybeStartUpdateRefresh(cfg)
 	fs := flag.NewFlagSet("devin hook run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	client := fs.String("client", "devin", "target client name")
@@ -179,7 +183,7 @@ func runDevinHookRun(args []string, stdin io.Reader, stdout io.Writer, stderr io
 			return devinFlightResult{Output: devinadapter.HookError(manualTrigger, err.Error(), cfg.Language)}
 		}
 		result := devinFlightResult{Outcome: dedupOutcomeFor(output)}
-		result.Output, result.Notes = applyDevinDisclosure(output, hist, histErr, cfg.Language)
+		result.Output, result.Notes = applyDevinDisclosure(output, hist, histErr, updateDisclosure(cfg, version.Value(), cfg.Language), cfg.Language)
 		return result
 	}
 	result := runDevinFlightWithDeadline(flight, *hookDeadline, manualTrigger, cfg.Language)
@@ -342,7 +346,7 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 			return devinFlightResult{Output: devinadapter.HookError(manualTrigger, err.Error(), cfg.Language)}
 		}
 		result := devinFlightResult{Outcome: dedupOutcomeFor(output)}
-		result.Output, result.Notes = applyDevinDisclosure(output, hist, histErr, cfg.Language)
+		result.Output, result.Notes = applyDevinDisclosure(output, hist, histErr, updateDisclosure(cfg, version.Value(), cfg.Language), cfg.Language)
 		return result
 	}
 	result := runDevinFlightWithDeadline(flight, deadline, manualTrigger, cfg.Language)
@@ -360,8 +364,8 @@ func renderDevinHook(cfg config.Config, service *enhancer.Service, rawPrompt str
 // a de-dup winner can record them for its losers: Devin runs every hook and
 // displays the LAST block reason, so a loser's replayed block must be able to
 // show the same disclosure the winner produced.
-func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Result, histErr error, language string) (devinadapter.HookOutput, string) {
-	joined := disclosureNotes(hist.Messages, hist.Status, hist.SummaryCount, histErr, output.Warnings, output.AppliedSpecs, language)
+func applyDevinDisclosure(output devinadapter.HookOutput, hist devinhistory.Result, histErr error, updateNotice string, language string) (devinadapter.HookOutput, string) {
+	joined := disclosureNotes(hist.Messages, hist.Status, hist.SummaryCount, histErr, output.Warnings, output.AppliedSpecs, updateNotice, language)
 	if hist.ScanLimited {
 		joined = strings.TrimSpace(joined + " " + localizedDevinHistoryScanLimit(language))
 	}

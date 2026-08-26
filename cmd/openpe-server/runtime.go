@@ -19,6 +19,7 @@ import (
 	"github.com/AoManoh/openpe/internal/integration"
 	"github.com/AoManoh/openpe/internal/providers"
 	"github.com/AoManoh/openpe/internal/server"
+	"github.com/AoManoh/openpe/internal/version"
 )
 
 type serverOptions struct {
@@ -58,11 +59,16 @@ func parseServerOptions(args []string, stdout io.Writer) (serverOptions, bool, e
 	apiKey := configStringFlag(fs, "api-key", "OpenAI-compatible API key (defaults to OPENPE_API_KEY)")
 	model := configStringFlag(fs, "model", "OpenAI-compatible model (defaults to OPENPE_MODEL)")
 	timeout := fs.Duration("timeout", cfg.Timeout, "provider timeout")
+	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return serverOptions{}, false, nil
 		}
 		return serverOptions{}, false, err
+	}
+	if *showVersion {
+		fmt.Fprintf(stdout, "openpe-server %s\n", version.Value())
+		return serverOptions{}, false, nil
 	}
 	listen := listenAddr.ValueOrDefault(cfg.ListenAddr)
 	if listen == "" {
@@ -151,7 +157,7 @@ func bindAndPublish(opts serverOptions, lifecycle serverLifecycle, stderr io.Wri
 			return serverBinding{}, fmt.Errorf("resolve descriptor path: %w", err)
 		}
 	}
-	descriptor := integration.NewLocalServerDescriptor(deriveBaseURL(binding.Address), lifecycle.Token, os.Getpid(), Version)
+	descriptor := integration.NewLocalServerDescriptor(deriveBaseURL(binding.Address), lifecycle.Token, os.Getpid(), version.Value())
 	if err := integration.WriteDescriptor(descriptorPath, descriptor); err != nil {
 		_ = listener.Close()
 		return serverBinding{}, fmt.Errorf("write descriptor %s: %w", descriptorPath, err)
@@ -181,7 +187,7 @@ func buildHTTPServer(opts serverOptions, lifecycle serverLifecycle, service *enh
 		CORS:     server.CORSOptions{AllowedOrigins: opts.Config.Server.CORSOrigins},
 		ErrorLog: stderr,
 		Info: server.ServerInfo{
-			Version:    Version,
+			Version:    version.Value(),
 			StartedAt:  time.Now().UTC(),
 			ListenAddr: boundAddr,
 		},
@@ -222,7 +228,7 @@ func serveUntilSignal(httpServer *http.Server, listener net.Listener, status ser
 	go func() {
 		fmt.Fprintf(stderr,
 			"openpe-server: listening on %s (version=%s; auth=%s; cors=%s; lifecycle=%s)\n",
-			httpServer.Addr, Version, status.Auth, status.CORS, status.Lifecycle)
+			httpServer.Addr, version.Value(), status.Auth, status.CORS, status.Lifecycle)
 		errCh <- httpServer.Serve(listener)
 	}()
 

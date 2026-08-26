@@ -29,22 +29,31 @@ Go **1.25.12 or newer** is required.
 ### 1. Install
 
 ```bash
-git clone https://github.com/AoManoh/openpe.git
-cd openpe
-go install ./cmd/openpe
+go install github.com/AoManoh/openpe/cmd/openpe@latest
 ```
 
 The regular hook workflow only needs `openpe`. Install `openpe-server` only for HTTP automation or the experimental IDE button:
 
 ```bash
-go install ./cmd/openpe-server
+go install github.com/AoManoh/openpe/cmd/openpe-server@latest
 ```
 
-Verify the installation:
+Developers can also clone the repository and build locally (`go install ./cmd/openpe` inside the checkout); such builds report a pseudo-version.
+
+Verify the installation and version:
 
 ```bash
 openpe -h
+openpe --version
 ```
+
+To upgrade to the latest release, run:
+
+```bash
+openpe update
+```
+
+It queries the Go module proxy and reinstalls both binaries (`openpe update --check` only checks). When a new release exists, `pe` enhancement feedback also shows a rate-limited notice; set `OPENPE_UPDATE_NOTICE=false` to disable the notice and the background check.
 
 If your shell reports `openpe: command not found`, add the Go binary directory to `PATH` (use `~/.zshrc` instead when running zsh):
 

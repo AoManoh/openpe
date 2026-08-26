@@ -481,6 +481,38 @@ OPENPE_SPEC_MAX_CHARS=2000
 
 **修改后的影响**：超过上限的规范会让本次增强直接报错（提示实际/上限字符数），openPE 不截断规范内容。调小可防止误把长文档当规范；调大适配确实较长的约束文本。
 
+## 版本与更新
+
+`openpe --version` / `openpe-server --version` 输出当前二进制的真实版本：`go install …@vX.Y.Z` 安装的是发布 tag；本地克隆构建显示伪版本（脏工作区带 `+dirty`）；无版本信息的构建显示 `devel`。
+
+`openpe update` 查询 Go module proxy（遵循你的 `GOPROXY` 设置，国内镜像用户自动走自己的镜像）后直接重装 `openpe` 与 `openpe-server` 两个二进制；`openpe update --check` 只查询提示。远端版本不高于当前时不执行安装（永不降级）；查询或安装失败会明确报错并给出手动命令。
+
+新版本提醒：hook 反馈的披露行会出现一次"发现新版本 …，运行 openpe update 升级"。检查在后台限频进行并写入本地缓存，增强关键路径只读缓存、不发网络请求。版本为 `devel` 时无法比较、提醒静默；伪版本按 semver 参与比较（`v0.0.0-…` 伪版本低于任何发布 tag，克隆构建的开发者会看到提醒，可用开关关闭）。
+
+### `OPENPE_UPDATE_NOTICE`
+
+**控制什么**：是否启用新版本提醒与后台限频检查。
+
+**默认值**：`true`。
+
+```dotenv
+OPENPE_UPDATE_NOTICE=false
+```
+
+**修改后的影响**：`false` 时 hook 反馈不再出现新版提醒，也不再启动后台检查子进程；`openpe update` 命令本身不受影响，仍可随时手动执行。检测到 `CI` 环境变量时后台检查同样跳过。
+
+### `OPENPE_UPDATE_CHECK_INTERVAL`
+
+**控制什么**：后台检查的限频窗口（上次检查结果在窗口内视为新鲜，不再发起网络请求）。
+
+**默认值**：`24h`。
+
+```dotenv
+OPENPE_UPDATE_CHECK_INTERVAL=72h
+```
+
+**修改后的影响**：调大降低检查频率、提醒更迟；调小提醒更及时但后台查询更频繁。提醒本身始终零延迟（只读缓存）。
+
 ## Review、注入、缓存和剪贴板
 
 ### `OPENPE_HOOK_INJECT` 与客户端覆盖
