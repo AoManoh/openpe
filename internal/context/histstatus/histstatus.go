@@ -22,7 +22,9 @@ const (
 	// (e.g. a brand-new session with no prior turns, or no store at all).
 	NoSession
 	// Empty: a session was located but contained no usable user/assistant
-	// turns after filtering.
+	// turns after filtering — or an identified session has no persisted rows
+	// yet (a brand-new Devin session's first prompt fires the hook before
+	// Devin inserts the session row).
 	Empty
 	// Stale: a session was located but its last activity is outside the
 	// freshness window, so it was deliberately not reused (devin).

@@ -8,10 +8,15 @@
 // is not yet written to the DB when the hook fires — so the session is located
 // in two tiers: preferably by an identified session id (Options.SessionID,
 // discovered from the hook's process ancestry by devinsession — exact, so no
-// cwd/recency guard applies), otherwise by the working directory +
-// most-recent-activity heuristic (bounded by a recency window, and refusing
-// with Ambiguous when several sessions in the directory are inside the window
-// — guessing there once injected another conversation's history). The
+// cwd/recency guard applies; an id with no sessions row is a brand-new session
+// whose row Devin has not persisted yet — it inserts lazily when the first
+// turn is saved — and reports Empty instead of falling back, because the
+// fallback once injected the previous same-directory session's history into a
+// new session's first prompt, 2026-08-31 incident), otherwise — only when no
+// id could be discovered — by the working directory + most-recent-activity
+// heuristic (bounded by a recency window, and refusing with Ambiguous when
+// several sessions in the directory are inside the window — guessing there
+// once injected another conversation's history). The
 // conversation is reconstructed by walking the session's node forest up
 // from sessions.main_chain_id via parent_node_id (node_id is monotonic along a
 // chain; created_at is not, so the chain — not a timestamp sort — defines
@@ -71,8 +76,10 @@ type Options struct {
 	// devinsession from the hook's process ancestry): the session is loaded by
 	// id, with no cwd or recency filtering — identity makes both guards
 	// redundant, so resuming yesterday's conversation still gets its history.
-	// When empty, or when the id matches no session row, Retrieve falls back
-	// to the cwd+recency heuristic.
+	// An id that matches no session row is a brand-new session (Devin only
+	// inserts the row when the first turn is saved, after the hook has run)
+	// and reports Empty. Only an empty SessionID uses the cwd+recency
+	// heuristic — an identified id never falls back to guessing.
 	SessionID string
 }
 
@@ -169,15 +176,21 @@ func (c *Collector) retrieveOnce(prompt string, cwd string) (Result, error) {
 	// Identified path first: a session id discovered from the hook's process
 	// ancestry is authoritative — no cwd or recency guard needed (both exist
 	// only because the heuristic cannot be sure it found the right session).
-	// An id that matches no row (e.g. stale lock parse) falls back.
+	// 已识别的 id 查不到行时是全新会话：Devin 惰性建行，sessions 行要到首个
+	// turn 结束保存时才 INSERT，而 UserPromptSubmit hook 先于它运行，因此每个
+	// 新会话的首条 prompt 都会在建行之前查询。这是"尚无历史"，不是回退去猜的
+	// 理由——此处曾回退 cwd+recency 启发式，把同目录上一个会话的历史注入新
+	// 会话的首次增强（2026-08-31 事故）。
 	sess, status := sessionRow{}, histstatus.NoSession
 	if c.sessionID != "" {
 		sess, status, err = locateSessionByID(ctx, db, c.sessionID)
 		if err != nil {
 			return Result{}, err
 		}
-	}
-	if status != histstatus.Found {
+		if status != histstatus.Found {
+			return Result{SessionID: c.sessionID, Status: histstatus.Empty}, nil
+		}
+	} else {
 		sess, status, err = locateSession(ctx, db, cwd, c.recency)
 		if err != nil {
 			return Result{}, err
@@ -231,7 +244,9 @@ type sessionRow struct {
 }
 
 // locateSessionByID loads an identified session directly. A missing row is
-// reported as NoSession so the caller can fall back to the heuristic.
+// reported as NoSession; the caller treats it as a brand-new session whose
+// row is not yet persisted (Empty) — never as license to fall back to the
+// cwd+recency heuristic.
 func locateSessionByID(ctx context.Context, db *sql.DB, sessionID string) (sessionRow, histstatus.Status, error) {
 	const q = `SELECT id, main_chain_id FROM sessions WHERE id = ? AND hidden = 0`
 	var s sessionRow
