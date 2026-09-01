@@ -2,6 +2,22 @@
 
 本文件面向 openPE 的使用者，记录每个发布版本可感知的变化。版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)，日期为 tag 推送日。
 
+## [1.0.1] - 2026-09-01
+
+### 修复
+
+- **Devin：新会话首条增强不再串入同目录旧会话的历史**。Devin CLI 的会话行在首个回合结束后才写入本地 sessions.db，而 hook 在此之前运行；旧版在"已识别会话 id 但查无记录"时错误回退到"同目录最近活跃会话"启发式，可能把旧会话最近的历史注入新会话的首次增强。现在这种情况按"新会话、历史为空"处理，披露行明确显示本次未带前文上下文。resume 已有会话与非 Linux 启发式路径行为不变。
+
+### 升级方法
+
+```bash
+openpe update                                              # 推荐
+go install github.com/AoManoh/openpe/cmd/openpe@v1.0.1     # 或显式指定版本
+go install github.com/AoManoh/openpe/cmd/openpe-server@v1.0.1
+```
+
+升级后用 `openpe --version` 确认输出 `v1.0.1`；`openpe-server` 若在运行需重启。
+
 ## [1.0.0] - 2026-08-26
 
 openPE 的首个发布版本。openPE 是本地优先的 prompt 增强工具链：在 Codex CLI、Claude Code、Devin CLI、Windsurf 的对话框输入 `pe <内容>`，它拦截原始消息、结合会话历史调用你配置的模型生成增强提示词，复制到剪贴板供你检查后发送。
@@ -35,4 +51,5 @@ go install github.com/AoManoh/openpe/cmd/openpe-server@v1.0.0
 
 升级后用 `openpe --version` 确认输出 `v1.0.0`；`openpe-server` 若在运行需重启。
 
+[1.0.1]: https://github.com/AoManoh/openpe/releases/tag/v1.0.1
 [1.0.0]: https://github.com/AoManoh/openpe/releases/tag/v1.0.0
